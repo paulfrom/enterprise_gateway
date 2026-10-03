@@ -1,0 +1,153 @@
+{
+  "task_id": "C-04",
+  "run_id": "20261003-1035-c02c04",
+  "target_level": "L1",
+  "achieved_level": "L1",
+  "result": "pass",
+  "baseline": {
+    "commit": null,
+    "working_tree": "clean baseline, tracked via source manifest",
+    "source_manifest": {
+      "path": "evidence/20261003-1035-c02c04/baseline/source-manifest.txt",
+      "sha256": "9cc2775624a1b99703578652479abfa9aa7a4592a80a199f6e6784a7fec8784c"
+    },
+    "lockfile": {
+      "path": "uv.lock",
+      "sha256": "8b24ed5787e2f19ac6b5171bc5d4a22670527d26461eb1ccf8fc9ab9b42865cd"
+    },
+    "fixtures": {
+      "path": "evidence/20261003-1035-c02c04/C-04/fixtures-manifest.txt",
+      "sha256": "405767528531151396da4a895c4ce956a233d25e5fd352311b23816fec8bf89a"
+    }
+  },
+  "environment": {
+    "os": "Windows 11",
+    "python": "3.11.9",
+    "dependency_install": "uv sync --frozen --offline --no-editable"
+  },
+  "commands": [
+    {
+      "kind": "targeted_tests",
+      "cwd": "D:/project/skills/脱敏网关/enterprise_gateway",
+      "command": "uv run --frozen --offline --no-editable --group dev --cache-dir .uv-cache python -m unittest tests/test_static_exemption.py -v",
+      "exit_code": 0,
+      "output": "evidence/20261003-1035-c02c04/C-04/targeted-tests.txt"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-04/registry.json",
+      "test": "StaticExemptionTests.test_registry_loading_success",
+      "expected": "受信任免检注册表严格解析成功，模版哈希校验匹配",
+      "result": "pass"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-04/exact_match.json",
+      "test": "StaticExemptionTests.test_exact_match_exemption_positive",
+      "expected": "内容与边界完全精确一致时豁免敏感检测，检测器Spy调用次数为0",
+      "result": "pass"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-04/exact_match.json",
+      "test": "StaticExemptionTests.test_exact_match_without_declared_template_id_positive",
+      "expected": "未显式指定模版ID但在当前域内精确匹配时合法识别豁免",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "StaticExemptionTests.test_registry_invalid_digest_rejected",
+      "expected": "清单中模版文本与声明的SHA-256摘要不符时严格拒绝加载",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "StaticExemptionTests.test_registry_duplicate_template_ids_rejected",
+      "expected": "同域存在重复模版ID时严格拒绝加载",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "StaticExemptionTests.test_registry_duplicate_json_keys_rejected",
+      "expected": "清单JSON包含重复Key时严格拒绝加载",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-04/single_char_modified.json",
+      "test": "StaticExemptionTests.test_single_char_modification_fails_exemption",
+      "expected": "仅修改单字或标点时豁免立即失效，强制调用检测器Spy（调用次数为1）",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-04/whitespace_modified.json",
+      "test": "StaticExemptionTests.test_whitespace_modification_fails_exemption",
+      "expected": "尾部空格或空白变动时豁免立即失效，强制调用检测器Spy",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-04/variable_injected.json",
+      "test": "StaticExemptionTests.test_variable_injection_fails_exemption",
+      "expected": "模版插入动态变量时不继承豁免，强制调用检测器Spy",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-04/inseparable_combination.json",
+      "test": "StaticExemptionTests.test_inseparable_combination_fails_exemption",
+      "expected": "不可分离组合（模版+用户输入在同一字段拼接）豁免失效，强制全量检测",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-04/cross_domain.json",
+      "test": "StaticExemptionTests.test_cross_domain_fails_exemption",
+      "expected": "跨保护域引用模版豁免失效，强制调用检测器Spy",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "StaticExemptionTests.test_unregistered_template_id_fails_exemption",
+      "expected": "声明未注册的模版ID豁免失效，强制调用检测器Spy",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "StaticExemptionTests.test_nonstandard_json_constant_rejected",
+      "expected": "清单解析拒绝NaN/Infinity等非标准JSON常量",
+      "result": "pass"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/enterprise_gateway/static_exemption.py",
+      "sha256": "54f3b7b68ee8ca994db47d2255febb52efc300cf1d833db8ae83261e57f8504e"
+    },
+    {
+      "path": "docs/contracts/static-exemption.md",
+      "sha256": "a59c3b1a961d37e7657801531c17df057fa8eb07d6780bafef2e2c8ea8df0e04"
+    },
+    {
+      "path": "tests/test_static_exemption.py",
+      "sha256": "493bf6ff9b438be907fd9b686b9528045e43b2b9f9e41f4ba8fb739698b8070a"
+    }
+  ],
+  "review": {
+    "path": "evidence/20261003-1035-c02c04/review.md",
+    "mode": "independent",
+    "unresolved": []
+  },
+  "limitations": [
+    "免检仅适用于事前安全审批并公开发布的纯静态模版",
+    "动态模版引擎或参数化插值永远不适用于免检契约"
+  ]
+}

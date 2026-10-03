@@ -1,0 +1,62 @@
+{
+  "train": [
+    {
+      "sample_id": "tr-1",
+      "domain": "finance-ops",
+      "source": "synthetic-audit-v1",
+      "text_digest": "c6574d4fc4e1b8d316b2400435ea692707d16700ac30175558f3fe35d281fb94",
+      "labels": [
+        "SECRET"
+      ]
+    },
+    {
+      "sample_id": "tr-2",
+      "domain": "finance-ops",
+      "source": "synthetic-audit-v1",
+      "text_digest": "0c2f3ad86c3a7e4fbefda83657d679e439b7bc7f07e3d7b766625c2a39e8a17f",
+      "labels": [
+        "PHONE"
+      ]
+    }
+  ],
+  "dev": [
+    {
+      "sample_id": "dv-1",
+      "domain": "finance-ops",
+      "source": "synthetic-audit-v1",
+      "text_digest": "f23432ef22ed7da8538ce5f0406caa521c08028752b37b491f6afc920f87297e",
+      "labels": [
+        "SECRET"
+      ]
+    },
+    {
+      "sample_id": "dv-2",
+      "domain": "finance-ops",
+      "source": "synthetic-audit-v1",
+      "text_digest": "7da447c34fd4c0ef583ac1a6592ad45487361253929b8b1605f6f8158395b354",
+      "labels": [
+        "PHONE"
+      ]
+    }
+  ],
+  "test": [
+    {
+      "sample_id": "ts-1",
+      "domain": "finance-ops",
+      "source": "synthetic-audit-v1",
+      "text_digest": "da72722c3d1208f05991a16bd9f26aa018ffd09dba84c4be5fe66e45a9392866",
+      "labels": [
+        "SECRET"
+      ]
+    },
+    {
+      "sample_id": "ts-2",
+      "domain": "finance-ops",
+      "source": "synthetic-audit-v1",
+      "text_digest": "87ed837b04ec1f8274d6215c06dfbf54b9e6df3be3ba92cec7a1c6926159b9fe",
+      "labels": [
+        "PHONE"
+      ]
+    }
+  ]
+}

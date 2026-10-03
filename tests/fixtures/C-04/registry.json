@@ -1,0 +1,19 @@
+{
+  "version": "1.0.0",
+  "templates": [
+    {
+      "template_id": "tpl-finance-sys-prompt-v1",
+      "domain": "finance-ops",
+      "version": "1.0",
+      "text": "您是企业金融助手，请严格基于给定的内部凭证与报表数据提供客观分析，不提供投资建议。",
+      "sha256": "1870c152e369dda0375b5ca12673bf6f56e646910f9f9f67f46cab0fff861c6c"
+    },
+    {
+      "template_id": "tpl-general-disclaimer-v1",
+      "domain": "general-ops",
+      "version": "1.0",
+      "text": "本对话受企业隐私网关保护，所有交互均已记录审计，严禁上传未获准的高敏凭据。",
+      "sha256": "c210b8f72a4424eeca8505b4ec5c95085c08d0a7209356b0f86aa7e19d169ae2"
+    }
+  ]
+}

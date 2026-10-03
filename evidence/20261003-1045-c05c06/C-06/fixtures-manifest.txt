@@ -1,0 +1,4 @@
+c6aab38d24f371f2c138e7bff53e780cba8dcaba48c073123c8d99b1bf23c00c  tests/fixtures/C-06\approved_thresholds.json
+389a2b14f124c04bd2935d00d9458805497f347ee3eb129aaf4d9696badd4474  tests/fixtures/C-06\split_clean.json
+740e8b130ae1d0fa758ab434bada979810a836bf8bdd5754ddb53e7afdf35299  tests/fixtures/C-06\split_contaminated_content.json
+2376e8bab6e7dd2bce94af735964bd4b31c64fa604db695dcbd2beac289dbeb2  tests/fixtures/C-06\split_contaminated_id.json

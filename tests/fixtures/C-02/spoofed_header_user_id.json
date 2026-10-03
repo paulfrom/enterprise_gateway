@@ -1,0 +1,6 @@
+{
+  "headers": {
+    "x-user-id": "admin",
+    "content-type": "application/json"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "subject_id": "user-1001",
+  "tenant_id": "tenant-alpha",
+  "domain": "finance-ops",
+  "roles": [
+    "caller",
+    "business_reviewer"
+  ],
+  "purposes": [
+    "invoice_processing",
+    "statement_audit"
+  ],
+  "source_acl": [
+    "user-1001",
+    "finance-team"
+  ],
+  "auth_source": "mTLS-internal-ca",
+  "authenticated_at": "2026-10-03T10:00:00+00:00",
+  "expires_at": "2026-10-03T11:00:00+00:00"
+}

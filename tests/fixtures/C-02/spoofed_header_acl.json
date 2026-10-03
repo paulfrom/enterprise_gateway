@@ -1,0 +1,6 @@
+{
+  "headers": {
+    "X-Original-ACL": "root-access",
+    "host": "api.internal"
+  }
+}

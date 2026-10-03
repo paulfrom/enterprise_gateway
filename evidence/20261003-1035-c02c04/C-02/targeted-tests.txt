@@ -1,0 +1,22 @@
+
+test_all_forbidden_headers_rejected_case_insensitively (tests.test_identity_contract.IdentityContractTests.test_all_forbidden_headers_rejected_case_insensitively) ... ok
+test_authorize_purpose_positive_and_unauthorized (tests.test_identity_contract.IdentityContractTests.test_authorize_purpose_positive_and_unauthorized) ... ok
+test_authorize_role_positive_and_missing (tests.test_identity_contract.IdentityContractTests.test_authorize_role_positive_and_missing) ... ok
+test_authorize_scope_positive_and_mismatch (tests.test_identity_contract.IdentityContractTests.test_authorize_scope_positive_and_mismatch) ... ok
+test_authorize_source_acl_positive_and_access_denied (tests.test_identity_contract.IdentityContractTests.test_authorize_source_acl_positive_and_access_denied) ... ok
+test_canary_error_message_does_not_echo_secret_values (tests.test_identity_contract.IdentityContractTests.test_canary_error_message_does_not_echo_secret_values) ... ok
+test_expired_identity_rejected (tests.test_identity_contract.IdentityContractTests.test_expired_identity_rejected) ... ok
+test_future_dated_identity_rejected (tests.test_identity_contract.IdentityContractTests.test_future_dated_identity_rejected) ... ok
+test_invalid_identity_fields_raise_controlled_error (tests.test_identity_contract.IdentityContractTests.test_invalid_identity_fields_raise_controlled_error) ... ok
+test_missing_identity_context_fails_closed (tests.test_identity_contract.IdentityContractTests.test_missing_identity_context_fails_closed) ... ok
+test_resolve_trusted_identity_success (tests.test_identity_contract.IdentityContractTests.test_resolve_trusted_identity_success) ... ok
+test_spoofed_header_acl_rejected (tests.test_identity_contract.IdentityContractTests.test_spoofed_header_acl_rejected) ... ok
+test_spoofed_header_domain_rejected (tests.test_identity_contract.IdentityContractTests.test_spoofed_header_domain_rejected) ... ok
+test_spoofed_header_user_id_rejected (tests.test_identity_contract.IdentityContractTests.test_spoofed_header_user_id_rejected) ... ok
+test_to_trusted_actor_bridge (tests.test_identity_contract.IdentityContractTests.test_to_trusted_actor_bridge) ... ok
+test_valid_identity_creation_and_attributes (tests.test_identity_contract.IdentityContractTests.test_valid_identity_creation_and_attributes) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.007s
+
+OK

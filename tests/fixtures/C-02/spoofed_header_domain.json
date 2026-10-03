@@ -1,0 +1,6 @@
+{
+  "headers": {
+    "x-domain": "system-root",
+    "authorization": "Bearer fake"
+  }
+}

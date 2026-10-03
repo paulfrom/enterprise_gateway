@@ -1,0 +1,14 @@
+
+test_clean_splits_pass_audit (tests.test_quality_audit.QualityAuditTests.test_clean_splits_pass_audit) ... ok
+test_contaminated_content_fails_audit (tests.test_quality_audit.QualityAuditTests.test_contaminated_content_fails_audit) ... ok
+test_contaminated_id_fails_audit (tests.test_quality_audit.QualityAuditTests.test_contaminated_id_fails_audit) ... ok
+test_empty_samples_rejected (tests.test_quality_audit.QualityAuditTests.test_empty_samples_rejected) ... ok
+test_evaluator_fails_when_regular_threshold_not_met (tests.test_quality_audit.QualityAuditTests.test_evaluator_fails_when_regular_threshold_not_met) ... ok
+test_evaluator_hard_failure_on_secret_leakage (tests.test_quality_audit.QualityAuditTests.test_evaluator_hard_failure_on_secret_leakage) ... ok
+test_evaluator_passes_when_all_thresholds_met (tests.test_quality_audit.QualityAuditTests.test_evaluator_passes_when_all_thresholds_met) ... ok
+test_evaluator_unapproved_thresholds_status (tests.test_quality_audit.QualityAuditTests.test_evaluator_unapproved_thresholds_status) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.003s
+
+OK

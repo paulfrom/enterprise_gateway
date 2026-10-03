@@ -1,0 +1,110 @@
+{
+  "task_id": "C-05",
+  "run_id": "20261003-1045-c05c06",
+  "target_level": "L1",
+  "achieved_level": "L1",
+  "result": "pass",
+  "baseline": {
+    "commit": null,
+    "working_tree": "clean baseline, tracked via source manifest",
+    "source_manifest": {
+      "path": "evidence/20261003-1045-c05c06/baseline/source-manifest.txt",
+      "sha256": "b2576ee79177055030285d95f688ee1bff3aedd8aaf676d928abc809a9e08a0a"
+    },
+    "lockfile": {
+      "path": "uv.lock",
+      "sha256": "8b24ed5787e2f19ac6b5171bc5d4a22670527d26461eb1ccf8fc9ab9b42865cd"
+    },
+    "fixtures": {
+      "path": "evidence/20261003-1045-c05c06/C-05/fixtures-manifest.txt",
+      "sha256": "be3f1ccb16d38cf6100c93a203c369e95b827ddb972ae48b76e6c026d5440067"
+    }
+  },
+  "environment": {
+    "os": "Windows 11",
+    "python": "3.11.9",
+    "dependency_install": "uv sync --frozen --offline --no-editable"
+  },
+  "commands": [
+    {
+      "kind": "targeted_tests",
+      "cwd": "D:/project/skills/脱敏网关/enterprise_gateway",
+      "command": "uv run --frozen --offline --no-editable --group dev --cache-dir .uv-cache python -m unittest tests/test_version_manifest.py -v",
+      "exit_code": 0,
+      "output": "evidence/20261003-1045-c05c06/C-05/targeted-tests.txt"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-05/valid_manifest_v1.json",
+      "test": "VersionManifestTests.test_manifest_creation_and_integrity",
+      "expected": "合法的配置/政策包Manifest成功加载，根哈希package_hash确定性计算并校验通过",
+      "result": "pass"
+    },
+    {
+      "kind": "positive",
+      "fixture": "None",
+      "test": "VersionManifestTests.test_request_version_pinning_in_flight",
+      "expected": "单请求生命周期内包哈希恒定不变；后台蓝绿切换后，在途请求句柄仍保持原版本，新请求绑定新版本",
+      "result": "pass"
+    },
+    {
+      "kind": "positive",
+      "fixture": "None",
+      "test": "VersionManifestTests.test_build_manifest_helper",
+      "expected": "辅助构建工具成功生成严格符合契约的PackageManifest与组件摘要",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "VersionManifestTests.test_manifest_hash_tampering_rejected_by_validator",
+      "expected": "包根哈希被篡改时，Pydantic模型校验器强制拒绝通过",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-05/corrupted_tampered.json",
+      "test": "VersionManifestTests.test_corrupted_payload_fails_switch_and_preserves_active",
+      "expected": "组件内容被篡改时，版本切换被强制拒绝（CORRUPTED_PACKAGE），当前激活版本保持不变",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "VersionManifestTests.test_missing_component_payload_fails_closed",
+      "expected": "缺少必要组件负载时强制拒绝加载",
+      "result": "pass"
+    },
+    {
+      "kind": "negative",
+      "fixture": "None",
+      "test": "VersionManifestTests.test_consistent_hash_assertion_enforced",
+      "expected": "请求句柄断言包哈希一致性，混用不同版本哈希强制拒绝（VERSION_MISMATCH）",
+      "result": "pass"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/enterprise_gateway/manifest.py",
+      "sha256": "1531d20b2b64f45679b40a6c58b5429cf3710d664361a375cbd831fa8ac1f7d5"
+    },
+    {
+      "path": "docs/contracts/version-manifest.md",
+      "sha256": "7e2432fdd59aa72b929be11d170f85b94260ec1a779886a69203ca1e67fe53f4"
+    },
+    {
+      "path": "tests/test_version_manifest.py",
+      "sha256": "60d5fdb7d6079f31e4966fc8e4159a5bc96ae12f0c779b205642179a66b97dad"
+    }
+  ],
+  "review": {
+    "path": "evidence/20261003-1045-c05c06/review.md",
+    "mode": "independent",
+    "unresolved": []
+  },
+  "limitations": [
+    "包Manifest管理本地配置与策略版本快照，生产发布仍须结合真实蓝绿部署与只读挂载"
+  ]
+}

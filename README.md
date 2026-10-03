@@ -25,7 +25,12 @@
 - FastAPI服务：存活检查、就绪检查及安全拒绝入口；错误不包含请求正文、凭据或任意URL路径，请求校验失败不返回提交内容。
 - 严格本地配置契约：拒绝未知字段和重复JSON key，不能通过配置开启生产能力。
 - 分级外发政策契约：仅接受受信配置/上下文来源的政策输入，严格解析（未知字段、错误类型、重复JSON key、非标准JSON常量、过深嵌套均拒绝）；高敏、不可外发、未知或缺失分类拒绝外发资格，客户端自称获准不构成政策来源。
+- 可信身份与保护域绑定契约：不可变受信身份上下文，强绑定租户、保护域、角色与原始ACL；严格拦截任意客户端伪造身份/域请求头，越权/跨域强阻断。
 - 两协议候选请求契约：DeepSeek Chat Completions与Claude Messages的普通文本请求逐字段严格解析；每个支持字段及嵌套路径明确约束，未声明字段、错误类型、重复key、非法JSON整请求拒绝；工具、流式、图片/文件、思考块、身份元数据等未实现能力明确拒绝；所有消息文本均视为待检测业务内容，无角色免检。字段级处理规则见docs/contracts/。
+- 精确静态内容免检契约：事前审批的静态模版精确内容与边界双重100%匹配免检；单字篡改、标点差异、动态变量混入及不可分离组合强制全量检测。
+- 完整版本Manifest与请求版本生命周期固定：请求生命周期内绑定恒定包哈希；坏包原子拒载并回滚，在途请求与热更新安全隔离。
+- 独立质量口径与划分审计契约：双维度测试集无交集审计，零秘密泄漏硬门禁一票否决，3/n单侧置信区间上界约束，未获准门槛显式声明。
+- 网关入口综合验证与出口错误净化：综合验证屏障统一前置门禁；上游4xx/5xx错误正文、内部堆栈与凭据100%丢弃净化，保真透传状态码与Retry-After头。
 - 请求内HMAC精确原文映射、碰撞拒绝、保留令牌字面量拒绝与生命周期清理。
 - Span并集保护覆盖，秘密Span直接拒绝；数据分级及必需检测结果的前置契约。
 - 纯内存知识候选：保留租户、保护域、来源版本、用途、ACL和期限；支持来源去重、不同角色双人审批、发布读取及到期/撤回tombstone。
@@ -91,7 +96,13 @@ uv run --frozen --no-editable --cache-dir .uv-cache python -m uvicorn enterprise
 | `src/enterprise_gateway/errors.py` | 受控错误类型与错误码注册表 |
 | `src/enterprise_gateway/egress.py` | 数据分级与外发授权前置契约 |
 | `src/enterprise_gateway/policy.py` | 受信来源的分级外发政策严格输入契约 |
+| `src/enterprise_gateway/identity.py` | 可信身份与保护域/原始ACL绑定契约 |
 | `src/enterprise_gateway/protocols.py` | 两协议普通文本请求的逐字段候选契约 |
+| `src/enterprise_gateway/static_exemption.py` | 精确静态内容免检清单与边界评估契约 |
+| `src/enterprise_gateway/manifest.py` | 包Manifest与请求版本生命周期固定 |
+| `src/enterprise_gateway/quality_audit.py` | 独立质量口径、划分审计与零秘密泄漏契约 |
+| `src/enterprise_gateway/ingress.py` | 入口综合验证屏障（整合政策、协议与免检） |
+| `src/enterprise_gateway/error_sanitizer.py` | 上游错误脱敏与安全映射 |
 | `src/enterprise_gateway/mapping.py` | 请求内精确映射与令牌生命周期 |
 | `src/enterprise_gateway/spans.py` | Span并集保护与精确替换 |
 | `src/enterprise_gateway/knowledge.py` | 纯内存知识模型与状态约束 |

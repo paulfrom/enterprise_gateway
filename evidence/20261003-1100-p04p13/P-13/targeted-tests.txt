@@ -1,0 +1,9 @@
+
+test_sanitize_429_preserves_status_and_retry_after (tests.test_error_sanitizer.ErrorSanitizerTests.test_sanitize_429_preserves_status_and_retry_after) ... ok
+test_sanitize_500_purges_sensitive_ip_and_credentials (tests.test_error_sanitizer.ErrorSanitizerTests.test_sanitize_500_purges_sensitive_ip_and_credentials) ... ok
+test_sanitize_unexpected_status_defaults_to_502 (tests.test_error_sanitizer.ErrorSanitizerTests.test_sanitize_unexpected_status_defaults_to_502) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+OK

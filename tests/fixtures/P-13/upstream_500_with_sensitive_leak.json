@@ -1,0 +1,8 @@
+{
+  "status": 500,
+  "headers": {
+    "server": "nginx/internal",
+    "content-type": "text/html"
+  },
+  "raw_body": "<html>Internal Server Error at 10.240.12.3: Database connect failed for user root password secret123</html>"
+}

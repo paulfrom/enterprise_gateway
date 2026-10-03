@@ -1,0 +1,8 @@
+{
+  "status": 429,
+  "headers": {
+    "retry-after": "30",
+    "x-upstream-trace": "trace-12345"
+  },
+  "raw_body": "{\"error\": {\"message\": \"Rate limit exceeded. Token: sk-upstream-secret-key-999\"}}"
+}

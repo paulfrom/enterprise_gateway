@@ -1,0 +1,3 @@
+78bac2f0c293c7ae6a6f3729bace2883c10179fdb0742d41796b0299bfb7d82b  tests/fixtures/C-05\corrupted_tampered.json
+337213abc3a2f41e2af9704109ea24b5b53777f57c914c486a8113b96f7d5335  tests/fixtures/C-05\valid_manifest_v1.json
+039f689f4a2bca4282d8be50cfc850423715663fd3ab0cdbe64dae75e20f6890  tests/fixtures/C-05\valid_manifest_v2.json
