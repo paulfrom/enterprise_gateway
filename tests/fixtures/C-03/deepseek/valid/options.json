@@ -1,0 +1,10 @@
+{
+  "model": "deepseek-v4-pro",
+  "messages": [
+    {"role": "user", "content": "把会议纪要整理成JSON。"}
+  ],
+  "temperature": 0.5,
+  "top_p": 0.9,
+  "stop": ["\n\n结论", "END"],
+  "response_format": {"type": "json_object"}
+}

@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-02",
+  "python": "3.11.9",
+  "documentation_files_checked": 15,
+  "broken_links": [],
+  "wbs_tasks": 76,
+  "dependencies": "acyclic",
+  "task_status": {
+    "L0通过": 5,
+    "计划": 61,
+    "生产阻塞": 10
+  },
+  "unit_tests": {
+    "passed": 38,
+    "report": "unittest.txt"
+  },
+  "http_report": "http-smoke.json",
+  "docker": "not installed; container build and run not verified",
+  "production": "not admitted",
+  "sha256": {
+    "src/enterprise_gateway/__init__.py": "f7125e8f77bb3eebd51a50ed781829efdde588dc461b24b6650b33f15f82aa96",
+    "src/enterprise_gateway/app.py": "8e10e01a4a5eb6b43a4711da582e1106007af9c0143c70596a75d6e453cf4fa7",
+    "src/enterprise_gateway/config.py": "bcbb48077b8d47cb28c62b0181b432431dc8b44f1aa644e1765b6b545f8b7bea",
+    "src/enterprise_gateway/core.py": "125924d70286c3839e06e2294edabaf7f21bbc445f8e2d978b18d72c9151d121",
+    "src/enterprise_gateway/knowledge.py": "f724050fb707ed2cd657bf5f007490c2051671251f347b6e1518298efb21e834",
+    "tests/test_app.py": "bc02915530cf03d6bad62dd3a80100e0a52ad12e0e7540f6e8ba321f8bd9c4dd",
+    "tests/test_core.py": "048b6a783fc1ea13308e956a4108d14a41f960a3dcab66e0c358fc5fa45d697f",
+    "tests/test_knowledge.py": "8611d90b0ca653b652feb2339a4e1e22522ff5e2bd4d0d49463a49d0af180ca5",
+    "uv.lock": "8b24ed5787e2f19ac6b5171bc5d4a22670527d26461eb1ccf8fc9ab9b42865cd",
+    "pyproject.toml": "6229f949bdf648fd414855acadf84066e69a95138773c8826273ab05f151faec"
+  },
+  "design_sha256": {
+    "README.md": "0c06fdc6e9c648346c87d17a158e19c95828cc3f0eba214c0e6374d11708e970",
+    "CONTEXT.md": "7941d50fcabfd900c0ddcd15d6111c33f2bc60fc2694d2a3a8b3626c79e888b8",
+    "DESIGN.md": "0b6aef99c1ff283f9cf258ac82982c9efdcbde793ec05af3e48fe7db84fb3f9b",
+    "实施方案/00-歧义与待确认决策.md": "4cfedad2c9a30a2d54d3a88f2dcc6614260326d2e2a6994e08d9022bed94b1bf",
+    "实施方案/01-总体实施方案.md": "e9f847aa8e0813dd462673e64654613ec816b16b3e7f8db27e446fa463685c7a",
+    "实施方案/02-任务分解-WBS.md": "28d5403b89012a68772327d09d17a322507e6bfb2c228488e80a918f3f5245ec",
+    "实施方案/03-验证方案.md": "e63ffea35af83232969324283e300465cb929289aff3643dd3593c01a9d9ba95",
+    "实施方案/04-部署方案.md": "86de7433c8882159c06a0b9d836584442916762d0aab9b24d72371b51e5d3e9a",
+    "实施方案/05-本地无NewAPI验证方案.md": "c975855e81e8f1943f8a5d17b562445c045ae95fa0b16757e3e624428c4cf8a0",
+    "实施方案/06-设计评审与修订结论.md": "3a78690af1c418ca6b2f69a875caf4afada396677407a432ccbc827f78ed6325",
+    "实施方案/README.md": "13e06579afe4055948252025216b414c3f658d00c7a97e48d3e9c1eeb3ffecce"
+  }
+}

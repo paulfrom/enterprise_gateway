@@ -1,0 +1,26 @@
+test_approved_category_reaches_eligibility_and_egress (test_policy_contract.ClassificationMatrixTests.test_approved_category_reaches_eligibility_and_egress) ... ok
+test_labels_reuse_egress_classification (test_policy_contract.ClassificationMatrixTests.test_labels_reuse_egress_classification) ... ok
+test_local_only_label_rejected_before_eligibility (test_policy_contract.ClassificationMatrixTests.test_local_only_label_rejected_before_eligibility) ... ok
+test_missing_category_rejected (test_policy_contract.ClassificationMatrixTests.test_missing_category_rejected) ... ok
+test_secret_and_local_only_labels_stay_distinct_in_matrix (test_policy_contract.ClassificationMatrixTests.test_secret_and_local_only_labels_stay_distinct_in_matrix) ... ok
+test_secret_label_rejected_before_eligibility (test_policy_contract.ClassificationMatrixTests.test_secret_label_rejected_before_eligibility) ... ok
+test_unknown_category_rejected (test_policy_contract.ClassificationMatrixTests.test_unknown_category_rejected) ... ok
+test_approved_with_failed_or_timed_out_detector_still_blocked (test_policy_contract.EgressCombinationTests.test_approved_with_failed_or_timed_out_detector_still_blocked) ... ok
+test_approved_with_missing_detector_still_blocked (test_policy_contract.EgressCombinationTests.test_approved_with_missing_detector_still_blocked) ... ok
+test_approved_with_unknown_detector_still_blocked (test_policy_contract.EgressCombinationTests.test_approved_with_unknown_detector_still_blocked) ... ok
+test_excessively_nested_document_rejected (test_policy_contract.StrictParsingTests.test_excessively_nested_document_rejected) ... ok
+test_no_string_or_bool_coercion (test_policy_contract.StrictParsingTests.test_no_string_or_bool_coercion) ... ok
+test_non_object_or_malformed_json_rejected (test_policy_contract.StrictParsingTests.test_non_object_or_malformed_json_rejected) ... ok
+test_nonstandard_json_constants_rejected (test_policy_contract.StrictParsingTests.test_nonstandard_json_constants_rejected) ... ok
+test_policy_error_does_not_echo_business_text (test_policy_contract.StrictParsingTests.test_policy_error_does_not_echo_business_text) ... ok
+test_rejecting_fixtures_raise_policy_error (test_policy_contract.StrictParsingTests.test_rejecting_fixtures_raise_policy_error) ... ok
+test_secret_and_local_only_fixture_documents_parse (test_policy_contract.StrictParsingTests.test_secret_and_local_only_fixture_documents_parse) ... ok
+test_trusted_mapping_object_parses (test_policy_contract.StrictParsingTests.test_trusted_mapping_object_parses) ... ok
+test_valid_approved_document_parses (test_policy_contract.StrictParsingTests.test_valid_approved_document_parses) ... ok
+test_request_shaped_object_is_not_a_policy_source (test_policy_contract.TrustedSourceBoundaryTests.test_request_shaped_object_is_not_a_policy_source) ... ok
+test_trusted_mapping_flows_through_pipeline (test_policy_contract.TrustedSourceBoundaryTests.test_trusted_mapping_flows_through_pipeline) ... ok
+
+----------------------------------------------------------------------
+Ran 21 tests in 0.011s
+
+OK

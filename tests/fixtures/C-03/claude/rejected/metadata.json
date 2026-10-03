@@ -1,0 +1,6 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "messages": [{"role": "user", "content": "你好"}],
+  "metadata": {"user_id": "employee-12345"}
+}

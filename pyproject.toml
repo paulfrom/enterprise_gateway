@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "enterprise-privacy-gateway"
+version = "0.1.0"
+description = "Fail-closed enterprise privacy and knowledge contracts"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "pydantic>=2.11,<3",
+  "uvicorn>=0.35,<1",
+]
+
+[dependency-groups]
+dev = ["httpx>=0.28,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/enterprise_gateway"]
+
+

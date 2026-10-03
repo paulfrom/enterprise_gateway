@@ -1,0 +1,5 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 0,
+  "messages": [{"role": "user", "content": "max_tokens 太小"}]
+}

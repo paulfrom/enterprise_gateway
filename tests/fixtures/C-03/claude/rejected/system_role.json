@@ -1,0 +1,6 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "system": "系统提示",
+  "messages": [{"role": "system", "content": "Claude 协议没有 system 角色"}]
+}

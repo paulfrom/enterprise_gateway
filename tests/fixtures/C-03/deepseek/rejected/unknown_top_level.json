@@ -1,0 +1,5 @@
+{
+  "model": "deepseek-flash",
+  "messages": [{"role": "user", "content": "你好"}],
+  "undeclared_field": "CNRY-未知顶层字段-001"
+}

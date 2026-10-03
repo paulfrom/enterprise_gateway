@@ -1,0 +1,603 @@
+{
+  "task_id": "C-03",
+  "run_id": "20261003-0855-c01c03",
+  "target_level": "L1",
+  "achieved_level": "L1",
+  "result": "pass",
+  "baseline": {
+    "commit": null,
+    "working_tree": "git 状态受 safe.directory 限制不可读（同任务卡记录）；基线以文件哈希标识",
+    "source_manifest": {
+      "path": "evidence/20261003-0855-c01c03/baseline/source-manifest.txt",
+      "sha256": "0482801e41dfe13490d797b8e21d8ec58e7814bd906b6a251f8580e545f334eb"
+    },
+    "lockfile": {
+      "path": "uv.lock",
+      "sha256": "8b24ed5787e2f19ac6b5171bc5d4a22670527d26461eb1ccf8fc9ab9b42865cd"
+    },
+    "installed_package": {
+      "path": null,
+      "sha256": null,
+      "note": "本批无安装步骤；按并行 worker 约束直接从源码树运行（PYTHONPATH=src），未重建 venv/未重打 wheel"
+    },
+    "fixtures": {
+      "path": "evidence/20261003-0855-c01c03/C-03/fixtures-manifest.txt",
+      "sha256": "04f3eb38cf7dafd3c1b1aa43a564c1f4cbf04ea4ac775107655ca9a80ef5498a"
+    }
+  },
+  "environment": {
+    "os": "Windows（Git Bash 执行，bash 于 D:\\devtools\\Git\\bin\\bash.exe）",
+    "python": "3.11.9 (MSC v.1938 64 bit AMD64)",
+    "dependency_install": "无新增依赖；pydantic 2.13.5 来自既有 .venv（uv.lock 锁定）"
+  },
+  "commands": [
+    {
+      "kind": "targeted_tests_initial",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests -p \"test_protocol_contracts.py\" -v",
+      "started_at": "2026-10-03T01:19:33Z",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-03/test-run-initial.txt",
+      "note": "初版交付运行（49 项），评审修正前的历史证据"
+    },
+    {
+      "kind": "full_discovery_selfcheck_initial",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests",
+      "started_at": "2026-10-03T01:19:43Z",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-03/full-discovery-initial.txt",
+      "note": "初版交付自检（108 项，含并行 C-01 worker 测试），评审修正前的历史证据"
+    },
+    {
+      "kind": "targeted_tests_review_fix",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests -p \"test_protocol_contracts.py\" -v",
+      "started_at": "2026-10-03T01:43:23Z",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-03/test-run.txt",
+      "note": "评审 5 项修正后运行（59 项全部通过）"
+    },
+    {
+      "kind": "full_discovery_selfcheck_review_fix",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests",
+      "started_at": "2026-10-03T01:43:34Z",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-03/full-discovery-run.txt",
+      "note": "评审修正后全量自检（120 项全部通过，含并行 C-01 worker 测试）"
+    },
+    {
+      "kind": "regression",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": ".\\scripts\\check.ps1",
+      "started_at": null,
+      "exit_code": null,
+      "output": null,
+      "note": "not_run：脚本离线重建 venv/安装 wheel，与并行 C-01 worker 冲突；由主Agent统一执行全量回归"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/claude/valid/minimal.json（结构断言：所有 role 的 content 同为待检测 str 字段）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_all_message_content_is_business_text_regardless_of_role",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联 DeepSeek 载荷经 Claude 解析入口",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_deepseek_chat_payload_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/document_block.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_document_block_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联样本（messages[0] 内重复 key）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_duplicate_nested_key_rejected",
+      "expected": "拒绝且 reason=DUPLICATE_JSON_KEY",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/duplicate_key.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_duplicate_top_level_key_rejected",
+      "expected": "拒绝且 reason=DUPLICATE_JSON_KEY",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/empty_content_blocks.json（content 空块数组）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_empty_content_block_array_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/empty_messages.json（messages 空数组）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_empty_messages_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联 canary 样本（content 与 metadata 均含 canary；断言消息/repr/format_exc 无 canary 且 __cause__/__context__ 断链）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_error_message_does_not_echo_business_text",
+      "expected": "拒绝且 ContractError 消息/repr/format_exc 不含 canary 正文，__cause__/__context__ 均不引用含 input 的 ValidationError",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/image_block.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_image_block_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/malformed.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_malformed_json_rejected",
+      "expected": "拒绝且 reason=MALFORMED_JSON",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/metadata.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_metadata_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/claude/valid/minimal.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_minimal_text_conversation_parses",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/missing_max_tokens.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_missing_max_tokens_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/missing_model.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_missing_model_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/nonstandard_constant.json（top_k: Infinity）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_nonstandard_json_constant_rejected",
+      "expected": "拒绝且 reason=MALFORMED_JSON",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/response_format.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_response_format_rejected_as_deepseek_specific_field",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/stream.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_stream_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/system_array.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_system_as_block_array_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/system_role.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_system_role_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/claude/valid/full_options.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_text_block_array_and_sampling_options_parse",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/block_extra_field.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_text_block_extra_field_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/thinking.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_thinking_config_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/tool_blocks.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_tool_use_and_tool_result_blocks_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/tools.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_tools_and_tool_choice_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive+negative",
+      "fixture": "内联合成样本（白名单全集 + model_not_in_whitelist.json）",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_whitelisted_models_parse_and_unlisted_model_rejected",
+      "expected": "白名单内模型逐个解析成功；未列模型整请求拒绝（ContractError）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/claude/rejected/max_tokens_zero.json",
+      "test": "test_protocol_contracts.ClaudeMessagesTests.test_zero_max_tokens_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/deepseek/valid/minimal.json（结构断言：所有 role 的 content 同为待检测 str 字段）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_all_message_content_is_business_text_regardless_of_role",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/content_array.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_block_content_form_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/deepseek/valid/minimal.json (utf-8 bytes)",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_bytes_body_parses",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联 Claude 最小载荷经 DeepSeek 解析入口",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_claude_messages_payload_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联样本（2000 层嵌套数组；RecursionError 归约为受控 MALFORMED_JSON）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_deeply_nested_json_rejected_as_controlled_error",
+      "expected": "RecursionError 归约为 ContractError(MALFORMED_JSON)，错误类型受控且异常链断链",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/frequency_penalty.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_deprecated_penalty_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联样本（messages[0] 内重复 key）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_duplicate_nested_key_rejected",
+      "expected": "拒绝且 reason=DUPLICATE_JSON_KEY",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/duplicate_key.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_duplicate_top_level_key_rejected",
+      "expected": "拒绝且 reason=DUPLICATE_JSON_KEY",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/empty_messages.json（messages 空数组）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_empty_messages_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联 canary 样本（content 与未知字段均含 canary；断言消息/repr/format_exc 无 canary 且 __cause__/__context__ 断链）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_error_message_does_not_echo_business_text",
+      "expected": "拒绝且 ContractError 消息/repr/format_exc 不含 canary 正文，__cause__/__context__ 均不引用含 input 的 ValidationError",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联非法 UTF-8 字节",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_invalid_utf8_rejected",
+      "expected": "拒绝且 reason=INVALID_UTF8",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/logprobs.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_logprobs_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/malformed.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_malformed_json_rejected",
+      "expected": "拒绝且 reason=MALFORMED_JSON",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/max_tokens.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_max_tokens_rejected_as_claude_specific_field",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/deepseek/valid/minimal.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_minimal_text_conversation_parses",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/missing_model.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_missing_model_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/top_level_array.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_non_object_top_level_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/model_wrong_type.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_non_string_model_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/nonstandard_constant.json（temperature: NaN）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_nonstandard_json_constant_rejected",
+      "expected": "拒绝且 reason=MALFORMED_JSON",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/response_format_extra_key.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_response_format_unknown_nested_key_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/response_format_bad_type.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_response_format_unknown_type_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-03/deepseek/valid/options.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_sampling_stop_and_response_format_options_parse",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/stop_too_many.json（17 个停止序列，超官方上限 16）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_stop_sequence_limit_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/stream.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_stream_and_stream_options_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/temperature_out_of_range.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_temperature_above_official_cap_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "内联样本（temperature: 1 整数形式；固定 pydantic v2 strict float 接受 JSON number 整数的本地快照行为）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_temperature_integer_form_accepted",
+      "expected": "严格解析成功，形成带 protocol 标识、model、逐消息 role/content 的字段结果",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/thinking.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_thinking_and_reasoning_fields_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/role_tool.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_tool_role_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/tools.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_tools_and_tool_choice_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/unknown_message_field.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_unknown_message_field_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/unknown_top_level.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_unknown_top_level_field_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-03/deepseek/rejected/user_id.json",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_user_id_rejected",
+      "expected": "整请求拒绝，抛 ContractError（不回显正文）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    },
+    {
+      "kind": "positive+negative",
+      "fixture": "内联合成样本（白名单全集 + model_not_in_whitelist.json）",
+      "test": "test_protocol_contracts.DeepSeekChatCompletionTests.test_whitelisted_models_parse_and_unlisted_model_rejected",
+      "expected": "白名单内模型逐个解析成功；未列模型整请求拒绝（ContractError）",
+      "result": "pass",
+      "evidence": "evidence/20261003-0855-c01c03/C-03/test-run.txt"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/enterprise_gateway/protocols.py",
+      "sha256": "68502f87f7e5a08e9ed291d9d9621607f3c31ffc6f53bc8ff43ad708daa53663"
+    },
+    {
+      "path": "tests/test_protocol_contracts.py",
+      "sha256": "bc7b08c480a8c8a8d7a13dda7618ba3178ec0b8a06bda9bfaac3ea95a01969e7"
+    },
+    {
+      "path": "docs/contracts/protocol-field-policy.md",
+      "sha256": "055e70dbc62dbe3b90433777fb8b19fdb6f82b50c7a74588153856be4b45feb1"
+    },
+    {
+      "path": "tests/fixtures/C-03/",
+      "sha256": "见 evidence/20261003-0855-c01c03/C-03/fixtures-manifest.txt（逐文件，47 项）"
+    },
+    {
+      "path": "evidence/20261003-0855-c01c03/C-03/test-run.txt",
+      "sha256": "c500456fcd714a4244becacea018f7bbe8b32eb1b7ee1ba318d5d63bd13b0313"
+    },
+    {
+      "path": "evidence/20261003-0855-c01c03/C-03/full-discovery-run.txt",
+      "sha256": "47d731a76ee88cc089f34b28bf1cb3d1bd49bc2a8ad724c650d8358e7ade6e26"
+    },
+    {
+      "path": "evidence/20261003-0855-c01c03/C-03/test-run-initial.txt",
+      "sha256": "4aad20a825c276bc066b2de8c26cdf3db98264744112055151e7715f23281027"
+    },
+    {
+      "path": "evidence/20261003-0855-c01c03/C-03/full-discovery-initial.txt",
+      "sha256": "598d14b77479a3f904a3dd2c19faf0ab3660c78788156c7bac8384ea94b2612a"
+    }
+  ],
+  "review": {
+    "path": "evidence/20261003-0855-c01c03/review.md",
+    "mode": "independent",
+    "unresolved": [
+      "P2 领域规则四项待设计/业务决策（review.md 第二节），不阻塞 L1"
+    ]
+  },
+  "limitations": [
+    "候选契约仅证明两协议选定纯文本子集的严格解析/拒绝行为（L1），不等于真实 New API/WorkBuddy/供应商组合兼容（留 R 项）",
+    "模型白名单为本地契约常量，不构成官方型号兼容声明；官方页面无稳定协议版本号，快照以 2026-10-03 摘录固定",
+    "字段表中 temperature/top_p 等个别取值下界为本地快照约束（官方摘录未列明），已在 docs/contracts/protocol-field-policy.md 逐条标注",
+    "JSON number 整数形式进入 float 字段被接受为 pydantic v2 strict float 的实际行为（本地快照行为，已用 test_temperature_integer_form_accepted 固定）",
+    "scripts/check.ps1 全量回归未由本 worker 执行（并行 worker 约束），由主Agent统一验收",
+    "静态免检边界（C-04）未实现；本契约中所有 content 均为待检测业务文本"
+  ]
+}

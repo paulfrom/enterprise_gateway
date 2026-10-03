@@ -1,0 +1,11 @@
+7995222f9cdbceffb63d7dc770ec96ba1044320727100a859fed818cbe0e94d4 *tests/fixtures/C-01/duplicate-category.json
+ef259baa5c429bbe1c17826c62329ea66ce6d73b2464dd59563cb322a6e80109 *tests/fixtures/C-01/duplicate-key.json
+b588d9fc383c556306f77f6e057fccc16640359cd4f25045dfc2bc73e03ff5c8 *tests/fixtures/C-01/empty-scope.json
+be6f66df7d9a56363c5560b65051fea7be6ec5aecd375ebd46c9605046e15b93 *tests/fixtures/C-01/label-local-only.json
+a55407ab1919519ca805c1485bb885915256bf300a52a62e55d69b580b3a0820 *tests/fixtures/C-01/label-secret.json
+b0f5d34256626192e7a622daa8472447de5492256de9b3d604eca788d12c69a3 *tests/fixtures/C-01/matrix.json
+77ebce53f9684c16b8d73fcae003a45f401249e228d0e3259526ad8140c28218 *tests/fixtures/C-01/missing-version.json
+60cff1755108dd9062f079c26a1dcdf0810194978c41bf14d66f482d324c6e86 *tests/fixtures/C-01/unknown-field.json
+3f7e5bf2ff7b5f3962940653ac4e085a03c1a211ffdd1d2a2b7dd099576a8f33 *tests/fixtures/C-01/unknown-label.json
+74e5e5a8bc0d2f82b02fe488dc485d3f98025d90621974b6f3c69fdd4c3de9ca *tests/fixtures/C-01/valid-approved.json
+49f856052f254ca70b36d44efd08bc9b1c87a569fddb696b45811dc56d247203 *tests/fixtures/C-01/wrong-type-scope.json

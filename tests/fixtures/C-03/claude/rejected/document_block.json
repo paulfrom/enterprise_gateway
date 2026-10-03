@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "aGVsbG8="}}
+      ]
+    }
+  ]
+}

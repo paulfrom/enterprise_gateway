@@ -1,0 +1,7 @@
+{
+  "profile": "local-review",
+  "external_egress": false,
+  "real_knowledge_capture": false,
+  "persistent_audit": false
+}
+

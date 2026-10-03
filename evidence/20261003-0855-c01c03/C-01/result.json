@@ -1,0 +1,351 @@
+{
+  "task_id": "C-01",
+  "run_id": "20261003-0855-c01c03",
+  "target_level": "L1",
+  "achieved_level": "L1",
+  "result": "pass",
+  "baseline": {
+    "commit": null,
+    "working_tree": "Git 无 commit（本地仓库 main 无提交）；受 safe.directory 限制无法读取 git 状态（未改全局配置，与批次任务卡记录一致）。本 worker 仅新增文件：src/enterprise_gateway/policy.py、tests/test_policy_contract.py、tests/fixtures/C-01/*、docs/contracts/egress-policy.md、evidence/20261003-0855-c01c03/C-01/*；未修改基线 source-manifest.txt 清单内任何文件。",
+    "source_manifest": {
+      "path": "evidence/20261003-0855-c01c03/baseline/source-manifest.txt",
+      "sha256": "0482801e41dfe13490d797b8e21d8ec58e7814bd906b6a251f8580e545f334eb"
+    },
+    "lockfile": {
+      "path": "uv.lock",
+      "sha256": "8b24ed5787e2f19ac6b5171bc5d4a22670527d26461eb1ccf8fc9ab9b42865cd"
+    },
+    "installed_package": null,
+    "fixtures": {
+      "path": "evidence/20261003-0855-c01c03/C-01/fixtures-manifest.txt",
+      "sha256": "2426e1ecf4feffeec28d6acffa448db41339d3b75d6f4e386742a8d7466dddf8"
+    },
+    "new_files": [
+      {
+        "path": "src/enterprise_gateway/policy.py",
+        "sha256": "0901917bf0b2cdbefe2a8650b2b91ac8d2fe7be2d61246cc874c8d4901285ebb"
+      },
+      {
+        "path": "tests/test_policy_contract.py",
+        "sha256": "674d2a2f15617eefd90a5535e75ee36eccb717de031abda60b7f2d45ce254906"
+      },
+      {
+        "path": "docs/contracts/egress-policy.md",
+        "sha256": "474a191fc5743314e26d6c3dc35f66a225bf4a9830f8054ce051a11328eeecbc"
+      },
+      {
+        "path": "tests/fixtures/C-01/valid-approved.json",
+        "sha256": "74e5e5a8bc0d2f82b02fe488dc485d3f98025d90621974b6f3c69fdd4c3de9ca"
+      },
+      {
+        "path": "tests/fixtures/C-01/matrix.json",
+        "sha256": "b0f5d34256626192e7a622daa8472447de5492256de9b3d604eca788d12c69a3"
+      },
+      {
+        "path": "tests/fixtures/C-01/label-secret.json",
+        "sha256": "a55407ab1919519ca805c1485bb885915256bf300a52a62e55d69b580b3a0820"
+      },
+      {
+        "path": "tests/fixtures/C-01/label-local-only.json",
+        "sha256": "be6f66df7d9a56363c5560b65051fea7be6ec5aecd375ebd46c9605046e15b93"
+      },
+      {
+        "path": "tests/fixtures/C-01/unknown-label.json",
+        "sha256": "3f7e5bf2ff7b5f3962940653ac4e085a03c1a211ffdd1d2a2b7dd099576a8f33"
+      },
+      {
+        "path": "tests/fixtures/C-01/missing-version.json",
+        "sha256": "77ebce53f9684c16b8d73fcae003a45f401249e228d0e3259526ad8140c28218"
+      },
+      {
+        "path": "tests/fixtures/C-01/wrong-type-scope.json",
+        "sha256": "49f856052f254ca70b36d44efd08bc9b1c87a569fddb696b45811dc56d247203"
+      },
+      {
+        "path": "tests/fixtures/C-01/empty-scope.json",
+        "sha256": "b588d9fc383c556306f77f6e057fccc16640359cd4f25045dfc2bc73e03ff5c8"
+      },
+      {
+        "path": "tests/fixtures/C-01/unknown-field.json",
+        "sha256": "60cff1755108dd9062f079c26a1dcdf0810194978c41bf14d66f482d324c6e86"
+      },
+      {
+        "path": "tests/fixtures/C-01/duplicate-key.json",
+        "sha256": "ef259baa5c429bbe1c17826c62329ea66ce6d73b2464dd59563cb322a6e80109"
+      },
+      {
+        "path": "tests/fixtures/C-01/duplicate-category.json",
+        "sha256": "7995222f9cdbceffb63d7dc770ec96ba1044320727100a859fed818cbe0e94d4"
+      }
+    ]
+  },
+  "environment": {
+    "os": "Windows (MINGW64_NT-10.0-26300)",
+    "python": "3.11.9",
+    "dependency_install": "本批不重建 venv、不运行 scripts/check.ps1（与 C-03 worker 并行，避免 venv 重建冲突）；测试以 PYTHONPATH=src 直跑源码树，不经已安装 wheel。依赖沿用基线已装环境：pydantic 2.13.5、fastapi、httpx（实测 pydantic 2.13.5）；无新增依赖。未运行的服务：全部外部模型渠道（HTTP 入口恒 503，本任务未触碰 app.py）。"
+  },
+  "commands": [
+    {
+      "kind": "targeted_tests",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests -p \"test_policy_contract.py\" -v",
+      "started_at": "2026-10-03T09:19:18+08:00",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-01/targeted-tests.txt"
+    },
+    {
+      "kind": "regression",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests -v",
+      "started_at": "2026-10-03T09:19:20+08:00",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-01/full-discover-tests.txt",
+      "note": "全量 108 项（含既有 40 项与 C-03 worker 在制 test_protocol_contracts）全部通过，无回归。"
+    },
+    {
+      "kind": "targeted_tests",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests -p \"test_policy_contract.py\" -v",
+      "started_at": "2026-10-03T09:42:47+08:00",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-01/targeted-tests.txt",
+      "note": "独立评审 4 项必须修正完成后的复跑：21/21 通过（新增异常断链断言、NaN/Infinity 拒绝、超深嵌套归约）。"
+    },
+    {
+      "kind": "regression",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "PYTHONPATH=src .venv/Scripts/python.exe -m unittest discover -s tests -v",
+      "started_at": "2026-10-03T09:42:49+08:00",
+      "exit_code": 0,
+      "output": "evidence/20261003-0855-c01c03/C-01/full-discover-tests.txt",
+      "note": "修正后全量 120 项全部通过，无回归（C-03 worker 在制测试同步增长）。"
+    },
+    {
+      "kind": "regression",
+      "cwd": "D:\\project\\skills\\脱敏网关\\enterprise_gateway",
+      "command": "powershell -File scripts/check.ps1",
+      "started_at": null,
+      "exit_code": null,
+      "output": null,
+      "not_run_reason": "本批不运行 check.ps1：其会重建 venv，与并行 C-03 worker 冲突；最终全量回归由主 Agent 统一执行。"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-01/valid-approved.json",
+      "test": "StrictParsingTests.test_valid_approved_document_parses",
+      "expected": "受信 JSON 文本严格解析成功，label=approved_external、scope=support-external",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/test_policy_contract.py 内联受信 Mapping",
+      "test": "StrictParsingTests.test_trusted_mapping_object_parses / TrustedSourceBoundaryTests.test_trusted_mapping_flows_through_pipeline",
+      "expected": "受信 Python 对象解析成功并全程通过政策管道",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "tests/fixtures/C-01/matrix.json（customer_faq、product_manual）",
+      "test": "ClassificationMatrixTests.test_approved_category_reaches_eligibility_and_egress",
+      "expected": "解析成功；检测资格判断（authorize_egress spy）被调用 1 次；模拟出站 1；产出 EgressPolicy(classification=APPROVED_EXTERNAL, scope=support-external)",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "positive",
+      "fixture": "src/enterprise_gateway/policy.py CLASSIFICATION_BY_LABEL",
+      "test": "ClassificationMatrixTests.test_labels_reuse_egress_classification",
+      "expected": "secret/local_only→egress.DataClassification.LOCAL_ONLY，approved_external→APPROVED_EXTERNAL，复用 egress 语义",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/label-secret.json",
+      "test": "ClassificationMatrixTests.test_secret_label_rejected_before_eligibility",
+      "expected": "PolicyError 拒绝且资格判断 spy 0、模拟出站 0（高敏标签保留独立测试标签）",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/label-local-only.json",
+      "test": "ClassificationMatrixTests.test_local_only_label_rejected_before_eligibility",
+      "expected": "PolicyError 拒绝且资格判断 spy 0、模拟出站 0",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/matrix.json + 未知类别 ghost_category",
+      "test": "ClassificationMatrixTests.test_unknown_category_rejected",
+      "expected": "PolicyError 拒绝且资格判断 spy 0、模拟出站 0，不自动降级",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "缺失类别（\"\" / \"   \" / None）",
+      "test": "ClassificationMatrixTests.test_missing_category_rejected",
+      "expected": "PolicyError 拒绝且资格判断 spy 0、模拟出站 0",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/unknown-label.json",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error",
+      "expected": "未知分类枚举解析拒绝（PolicyError）",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/missing-version.json",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error",
+      "expected": "缺失必填字段解析拒绝（PolicyError）",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/wrong-type-scope.json 及内联 bool/list 变体",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error / test_no_string_or_bool_coercion",
+      "expected": "错误类型保护域/版本解析拒绝，无字符串或布尔宽松转换",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/empty-scope.json",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error",
+      "expected": "空保护域解析拒绝（PolicyError）",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/unknown-field.json（含 canary CNRY-policy-note-789）",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error / test_policy_error_does_not_echo_business_text",
+      "expected": "未知字段解析拒绝；异常彻底断链：str、__cause__、__context__、traceback.format_exc() 均无 canary 与 ValidationError",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联 JSON 文本（version 取 NaN/Infinity/-Infinity）",
+      "test": "StrictParsingTests.test_nonstandard_json_constants_rejected",
+      "expected": "非标准 JSON 常量解析拒绝（PolicyError），__cause__/__context__ 为 None",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "内联 JSON 文本（1500 层嵌套对象）",
+      "test": "StrictParsingTests.test_excessively_nested_document_rejected",
+      "expected": "解析器 RecursionError 归约为 PolicyError（fail-closed 且错误类型受控），异常链干净",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/duplicate-key.json",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error",
+      "expected": "重复 JSON key 解析拒绝（PolicyError）",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/duplicate-category.json",
+      "test": "StrictParsingTests.test_rejecting_fixtures_raise_policy_error",
+      "expected": "分类矩阵内重复类别（歧义）解析拒绝",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/test_policy_contract.py 内 FakeClientRequest（头与体均自称获准）",
+      "test": "TrustedSourceBoundaryTests.test_request_shaped_object_is_not_a_policy_source",
+      "expected": "请求样对象在 load_policy/resolve_egress_policy/authorize_with_policy 三入口均 TypeError，客户端自称获准不成为政策来源",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/matrix.json + 缺一项检测",
+      "test": "EgressCombinationTests.test_approved_with_missing_detector_still_blocked",
+      "expected": "获准类别到达资格判断后由原有 authorize_egress 拒绝：SafetyError(DETECTION_INCOMPLETE)，模拟出站 0",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/matrix.json + 检测 FAILED/TIMEOUT",
+      "test": "EgressCombinationTests.test_approved_with_failed_or_timed_out_detector_still_blocked",
+      "expected": "SafetyError(DETECTION_FAILED)，模拟出站 0",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "tests/fixtures/C-01/matrix.json + 未知检测器",
+      "test": "EgressCombinationTests.test_approved_with_unknown_detector_still_blocked",
+      "expected": "SafetyError(UNKNOWN_DETECTOR)，模拟出站 0",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    },
+    {
+      "kind": "negative",
+      "fixture": "非对象/非法 JSON 文本",
+      "test": "StrictParsingTests.test_non_object_or_malformed_json_rejected",
+      "expected": "PolicyError 拒绝",
+      "result": "pass",
+      "evidence": "targeted-tests.txt"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/enterprise_gateway/policy.py",
+      "sha256": "0901917bf0b2cdbefe2a8650b2b91ac8d2fe7be2d61246cc874c8d4901285ebb"
+    },
+    {
+      "path": "tests/test_policy_contract.py",
+      "sha256": "674d2a2f15617eefd90a5535e75ee36eccb717de031abda60b7f2d45ce254906"
+    },
+    {
+      "path": "docs/contracts/egress-policy.md",
+      "sha256": "474a191fc5743314e26d6c3dc35f66a225bf4a9830f8054ce051a11328eeecbc"
+    },
+    {
+      "path": "tests/fixtures/C-01/",
+      "sha256": "evidence/20261003-0855-c01c03/C-01/fixtures-manifest.txt"
+    },
+    {
+      "path": "evidence/20261003-0855-c01c03/C-01/targeted-tests.txt",
+      "sha256": "e6fbdbe5b5c55d8878217681f33f526451df743354562228d36fb7144241993d"
+    },
+    {
+      "path": "evidence/20261003-0855-c01c03/C-01/full-discover-tests.txt",
+      "sha256": "51230cbde66d8416a38a5fbbae4596ffe9171acddf4e82e7d060ec79b6004211"
+    }
+  ],
+  "review": {
+    "path": "evidence/20261003-0855-c01c03/review.md",
+    "mode": "independent",
+    "unresolved": [
+      "P2 领域规则四项待设计/业务决策（review.md 第二节），不阻塞 L1"
+    ]
+  },
+  "limitations": [
+    "合成政策矩阵不等于真实企业分类表授权；真实分类来源、IAM/身份适配（C-02）、渠道与生产准入（R 项）未获批准也未实现。",
+    "eligibility spy 与出站计数为测试内合成观察（spy 包装真实 authorize_egress），不是网络证据；本批无真实出站。",
+    "scripts/check.ps1 本批未执行（与 C-03 worker 并行，避免 venv 重建冲突）；全量回归以 PYTHONPATH=src discover -s tests（108 项全绿）自检，最终 check.ps1 回归由主 Agent 统一执行。",
+    "HTTP 模型入口保持恒 503，本任务未触碰 app.py；政策只赋予'进入检测的资格'，检测器本身未实现。",
+    "load_policy 的 Mapping 输入依赖调用方受信；把客户端可控 dict 直接传入属于调用方越权，不在本模块类型边界防护范围内。"
+  ]
+}

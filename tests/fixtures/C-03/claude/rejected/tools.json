@@ -1,0 +1,9 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "messages": [{"role": "user", "content": "查一下天气"}],
+  "tools": [
+    {"name": "get_weather", "description": "查询天气", "input_schema": {"type": "object"}}
+  ],
+  "tool_choice": {"type": "auto"}
+}

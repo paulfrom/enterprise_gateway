@@ -1,0 +1,4 @@
+{
+  "max_tokens": 1024,
+  "messages": [{"role": "user", "content": "缺少 model"}]
+}

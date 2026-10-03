@@ -1,0 +1,4 @@
+{
+  "model": "deepseek-flash",
+  "messages": [{"role": "user", "content": [{"type": "text", "text": "块形式内容"}]}]
+}

@@ -1,0 +1,6 @@
+{
+  "version": "2026-10.synthetic",
+  "rules": [
+    {"category": "internal_memo", "label": "local_only", "scope": "internal-collab"}
+  ]
+}

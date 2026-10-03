@@ -1,0 +1,7 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {"role": "system", "content": "背景"},
+    {"role": "tool", "content": "工具输出文本"}
+  ]
+}

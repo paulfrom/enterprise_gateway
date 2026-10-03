@@ -1,0 +1,11 @@
+{
+  "model": "deepseek-flash",
+  "messages": [{"role": "user", "content": "查一下天气"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {"name": "get_weather", "description": "查询天气", "parameters": {"type": "object"}}
+    }
+  ],
+  "tool_choice": "auto"
+}

@@ -1,0 +1,11 @@
+{
+  "version": "2026-10.synthetic",
+  "rules": [
+    {"category": "customer_faq", "label": "approved_external", "scope": "support-external"},
+    {"category": "product_manual", "label": "approved_external", "scope": "support-external"},
+    {"category": "salary_record", "label": "secret", "scope": "hr-restricted"},
+    {"category": "unreleased_finance", "label": "secret", "scope": "finance-restricted"},
+    {"category": "internal_memo", "label": "local_only", "scope": "internal-collab"},
+    {"category": "meeting_minutes", "label": "local_only", "scope": "internal-collab"}
+  ]
+}

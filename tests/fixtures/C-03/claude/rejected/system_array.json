@@ -1,0 +1,6 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "system": [{"type": "text", "text": "块形式的系统提示"}],
+  "messages": [{"role": "user", "content": "你好"}]
+}

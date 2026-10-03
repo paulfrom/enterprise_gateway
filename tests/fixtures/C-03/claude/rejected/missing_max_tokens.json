@@ -1,0 +1,4 @@
+{
+  "model": "claude-sonnet-5-5",
+  "messages": [{"role": "user", "content": "缺少 max_tokens"}]
+}

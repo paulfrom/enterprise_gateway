@@ -1,0 +1,15 @@
+== GET /healthz ==
+{"status":"alive","profile":"local-review"}
+HTTP 200
+== GET /readyz ==
+{"ready":false,"code":"PRODUCTION_NOT_ADMITTED","missing_gates":["trusted_identity_and_data_policy","admitted_protocol_and_provider","validated_detection_pipeline","durable_audit_and_key_lifecycle","network_egress_and_release_evidence","knowledge_consent_acl_and_retention"]}
+HTTP 503
+== POST /v1/chat/completions (canary body+credential) ==
+HTTP 503
+canary not echoed: OK
+== POST /v1/messages (canary body) ==
+HTTP 503
+canary not echoed: OK
+== unknown route with canary path ==
+{"error":{"code":"UNSUPPORTED_ENDPOINT","message":"该端点或方法未获准。"}}
+HTTP 404

@@ -1,0 +1,6 @@
+{
+  "model": "deepseek-flash",
+  "messages": [{"role": "user", "content": "你好"}],
+  "logprobs": true,
+  "top_logprobs": 5
+}

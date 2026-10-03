@@ -1,0 +1,5 @@
+{
+  "model": "deepseek-flash",
+  "model": "deepseek-v4-pro",
+  "messages": [{"role": "user", "content": "重复键样本"}]
+}

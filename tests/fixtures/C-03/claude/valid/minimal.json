@@ -1,0 +1,9 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "messages": [
+    {"role": "user", "content": "请审查这份供应商合同的违约条款。"},
+    {"role": "assistant", "content": "上一轮审查意见涉及乙公司交付义务。"},
+    {"role": "user", "content": "继续看付款部分。"}
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "model": "claude-unlisted-model",
+  "max_tokens": 1024,
+  "messages": [{"role": "user", "content": "你好"}]
+}

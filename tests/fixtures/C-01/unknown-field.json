@@ -1,0 +1,7 @@
+{
+  "version": "2026-10.synthetic",
+  "undeclared_note": "CNRY-policy-note-789",
+  "rules": [
+    {"category": "customer_faq", "label": "approved_external", "scope": "support-external"}
+  ]
+}

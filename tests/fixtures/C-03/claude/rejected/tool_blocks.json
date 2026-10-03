@@ -1,0 +1,8 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "messages": [
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "晴"}]}
+  ]
+}

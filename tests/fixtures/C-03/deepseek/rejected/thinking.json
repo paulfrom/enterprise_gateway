@@ -1,0 +1,9 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {"role": "user", "content": "你好"},
+    {"role": "assistant", "content": "回答", "reasoning_content": "签名思考内容"}
+  ],
+  "thinking": {"type": "enabled"},
+  "reasoning_effort": "high"
+}

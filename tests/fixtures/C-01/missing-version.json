@@ -1,0 +1,5 @@
+{
+  "rules": [
+    {"category": "customer_faq", "label": "approved_external", "scope": "support-external"}
+  ]
+}

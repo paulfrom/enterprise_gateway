@@ -1,0 +1,6 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 4096,
+  "messages": [{"role": "user", "content": "你好"}],
+  "thinking": {"type": "enabled", "budget_tokens": 2048}
+}

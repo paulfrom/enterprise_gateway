@@ -1,0 +1,5 @@
+{
+  "model": "deepseek-flash",
+  "messages": [{"role": "user", "content": "你好"}],
+  "temperature": 2.5
+}

@@ -1,0 +1,9 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {"role": "system", "content": "你是企业内部的合同审查助手。"},
+    {"role": "user", "content": "请总结这份采购协议的关键条款。"},
+    {"role": "assistant", "content": "这是上一轮的历史回复，涉及供应商甲公司。"},
+    {"role": "user", "content": "继续补充付款条件部分。"}
+  ]
+}
