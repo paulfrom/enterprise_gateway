@@ -1,0 +1,30 @@
+{
+  "manifest": {
+    "manifest_id": "pkg-prod-v1",
+    "version": "1.0.0",
+    "created_at": "2026-10-03T10:00:00Z",
+    "components": {
+      "exemption": {
+        "name": "exemption",
+        "version": "1.0",
+        "sha256": "484e84fd947cd2aff25ebe6c49b4f9a804c8ec74f9928859bc21a7266a6766c5"
+      },
+      "policy": {
+        "name": "policy",
+        "version": "1.0",
+        "sha256": "62027b199d23c7b8253bb04bc4ad164d45515adba6496ef639148d0c32adc74d"
+      },
+      "protocols": {
+        "name": "protocols",
+        "version": "1.0",
+        "sha256": "da4230484316bf0d6a45303ce0e0e26cd077bb1dcb0fdbe2a1fb2b4c1d150ca4"
+      }
+    },
+    "package_hash": "dcb5f9d070a4bb12765da930063d3cdb97dbc3652dae963686dad02bb67a5332"
+  },
+  "payloads": {
+    "exemption": "{\"version\": \"1.0.0\", \"templates\": []}",
+    "policy": "TAMPERED_POLICY_CONTENT",
+    "protocols": "{\"supported\": [\"deepseek\", \"claude\"]}"
+  }
+}

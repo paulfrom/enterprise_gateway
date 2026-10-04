@@ -1,0 +1,24 @@
+{
+  "manifest_version": 1,
+  "artifact": "mini-valid-package",
+  "created_utc": "2026-10-03T09:46:28Z",
+  "signature": null,
+  "files": {
+    "config.json": {
+      "sha256": "3b07f210408dc2b7f72b18d1f6d08f74c970bd0f0cb1fb23d0d719b125245c89",
+      "bytes": 575
+    },
+    "license-excerpt.json": {
+      "sha256": "80ea8c4d41c948304679b6cd069b2cac048842386bd4706df84e8ddc9ca3effa",
+      "bytes": 172
+    },
+    "model.onnx": {
+      "sha256": "b804e101a13b6ea5ce0259a0f2ad07c93c69a6594ed029ada19120127d9d58eb",
+      "bytes": 42248
+    },
+    "tokenizer.json": {
+      "sha256": "4b09ac1cc282c80a4d1706d6967e3d4fef1278798e61c143fe72b5113fc80d49",
+      "bytes": 986
+    }
+  }
+}

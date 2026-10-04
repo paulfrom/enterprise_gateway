@@ -1,0 +1,12 @@
+{
+  "dictionary_id": "ent-dict-bad-type",
+  "version": "1.0.0",
+  "domain": "synthetic-demo",
+  "entries": [
+    {
+      "text": "星链重工集团",
+      "entity_type": "org-name"
+    }
+  ],
+  "sha256": "6f256bf350956fc6e3db1c7c915118b762eb810bfdfdf2eb18b5cc4097322f29"
+}

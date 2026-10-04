@@ -1,0 +1,12 @@
+{
+  "dictionary_id": "ent-dict-bad-hashfmt",
+  "version": "1.0.0",
+  "domain": "synthetic-demo",
+  "entries": [
+    {
+      "text": "云杉数据科技",
+      "entity_type": "ORG"
+    }
+  ],
+  "sha256": "not-a-hash"
+}

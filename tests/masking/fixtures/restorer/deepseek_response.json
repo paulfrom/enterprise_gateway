@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-9abcdef012345",
+  "object": "chat.completion",
+  "created": 1727950000,
+  "model": "deepseek-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "您好，关于 <<ENT_v1_REPLACE_TOKEN_1>> 的情况，我们已为客户 <<ENT_v1_REPLACE_TOKEN_2>> 办理完毕。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 28,
+    "total_tokens": 70,
+    "prompt_cache_hit_tokens": 10,
+    "prompt_cache_miss_tokens": 32
+  }
+}

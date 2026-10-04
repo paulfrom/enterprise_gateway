@@ -1,2 +1,0 @@
-90ceb12b307a1088774067bab9165b6aeb453b8b3b87f7bd552bed8bd6fc2dd9  tests/fixtures/P-13\upstream_429_retry_after.json
-7bdb8718a69fb0aeb8479801957118c91a6257cd272b3c509ca5faacf0f055b4  tests/fixtures/P-13\upstream_500_with_sensitive_leak.json

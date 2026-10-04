@@ -1,0 +1,12 @@
+{
+  "description": "Synthetic request-isolation concurrency scenario for P-02. Each thread owns a private MappingContext over one shared synthetic key; mappings must be mutually invisible.",
+  "thread_count": 8,
+  "scope_prefix": "thread-scope-",
+  "key_version": "v1",
+  "entity_type": "ORG",
+  "originals": [
+    "线程合成值甲",
+    "线程合成值乙",
+    "线程合成值丙"
+  ]
+}

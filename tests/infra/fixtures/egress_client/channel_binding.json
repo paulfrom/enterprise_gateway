@@ -1,0 +1,8 @@
+{
+  "channel_id": "ch-p17-synthetic",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path_prefix": "/v1",
+  "timeout_seconds": 5.0,
+  "note": "Synthetic P-17 binding template. Port is assigned at runtime; the vendor credential is injected in test code and is intentionally never stored in this fixture."
+}

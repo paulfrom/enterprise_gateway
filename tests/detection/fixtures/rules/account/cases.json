@@ -1,0 +1,103 @@
+{
+  "task": "D-13",
+  "entity_type": "ACCOUNT_NUMBER",
+  "synthetic": true,
+  "rules": "政策账号语境词(银行账号/收款账号/付款账号/账号/账户/卡号/户名,参数化)邻近(允许空白/冒号分隔)的纯数字串,长度在政策区间(默认8-30位,参数化);尾侧数字边界(嵌入更长数字串不命中);无语境的普通编号不自动当账号。",
+  "cases": [
+    {
+      "id": "d13-bank-account",
+      "text": "请汇入银行账号：6222021001112345678。",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 8,
+          "end": 27,
+          "entity_type": "ACCOUNT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d13-card-number",
+      "text": "卡号6222020200112233已过期",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 18,
+          "entity_type": "ACCOUNT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d13-glued-account",
+      "text": "账号123456789可用",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 11,
+          "entity_type": "ACCOUNT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d13-min-boundary",
+      "text": "账号12345678",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 10,
+          "entity_type": "ACCOUNT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d13-max-boundary",
+      "text": "账户123456789012345678901234567890",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 32,
+          "entity_type": "ACCOUNT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d13-too-short",
+      "text": "卡号1234567",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d13-embedded-longer",
+      "text": "账号1234567890123456789012345678901",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d13-no-context",
+      "text": "6222021001112345678",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d13-plain-serial",
+      "text": "流水号20240001234567",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d13-name-no-digits",
+      "text": "户名：张三",
+      "expect": "miss",
+      "spans": []
+    }
+  ]
+}

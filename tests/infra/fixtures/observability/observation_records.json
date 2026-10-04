@@ -1,0 +1,34 @@
+{
+  "safe_baseline": {
+    "timestamp": "2026-10-03T13:02:11+00:00",
+    "level": "info",
+    "event_code": "egress.permit.issued",
+    "component": "audit_intent",
+    "domain": "scope-hr",
+    "count": 1,
+    "duration_ms": 4
+  },
+  "planted_body_leak": {
+    "timestamp": "2026-10-03T13:02:11+00:00",
+    "level": "info",
+    "event_code": "egress.request",
+    "message": "employee 张三 said CNRY-A07-planted-body-9e4b2f 整段对话正文被直接复制进观测消息填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充填充 整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息整段对话正文被直接复制进观测消息"
+  },
+  "planted_nested_payload": {
+    "timestamp": "2026-10-03T13:02:11+00:00",
+    "level": "info",
+    "event_code": "egress.request",
+    "message": "{\"prompt\": \"CNRY-A07-nested-4d2a99 员工诉求全文\"}"
+  },
+  "planted_credential_leak": {
+    "timestamp": "2026-10-03T13:02:11+00:00",
+    "level": "error",
+    "event_code": "upstream.retry",
+    "message": "retrying with key sk-abcdef1234567890ZZ"
+  },
+  "whitelist_extras": {
+    "timestamp": "2026-10-03T13:02:11+00:00",
+    "level": "info",
+    "payload": "CNRY-A07-extra-field-1c8d55"
+  }
+}

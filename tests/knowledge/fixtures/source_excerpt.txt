@@ -1,0 +1,4 @@
+合成来源材料（K-01 夹具，非真实业务数据）。
+项目 Alpha 平台的供应商合同草案第七节提到交付里程碑。
+contact: integration-lead@example.invalid
+line4: 交付节点与验收标准由双方另行确认。

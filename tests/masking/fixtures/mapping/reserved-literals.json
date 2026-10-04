@@ -1,0 +1,17 @@
+{
+  "description": "Synthetic reserved-token-literal guard matrix for P-03. accepted = ordinary lookalike text that must not be misjudged; rejected = native input carrying the reserved namespace or a nested token appearance.",
+  "accepted": [
+    "<ENT",
+    "ENT<<",
+    "<<ent",
+    "<",
+    "价格<<E5元",
+    "<<ENterprise plan"
+  ],
+  "rejected": [
+    "<<ENT",
+    "前<<ENT缀",
+    "尾部<<ENT",
+    "<<ENT_v1_abababababababababababababababab>>"
+  ]
+}

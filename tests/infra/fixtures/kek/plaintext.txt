@@ -1,0 +1,4 @@
+Synthetic fixture payload for A-05 KEK destruction tests.
+Contains no real persons, organizations, or credentials.
+Canary token: CNRY-A05-note-9e41b7.
+Contract alpha-7781 between division northwind and division harborview, effective 2031-03-01.

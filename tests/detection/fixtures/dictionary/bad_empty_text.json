@@ -1,0 +1,12 @@
+{
+  "dictionary_id": "ent-dict-empty-text",
+  "version": "1.0.0",
+  "domain": "synthetic-demo",
+  "entries": [
+    {
+      "text": "",
+      "entity_type": "ORG"
+    }
+  ],
+  "sha256": "8275cb806bc40c3ac72b4f72b770804871646cf5fb7769d90e5d3ad8a44ba091"
+}

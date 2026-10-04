@@ -1,0 +1,134 @@
+{
+  "task": "ner-eval",
+  "dataset": {
+    "path": "tests/detection/fixtures/ner/validation-set.json",
+    "sample_count": 51,
+    "span_convention": "python code point half-open [start, end)",
+    "synthetic_only": true,
+    "independence": "self-built; model trained on People's Daily NER"
+  },
+  "hardware": {
+    "platform": "Windows-10-10.0.26300-SP0",
+    "processor_identifier": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "cpu_count": 18,
+    "python_version": "3.11.9"
+  },
+  "engines": {
+    "onnxruntime": {
+      "engine": "onnxruntime",
+      "onnxruntime_version": "1.30.0",
+      "determinism_max_abs_diff": 0.0,
+      "threads": 18,
+      "duration_seconds": 2.583,
+      "per_type_metrics": {
+        "LOC": {
+          "tp": 30,
+          "fp": 1,
+          "fn": 3,
+          "precision": 0.9677,
+          "recall": 0.9091,
+          "f1": 0.9375
+        },
+        "ORG": {
+          "tp": 15,
+          "fp": 0,
+          "fn": 14,
+          "precision": 1.0,
+          "recall": 0.5172,
+          "f1": 0.6818
+        },
+        "PER": {
+          "tp": 16,
+          "fp": 0,
+          "fn": 10,
+          "precision": 1.0,
+          "recall": 0.6154,
+          "f1": 0.7619
+        },
+        "TIME": {
+          "tp": 0,
+          "fp": 6,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        }
+      }
+    },
+    "torch": {
+      "engine": "torch",
+      "torch_version": "2.14.1+cpu",
+      "threads": 18,
+      "duration_seconds": 8.215,
+      "per_type_metrics": {
+        "LOC": {
+          "tp": 30,
+          "fp": 1,
+          "fn": 3,
+          "precision": 0.9677,
+          "recall": 0.9091,
+          "f1": 0.9375
+        },
+        "ORG": {
+          "tp": 15,
+          "fp": 0,
+          "fn": 14,
+          "precision": 1.0,
+          "recall": 0.5172,
+          "f1": 0.6818
+        },
+        "PER": {
+          "tp": 16,
+          "fp": 0,
+          "fn": 10,
+          "precision": 1.0,
+          "recall": 0.6154,
+          "f1": 0.7619
+        },
+        "TIME": {
+          "tp": 0,
+          "fp": 6,
+          "fn": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        }
+      }
+    }
+  },
+  "export": {
+    "opset_version": 17,
+    "dynamic_axes": [
+      "batch",
+      "sequence"
+    ],
+    "torch_version": "2.14.1+cpu",
+    "onnxruntime_version": "1.30.0",
+    "smoke_max_abs_diff": 5.7220458984375e-06,
+    "smoke_tolerance": 0.001,
+    "package_files": {
+      "config.json": "c5b24a4a4b825b01ebe7b101b80826091a5a03b688383d9261a60964747778df",
+      "license-excerpt.json": "0581ecfe933c32bfe3e8f354d6def1bf24a4d7544a3bda96cd7e2e8b4ab15e55",
+      "model.onnx": "28599807dc9d83ef19f93c85197b08ea05f81a52381819a0f491949cd263fd39",
+      "tokenizer.json": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26"
+    },
+    "contract_load": "ok",
+    "entity_types": [
+      "LOC",
+      "ORG",
+      "PER",
+      "TIME"
+    ]
+  },
+  "assertions": {
+    "per_type_tp_positive": [
+      "PER",
+      "ORG",
+      "LOC"
+    ],
+    "engines": [
+      "onnxruntime",
+      "torch"
+    ]
+  }
+}

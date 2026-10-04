@@ -1,0 +1,21 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant."
+    },
+    {
+      "role": "user",
+      "content": "客户联系电话 13900001111，备用座机 02155556666，请今天跟进回访。"
+    },
+    {
+      "role": "assistant",
+      "content": "已记录。本次联调使用合成凭据 sk-synthetic-000000000000000000000000 验证流程。"
+    }
+  ],
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "stop": ["END"],
+  "response_format": {"type": "json_object"}
+}

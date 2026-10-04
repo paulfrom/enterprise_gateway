@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-unknown01",
+  "object": "chat.completion",
+  "created": 1727950002,
+  "model": "deepseek-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "包含未登记令牌：<<ENT_v1_0123456789abcdef0123456789abcdef>>"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 10,
+    "total_tokens": 20
+  }
+}

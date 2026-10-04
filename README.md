@@ -1,128 +1,123 @@
-# 企业隐私与知识网关
+# 企业级大模型隐私与知识网关 (Enterprise Privacy & Knowledge Gateway)
 
-面向企业大模型使用的隐私保护与知识沉淀基础框架，具有两个目标：
+面向企业大模型应用的高性能隐私保护与受控知识沉淀网关。网关坐落于企业内部受信网络与外部/第三方大模型供应商之间，实现双重目标：
 
-- 按资料分级控制外发。高敏及不可外发内容只能在企业可信环境内处理；获准内容经过检测和脱敏后才可外发，并明确残余风险。
-- 从获准业务材料中沉淀真实企业实体与关系，保留来源证据、原始权限、用途和有效期，自动生成候选，经验证后发布，为企业知识库持续优化提供数据。
+1. **外发分级与精确隐私脱敏**：
+   * **分级拦截**：高敏与禁止外发数据强阻断在企业本地网络；获准内容经过多引擎检测与脱敏后安全外发。
+   * **请求级精确伪名替换**：基于 HMAC 机制在请求内存中建立临时原值映射，响应到达后精确还原，杜绝模型产生幻觉或明文泄露。
+   * **全链路安全防护**：涵盖上游错误正文丢弃、异常断链防泄露、AES-GCM 信封加密落盘重放（Spool）、以及 KEK 密钥轮转与销毁。
+2. **企业受控知识资产沉淀**：
+   * 从获准业务材料中提取受控知识实体与关系，严格保留来源证据、原始 ACL 权限、用途与有效期，经双人审批验证后发布，支持到期自动 Tombstone 与撤回。
 
-仓库：[paulfrom/enterprise_gateway](https://github.com/paulfrom/enterprise_gateway)
+---
 
-**当前是可运行的本地基础框架，尚不是生产代理。两个模型接口固定返回503，没有上游HTTP客户端，没有真实供应商调用或真实知识采集。**
+## 核心安全与架构原则
 
-## 安全与知识边界
+* **零原文直连**：彻底废除 Break-Glass 明文穿透旁路；任何检测能力缺失、策略未知或组件异常时严格阻断外发。
+* **请求级隔离映射**：原值恢复映射仅保存在单次请求生命周期内存中，严禁写入外部持久数据库或审计日志，避免放大攻击面。
+* **多级流水线检测**：集成预置中文规则（身份证、手机号、统一信用代码等）、敏感私钥/密码探测、企业自定义词典、以及 ONNX 本地 NER 模型长文本滑动窗口推理。
+* **受控异常体系**：全系统使用统一的受控错误注册表（`SafetyError`），异常诊断绝不携带业务明文，切断堆栈回溯链，杜绝错误回显泄露。
+* **信封加密异步 Spool**：外发与重放报文采用 DEK/KEK 两级 AES-GCM 信封加密落盘，保障不可抗力下的持久化审计与断点恢复。
 
-- 必需检测、审计或渠道能力缺失时拒绝请求，不提供原文直连或跳过保护的开关。
-- 精确原值恢复映射仅存在于当前请求内存，不能从数据库、Redis或审计记录重建。
-- 原值恢复与知识实体归一分离；别名归并不能改变恢复给用户的原始值。
-- 企业实体、关系和来源属于受控知识资产，不是匿名统计；自动抽取或共现不能自行证明业务事实。
-- 候选发布必须经过授权验证；来源权限、用途、到期和撤回约束需要传播到派生资产。
-- 实体替换不能消除上下文推断，也不构成任意文本零泄漏保证。
+架构决策记录详见 [docs/adr/](docs/adr/)，系统接口契约规范详见 [docs/contracts.md](docs/contracts.md)。
 
-架构决策见[请求内精确映射](docs/adr/0001-request-local-exact-mapping.md)、[证据约束的知识](docs/adr/0002-evidence-governed-knowledge.md)和[禁止无保护外发](docs/adr/0003-no-unprotected-egress.md)。
+---
 
-## 当前能力
+## 系统架构与模块划分
 
-- FastAPI服务：存活检查、就绪检查及安全拒绝入口；错误不包含请求正文、凭据或任意URL路径，请求校验失败不返回提交内容。
-- 严格本地配置契约：拒绝未知字段和重复JSON key，不能通过配置开启生产能力。
-- 分级外发政策契约：仅接受受信配置/上下文来源的政策输入，严格解析（未知字段、错误类型、重复JSON key、非标准JSON常量、过深嵌套均拒绝）；高敏、不可外发、未知或缺失分类拒绝外发资格，客户端自称获准不构成政策来源。
-- 可信身份与保护域绑定契约：不可变受信身份上下文，强绑定租户、保护域、角色与原始ACL；严格拦截任意客户端伪造身份/域请求头，越权/跨域强阻断。
-- 两协议候选请求契约：DeepSeek Chat Completions与Claude Messages的普通文本请求逐字段严格解析；每个支持字段及嵌套路径明确约束，未声明字段、错误类型、重复key、非法JSON整请求拒绝；工具、流式、图片/文件、思考块、身份元数据等未实现能力明确拒绝；所有消息文本均视为待检测业务内容，无角色免检。字段级处理规则见docs/contracts/。
-- 精确静态内容免检契约：事前审批的静态模版精确内容与边界双重100%匹配免检；单字篡改、标点差异、动态变量混入及不可分离组合强制全量检测。
-- 完整版本Manifest与请求版本生命周期固定：请求生命周期内绑定恒定包哈希；坏包原子拒载并回滚，在途请求与热更新安全隔离。
-- 独立质量口径与划分审计契约：双维度测试集无交集审计，零秘密泄漏硬门禁一票否决，3/n单侧置信区间上界约束，未获准门槛显式声明。
-- 网关入口综合验证与出口错误净化：综合验证屏障统一前置门禁；上游4xx/5xx错误正文、内部堆栈与凭据100%丢弃净化，保真透传状态码与Retry-After头。
-- 请求内HMAC精确原文映射、碰撞拒绝、保留令牌字面量拒绝与生命周期清理。
-- Span并集保护覆盖，秘密Span直接拒绝；数据分级及必需检测结果的前置契约。
-- 纯内存知识候选：保留租户、保护域、来源版本、用途、ACL和期限；支持来源去重、不同角色双人审批、发布读取及到期/撤回tombstone。
+```
+[ 客户端请求 ] 
+      │
+      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. 协议准入与免检 (protocol)                                     │
+│    ├── 逐字段严格解析 (OpenAI / Claude)                         │
+│    ├── 受信身份与保护域绑定 (identity / admission)               │
+│    └── 静态审批模板精确免检 (static_exemption)                  │
+├─────────────────────────────────────────────────────────────────┤
+│ 2. 分级政策匹配 (policy)                                         │
+│    └── 受信政策矩阵判定 (approved_external / secret / local_only)│
+├─────────────────────────────────────────────────────────────────┤
+│ 3. 混合隐私检测流水线 (detection)                                 │
+│    ├── 规则识别器 (Presidio / Regex: 证件、手机、银行卡、PEM密钥)│
+│    ├── 企业词典匹配器 (Dictionary)                              │
+│    ├── 本地 ONNX NER 模型与滑动窗口分块 (NER & Windowing)        │
+│    └── Span 区间合并与冲突消歧 (Span Resolver)                  │
+├─────────────────────────────────────────────────────────────────┤
+│ 4. 请求脱敏与映射 (masking)                                      │
+│    ├── 内存 HMAC 伪名映射表 (Mapping)                            │
+│    └── 原文占位符精确替换 (Replacer)                             │
+├─────────────────────────────────────────────────────────────────┤
+│ 5. 加密落盘与安全外发 (infra & gateway)                           │
+│    ├── AES-GCM 信封加密磁盘缓冲 (Spool & Envelope Crypto)       │
+│    ├── 向上游大模型发起外发调用 (Egress Client)                  │
+│    └── 出口错误净化 (Error Sanitizer: 剥离上游报错明文)          │
+├─────────────────────────────────────────────────────────────────┤
+│ 6. 响应还原与交付 (masking)                                      │
+│    └── 伪名标记精确回填还原 (Restorer)                          │
+└─────────────────────────────────────────────────────────────────┘
+      │
+      ▼
+[ 安全清洗后的模型响应 ]
+```
 
-领域组件用于合成验证。`authorize_egress`要求可信检测结果，但当前没有产生这些结果的检测器；HTTP入口不会通过该函数开放外发。
+---
 
-## 技术栈
+## 模块结构一览
 
-| 用途 | 当前实现 |
+| 模块目录 | 核心职责 |
 |---|---|
-| 语言与依赖 | Python 3.11～3.13、uv、锁定依赖及普通wheel安装 |
-| HTTP服务 | FastAPI、Uvicorn |
-| 数据契约 | Pydantic |
-| 自动化验证 | 标准库unittest、HTTPX |
-| 知识领域模型 | 纯内存对象与状态约束 |
-| 容器定义 | Dockerfile、Compose；尚未构建或运行验证 |
+| `src/infra` | 基础设施：系统配置、受控错误码（`SafetyCode`）、严格 JSON 解析、版本清单、可观测性、AES-GCM 信封加密、持久化 Spool 落盘、密钥销毁与出站 HTTP 传输 |
+| `src/gateway` | 网关入口与编排：FastAPI 服务路由、端到端脱敏流水线（`pipeline`）、入口屏障与出口错误脱敏净化器 |
+| `src/protocol` | 协议与准入：OpenAI Chat Completions 与 Claude Messages 严格协议模型、受信身份、准入预算与静态模板免检 |
+| `src/policy` | 外发政策：受信外发分级政策契约与出站权限评估 |
+| `src/detection` | 隐私检测：混合检测编排器、Presidio 正则识别器、企业词典匹配、本地 ONNX NER 推理及长文本分窗 |
+| `src/masking` | 脱敏与映射：请求级 HMAC 伪名映射生成、正向敏感文本替换与反向响应原值还原 |
+| `src/audit` | 审计与质检：释放意图台账、取证水印生成、零泄露统计检验与证据有效性门禁 |
+| `src/knowledge` | 受控知识域：知识实体与关系模型、多方授权审批流、版本快照与失效 Tombstone 状态机 |
 
-## 安装与测试
+---
 
-准备Python和uv。推荐使用已验证的Python 3.11环境。
+## 快速上手与验证
 
+### 环境要求
+* Python 3.11 ～ 3.13
+* 依赖管理工具：`uv`
+
+### 1. 安装与同步依赖
 ~~~powershell
 git clone git@github.com:paulfrom/enterprise_gateway.git
 cd enterprise_gateway
 uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
-uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -v
 ~~~
 
-Windows下，在首次安装已填充缓存后，可离线重建当前源码包并运行测试：
-
+### 2. 运行自动化测试套件
 ~~~powershell
+# Windows 快速验证脚本
 .\scripts\check.ps1
-~~~
 
-普通wheel安装避免Python 3.11在中文路径下读取editable `.pth`的问题。修改源码后，应重新安装当前源码包再测试；Windows使用上述脚本，其他环境可执行：
-
-~~~shell
-uv sync --frozen --no-editable --group dev --reinstall-package enterprise-privacy-gateway --cache-dir .uv-cache
+# 或直接使用 uv 执行全量测试
 uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -v
 ~~~
 
-## 本地运行
-
-~~~shell
-uv run --frozen --no-editable --cache-dir .uv-cache python -m uvicorn enterprise_gateway.app:app --host 127.0.0.1 --port 8080 --no-access-log
+### 3. 本地启动网关服务
+~~~powershell
+uv run --frozen --no-editable --cache-dir .uv-cache python -m uvicorn gateway.app:app --host 127.0.0.1 --port 8080 --no-access-log
 ~~~
 
-| 请求 | 当前响应 |
-|---|---|
-| `GET /healthz` | 200，进程存活 |
-| `GET /readyz` | 503，尚不具备生产能力 |
-| `POST /v1/chat/completions` | 503，请求未外发 |
-| `POST /v1/messages` | 503，请求未外发 |
+### 4. 接口说明
 
-`config/local-review.json`是配置契约夹具。服务使用固定安全默认值，不能通过环境变量或配置注入上游。
+| 请求端点 | 说明 | 典型响应行为 |
+|---|---|---|
+| `GET /healthz` | 进程健康存活探针 | `200 OK`，服务正常运行 |
+| `GET /readyz` | 业务就绪检查探针 | 返回就绪状态或当前安全策略准入状态 |
+| `POST /v1/chat/completions` | OpenAI 格式协议网关入口 | 严格校验请求 -> 脱敏 -> 转发上游 -> 还原 -> 净化交付 |
+| `POST /v1/messages` | Claude 格式协议网关入口 | 严格校验请求 -> 脱敏 -> 转发上游 -> 还原 -> 净化交付 |
 
-## 模块结构
+---
 
-| 路径 | 内容 |
-|---|---|
-| `src/enterprise_gateway/app.py` | 本地HTTP服务与拒绝入口 |
-| `src/enterprise_gateway/config.py` | 严格配置契约 |
-| `src/enterprise_gateway/errors.py` | 受控错误类型与错误码注册表 |
-| `src/enterprise_gateway/egress.py` | 数据分级与外发授权前置契约 |
-| `src/enterprise_gateway/policy.py` | 受信来源的分级外发政策严格输入契约 |
-| `src/enterprise_gateway/identity.py` | 可信身份与保护域/原始ACL绑定契约 |
-| `src/enterprise_gateway/protocols.py` | 两协议普通文本请求的逐字段候选契约 |
-| `src/enterprise_gateway/static_exemption.py` | 精确静态内容免检清单与边界评估契约 |
-| `src/enterprise_gateway/manifest.py` | 包Manifest与请求版本生命周期固定 |
-| `src/enterprise_gateway/quality_audit.py` | 独立质量口径、划分审计与零秘密泄漏契约 |
-| `src/enterprise_gateway/ingress.py` | 入口综合验证屏障（整合政策、协议与免检） |
-| `src/enterprise_gateway/error_sanitizer.py` | 上游错误脱敏与安全映射 |
-| `src/enterprise_gateway/mapping.py` | 请求内精确映射与令牌生命周期 |
-| `src/enterprise_gateway/spans.py` | Span并集保护与精确替换 |
-| `src/enterprise_gateway/knowledge.py` | 纯内存知识模型与状态约束 |
-| `tests/` | 组件、HTTP与合成知识流程测试 |
-| `docs/adr/` | 架构决策及理由 |
-| `docs/contracts/` | 政策与协议字段级契约说明 |
-| `reports/` | 指定基线下的验证记录 |
-| `Dockerfile`、`compose.yaml` | 本地容器定义 |
-| `uv.lock`、`requirements-runtime.txt` | 依赖锁文件及含哈希的容器运行依赖 |
+## 生产部署与安全边界声明
 
-`tests/test_knowledge.py`中的`test_synthetic_approval_publish_read_and_withdraw_loop`覆盖合成流程：候选产生、安全与业务两人审批、发布、授权读取、来源撤回、tombstone以及撤回后拒绝读取。
-
-## 当前限制
-
-尚未实现真实规则/词典/NER检测、业务关系抽取、SSE/工具代理、供应商连接、KMS/AEAD持久审计、加密spool、PostgreSQL适配、IAM、下游发布及删除投递。
-
-政策契约只验证受信输入的解析与分类映射，不实现企业身份认证，也不构成真实业务外发授权；合成分类表不是真实企业数据分类。协议契约是普通文本候选子集，不是完整供应商兼容声明：模型白名单为本地契约常量，工具调用、流式响应、多模态、思考块及历史状态准入均未实现；与真实渠道（接入层/网关组合）的兼容性尚未验证。
-
-知识证据hash当前只是契约字段，不读取正文核验真实性；`TrustedActor`和`Source`需要由可信认证适配器构造。内存状态及tombstone不能证明持久发布或下游删除完成。权限变化需要撤回旧来源版本；关系有效时间与证据冲突尚无生产处理，当前模型仅验证否定、模态和来源期限。
-
-映射退出时释放引用，不承诺Python内存物理擦除。HMAC稳定性会暴露同域同值关系，不能视为匿名化。精确匹配恢复器不能证明模型改写掉令牌语法后的业务含义正确。
-
-容器尚未构建或运行验证，基础镜像tag尚未固定生产digest。实际渠道外发与真实知识采集需要分别具备完整的保护能力、真实环境验证及业务授权。
+1. **不可绕过性**：网关必须部署为客户端到大模型上游的唯一出口，且上游服务必须配置仅接受来自网关 IP/证书的请求。
+2. **内存物理擦除限制**：原值映射在请求结束时由 Python 垃圾回收机制释放对象引用，在解释器层面不保证物理 RAM 位的硬件擦除。
+3. **推断风险防范**：文本实体替换能够消除直接标识符泄露，但不能完全阻止模型基于上下文语境产生的反向间接推断，高敏绝密数据应直接配置为 `LOCAL_ONLY` 强阻断。

@@ -1,0 +1,8 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {"role": "system", "content": "P-17 合成系统提示"},
+    {"role": "user", "content": "P-17 合成请求体，无真实业务内容"}
+  ],
+  "temperature": 0.2
+}

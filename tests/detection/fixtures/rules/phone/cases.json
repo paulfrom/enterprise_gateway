@@ -1,0 +1,187 @@
+{
+  "task": "D-02",
+  "entity_type": "PHONE_NUMBER",
+  "synthetic": true,
+  "rules": "1[3-9]开头11位；连续或3-4-4分隔（两个分隔位各自可选半角空格或连字符，允许混合，也允许只用第二个分隔位）；两侧数字边界（不嵌入更长数字串）；字母相邻仍命中。",
+  "cases": [
+    {
+      "id": "d02-contiguous-138",
+      "text": "我的手机号是13812345678，请保存",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 6,
+          "end": 17,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-contiguous-130",
+      "text": "新号13098765432已启用",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 13,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-contiguous-166",
+      "text": "新号16612340000已启用",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 13,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-contiguous-199",
+      "text": "新号19900001111已启用",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 13,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-hyphen-3-4-4",
+      "text": "请拨打138-1234-5678联系",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 16,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-space-3-4-4",
+      "text": "请拨打138 1234 5678联系",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 16,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-mixed-separators",
+      "text": "请拨打138-1234 5678联系",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 16,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-second-separator-only",
+      "text": "请拨打1381234 5678联系",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 15,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-astral-emoji-prefix",
+      "text": "😀前缀13812345678文字",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 14,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-two-numbers",
+      "text": "旧号13911112222，新号15833334444",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 13,
+          "entity_type": "PHONE_NUMBER"
+        },
+        {
+          "start": 16,
+          "end": 27,
+          "entity_type": "PHONE_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d02-prefix-10",
+      "text": "号码10123456789不是手机号",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-prefix-12",
+      "text": "号码12123456789不是手机号",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-ten-digits",
+      "text": "短号1381234567不足十一位",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-twelve-digits",
+      "text": "串138123456789是十二位数字",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-landline",
+      "text": "固话010-12345678转接",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-plain-serial",
+      "text": "订单编号20240012345678请勿致电",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-embedded-leading-digit",
+      "text": "长串913812345678内含手机号形态",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-embedded-trailing-digit",
+      "text": "长串138123456780内含手机号形态",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d02-embedded-in-id-number",
+      "text": "证件990101199003077583不含手机号",
+      "expect": "miss",
+      "spans": []
+    }
+  ]
+}

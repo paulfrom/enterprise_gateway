@@ -1,0 +1,31 @@
+{
+  "dictionary_id": "ent-dict-synthetic-v1",
+  "domain": "synthetic-demo",
+  "entries": [
+    {
+      "text": "星链重工集团",
+      "entity_type": "ORG"
+    },
+    {
+      "text": "星链重工",
+      "entity_type": "ORG"
+    },
+    {
+      "text": "ABC公司",
+      "entity_type": "ORG"
+    },
+    {
+      "text": "ABC",
+      "entity_type": "ORG"
+    },
+    {
+      "text": "云杉数据科技",
+      "entity_type": "ORG"
+    },
+    {
+      "text": "临湖新材料实验室",
+      "entity_type": "LOCATION"
+    }
+  ],
+  "sha256": "3e2c7baa504473c172f753eb48a9a31b476d61e0f83d4800383fe39e7b785c17"
+}

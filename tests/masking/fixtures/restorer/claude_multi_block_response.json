@@ -1,0 +1,22 @@
+{
+  "id": "msg_multi01234567890",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "第一段回复：尊敬的 <<ENT_v1_REPLACE_TOKEN_1>> 用户。"
+    },
+    {
+      "type": "text",
+      "text": "第二段回复：您的账户已交由 <<ENT_v1_REPLACE_TOKEN_2>> 管理。"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 60,
+    "output_tokens": 45
+  }
+}

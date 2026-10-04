@@ -1,0 +1,89 @@
+{
+  "task": "D-14",
+  "entity_type": "CONTRACT_NUMBER",
+  "synthetic": true,
+  "rules": "政策合同语境词(合同编号/协议编号/合同号/协议号,参数化)邻近的大写字母{2,4}-数字{4}-数字{3,6}(各段长度参数化);两侧字母/数字/连字符边界(嵌入更长代码串不命中);无语境相似代码、格式不符(小写/段长越界)不命中。",
+  "cases": [
+    {
+      "id": "d14-contract-colon",
+      "text": "合同编号：HT-2026-001",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 5,
+          "end": 16,
+          "entity_type": "CONTRACT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d14-agreement-space",
+      "text": "本协议编号 XY-2025-123456",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 6,
+          "end": 20,
+          "entity_type": "CONTRACT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d14-glued-contract",
+      "text": "合同号AB-2024-0001签订",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 15,
+          "entity_type": "CONTRACT_NUMBER",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d14-no-context",
+      "text": "编号HT-2026-001待查",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d14-seq-too-short",
+      "text": "合同编号：HT-2026-01",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d14-lowercase",
+      "text": "合同编号：ht-2026-001",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d14-prefix-one-letter",
+      "text": "合同编号：H-2026-001",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d14-prefix-five-letters",
+      "text": "合同编号：ABCDE-2026-001",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d14-glued-code",
+      "text": "合同编号：HT-2026-001X",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d14-similar-no-context",
+      "text": "航班号CA-2026-088已起飞",
+      "expect": "miss",
+      "spans": []
+    }
+  ]
+}

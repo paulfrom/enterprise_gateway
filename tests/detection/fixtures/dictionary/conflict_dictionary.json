@@ -1,0 +1,16 @@
+{
+  "dictionary_id": "ent-dict-conflict",
+  "version": "1.0.0",
+  "domain": "synthetic-demo",
+  "entries": [
+    {
+      "text": "CNRY-D06-conflict-entry-77331",
+      "entity_type": "ORG"
+    },
+    {
+      "text": "CNRY-D06-conflict-entry-77331",
+      "entity_type": "PROJECT"
+    }
+  ],
+  "sha256": "59340a24cffda230240373d1809f55a68479b8560ea93651da64bdb0e2575ad6"
+}

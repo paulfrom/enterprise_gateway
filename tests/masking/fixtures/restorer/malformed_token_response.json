@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-malformed01",
+  "object": "chat.completion",
+  "created": 1727950003,
+  "model": "deepseek-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "包含损坏令牌：<<ENT_v1_bad>>"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 10,
+    "total_tokens": 20
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "note": "合成检测文本夹具；canary=CNRY-D07-fixture-2b2b2b；全部实体名称均为虚构",
+  "alias_nesting_text": "乙方ABC公司与甲方签署框架协议",
+  "chinese_offsets_text": "前置𠀀𠀁标记星链重工集团后续文本",
+  "repeated_text": "星链重工集团与云杉数据科技合作，星链重工集团出资",
+  "cross_field_left": "星链重工",
+  "cross_field_right": "集团总部",
+  "non_entity_text": "今天天气不错，没有命中任何条目"
+}

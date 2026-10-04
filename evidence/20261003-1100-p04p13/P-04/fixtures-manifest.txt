@@ -1,4 +1,0 @@
-5ee17b488a1785c0494f8afc8c526995ead5da3ead305705b56ea395cfac106a  tests/fixtures/P-04\claude_tools_rejected.json
-5358aad6d9c963a8bc1461c9005b0e1c21f08c78a4496f3ec8088d0d0b82370f  tests/fixtures/P-04\claude_valid_request.json
-acae3e26f5a4de003e86893da3bcd56d1f1059af35c35c627cdaaec0f7c06c62  tests/fixtures/P-04\deepseek_stream_rejected.json
-4f68d2cd3986ddffcb7a6428360deafbb9a2d0d8399b23e57d983384441b4c6d  tests/fixtures/P-04\deepseek_valid_request.json

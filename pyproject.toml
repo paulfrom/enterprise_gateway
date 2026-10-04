@@ -8,15 +8,34 @@ version = "0.1.0"
 description = "Fail-closed enterprise privacy and knowledge contracts"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+  "ahocorasick-rs>=1.0.3",
+  "cryptography>=50.0.2",
   "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "onnxruntime>=1.30.0",
+  "presidio-analyzer>=2.2.364",
   "pydantic>=2.11,<3",
+  "tokenizers>=0.22,<0.24",
   "uvicorn>=0.35,<1",
 ]
 
 [dependency-groups]
-dev = ["httpx>=0.28,<1"]
+dev = [
+    "onnx>=1.23.1",
+    "torch>=2.14.1",
+    "transformers==4.57.6",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/enterprise_gateway"]
+packages = [
+  "src/audit",
+  "src/detection",
+  "src/gateway",
+  "src/infra",
+  "src/knowledge",
+  "src/masking",
+  "src/policy",
+  "src/protocol",
+]
 
 

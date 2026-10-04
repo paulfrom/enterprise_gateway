@@ -1,0 +1,746 @@
+{
+  "dataset": "D-08 synthetic independent validation set",
+  "span_convention": "python code point half-open [start, end)",
+  "synthetic_only": true,
+  "no_overlap_with_training_corpus": "self-built; model trained on People's Daily NER",
+  "samples": [
+    {
+      "id": "D08-S001",
+      "text": "记者林昭远从临澜市发回报道。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 2,
+          "end": 5
+        },
+        {
+          "type": "LOC",
+          "start": 6,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S002",
+      "text": "星澜科技宣布在青屿县建设新园区。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "LOC",
+          "start": 7,
+          "end": 10
+        }
+      ]
+    },
+    {
+      "id": "D08-S003",
+      "text": "顾明澈代表北辰航运有限公司出席雾川省论坛。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 13
+        },
+        {
+          "type": "LOC",
+          "start": 15,
+          "end": 18
+        }
+      ]
+    },
+    {
+      "id": "D08-S004",
+      "text": "江晚舟与贺临溪在临澜市签署合作协议。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "PER",
+          "start": 4,
+          "end": 7
+        },
+        {
+          "type": "LOC",
+          "start": 8,
+          "end": 11
+        }
+      ]
+    },
+    {
+      "id": "D08-S005",
+      "text": "澄海制药集团总部位于青屿县。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 6
+        },
+        {
+          "type": "LOC",
+          "start": 10,
+          "end": 13
+        }
+      ]
+    },
+    {
+      "id": "D08-S006",
+      "text": "裴照野会见星澜科技董事长。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S007",
+      "text": "雾川省近日出台新的航运补贴政策。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 3
+        }
+      ]
+    },
+    {
+      "id": "D08-S008",
+      "text": "白鹿数据在望舒湾设立研究中心。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "LOC",
+          "start": 5,
+          "end": 8
+        }
+      ]
+    },
+    {
+      "id": "D08-S009",
+      "text": "祁望舒担任拓原物流首席执行官。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S010",
+      "text": "临澜商业银行栖迟镇支行正式开业。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 6
+        },
+        {
+          "type": "LOC",
+          "start": 6,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S011",
+      "text": "曜石半导体获得雾川省产业基金投资。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 5
+        },
+        {
+          "type": "LOC",
+          "start": 7,
+          "end": 10
+        }
+      ]
+    },
+    {
+      "id": "D08-S012",
+      "text": "岑见微在清嘉巷开设工作室。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 4,
+          "end": 7
+        }
+      ]
+    },
+    {
+      "id": "D08-S013",
+      "text": "记者穆清嘉从白鹿原发回现场报道。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 2,
+          "end": 5
+        },
+        {
+          "type": "LOC",
+          "start": 6,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S014",
+      "text": "霁月光电与曜石半导体达成供货协议。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 10
+        }
+      ]
+    },
+    {
+      "id": "D08-S015",
+      "text": "寒汀群岛迎来首批考察团。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 4
+        }
+      ]
+    },
+    {
+      "id": "D08-S016",
+      "text": "陆栖迟出任星澜科技技术总监。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S017",
+      "text": "云溪口岸新增两条国际航线。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 4
+        }
+      ]
+    },
+    {
+      "id": "D08-S018",
+      "text": "临澜市与青屿县签署共建协议。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 4,
+          "end": 7
+        }
+      ]
+    },
+    {
+      "id": "D08-S019",
+      "text": "闻人棠当选北辰航运有限公司工会主席。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 13
+        }
+      ]
+    },
+    {
+      "id": "D08-S020",
+      "text": "照野岭隧道贯通仪式在栖迟镇举行。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 10,
+          "end": 13
+        }
+      ]
+    },
+    {
+      "id": "D08-S021",
+      "text": "星澜科技临澜市分部启用新园区。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "LOC",
+          "start": 4,
+          "end": 7
+        }
+      ]
+    },
+    {
+      "id": "D08-S022",
+      "text": "沈其澜裴照野共同出席发布会。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "PER",
+          "start": 3,
+          "end": 6
+        }
+      ]
+    },
+    {
+      "id": "D08-S023",
+      "text": "临澜市青屿县交界地带发现矿脉。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 3,
+          "end": 6
+        }
+      ]
+    },
+    {
+      "id": "D08-S024",
+      "text": "拓原物流白鹿数据中心投入运营。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "ORG",
+          "start": 4,
+          "end": 8
+        }
+      ]
+    },
+    {
+      "id": "D08-S025",
+      "text": "记者顾明澈林昭远联合报道。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 2,
+          "end": 5
+        },
+        {
+          "type": "PER",
+          "start": 5,
+          "end": 8
+        }
+      ]
+    },
+    {
+      "id": "D08-S026",
+      "text": "霁月光电望舒湾基地落成。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "LOC",
+          "start": 4,
+          "end": 7
+        }
+      ]
+    },
+    {
+      "id": "D08-S027",
+      "text": "雾川省临澜市联合发布规划。",
+      "entities": [
+        {
+          "type": "LOC",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 3,
+          "end": 6
+        }
+      ]
+    },
+    {
+      "id": "D08-S028",
+      "text": "演员岚出席望舒湾音乐节。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 2,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 5,
+          "end": 8
+        }
+      ]
+    },
+    {
+      "id": "D08-S029",
+      "text": "澈在清嘉巷举办个人画展。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 1
+        },
+        {
+          "type": "LOC",
+          "start": 2,
+          "end": 5
+        }
+      ]
+    },
+    {
+      "id": "D08-S030",
+      "text": "棠代表星澜科技接受访问。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 1
+        },
+        {
+          "type": "ORG",
+          "start": 3,
+          "end": 7
+        }
+      ]
+    },
+    {
+      "id": "D08-S031",
+      "text": "诗人舟从寒汀群岛归来。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 2,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 4,
+          "end": 8
+        }
+      ]
+    },
+    {
+      "id": "D08-S032",
+      "text": "项目经理Tom与林昭远确认Starlight系统上线。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 4,
+          "end": 7
+        },
+        {
+          "type": "PER",
+          "start": 8,
+          "end": 11
+        },
+        {
+          "type": "ORG",
+          "start": 13,
+          "end": 22
+        }
+      ]
+    },
+    {
+      "id": "D08-S033",
+      "text": "GreenField公司与北辰航运有限公司开展合作。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 10
+        },
+        {
+          "type": "ORG",
+          "start": 13,
+          "end": 21
+        }
+      ]
+    },
+    {
+      "id": "D08-S034",
+      "text": "Alice赴临澜市参加行业会议。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 5
+        },
+        {
+          "type": "LOC",
+          "start": 6,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S035",
+      "text": "技术团队从BlueOcean迁回白鹿数据平台。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 14
+        },
+        {
+          "type": "ORG",
+          "start": 16,
+          "end": 20
+        }
+      ]
+    },
+    {
+      "id": "D08-S036",
+      "text": "Bob在青屿县考察期间接受访问。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 4,
+          "end": 7
+        }
+      ]
+    },
+    {
+      "id": "D08-S037",
+      "text": "NorthBridge实验室入驻望舒湾。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 11
+        },
+        {
+          "type": "LOC",
+          "start": 16,
+          "end": 19
+        }
+      ]
+    },
+    {
+      "id": "D08-S038",
+      "text": "Vera与沈其澜共同主持临澜市发布会。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "PER",
+          "start": 5,
+          "end": 8
+        },
+        {
+          "type": "LOC",
+          "start": 12,
+          "end": 15
+        }
+      ]
+    },
+    {
+      "id": "D08-S039",
+      "text": "SwiftLink为澄海制药集团提供云服务。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 9
+        },
+        {
+          "type": "ORG",
+          "start": 10,
+          "end": 16
+        }
+      ]
+    },
+    {
+      "id": "D08-S040",
+      "text": "Ken抵达云溪口岸后向媒体致意。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 3
+        },
+        {
+          "type": "LOC",
+          "start": 5,
+          "end": 9
+        }
+      ]
+    },
+    {
+      "id": "D08-S041",
+      "text": "OpenSky联盟在雾川省设立办事处。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 7
+        },
+        {
+          "type": "LOC",
+          "start": 10,
+          "end": 13
+        }
+      ]
+    },
+    {
+      "id": "D08-S042",
+      "text": "Lena受星澜科技邀请访问照野岭。",
+      "entities": [
+        {
+          "type": "PER",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "type": "ORG",
+          "start": 5,
+          "end": 9
+        },
+        {
+          "type": "LOC",
+          "start": 13,
+          "end": 16
+        }
+      ]
+    },
+    {
+      "id": "D08-S043",
+      "text": "HexaSoft与拓原物流完成系统对接。",
+      "entities": [
+        {
+          "type": "ORG",
+          "start": 0,
+          "end": 8
+        },
+        {
+          "type": "ORG",
+          "start": 9,
+          "end": 13
+        }
+      ]
+    },
+    {
+      "id": "D08-S044",
+      "text": "会议纪要已经整理完毕，请大家自行取阅。",
+      "entities": []
+    },
+    {
+      "id": "D08-S045",
+      "text": "今天的会议改到下午三点进行。",
+      "entities": []
+    },
+    {
+      "id": "D08-S046",
+      "text": "新版操作手册发布在内部网站上。",
+      "entities": []
+    },
+    {
+      "id": "D08-S047",
+      "text": "本周的值班安排已张贴在公告栏。",
+      "entities": []
+    },
+    {
+      "id": "D08-S048",
+      "text": "请各部门按时提交季度总结。",
+      "entities": []
+    },
+    {
+      "id": "D08-S049",
+      "text": "雨后山路湿滑，出行请注意安全。",
+      "entities": []
+    },
+    {
+      "id": "D08-S050",
+      "text": "图书馆延长开放时间的通知已下发。",
+      "entities": []
+    },
+    {
+      "id": "D08-S051",
+      "text": "食堂新增了窗口，供餐时间不变。",
+      "entities": []
+    }
+  ]
+}

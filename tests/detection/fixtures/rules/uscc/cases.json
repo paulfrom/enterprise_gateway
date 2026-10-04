@@ -1,0 +1,86 @@
+{
+  "task": "D-04",
+  "entity_type": "CN_USCC",
+  "synthetic": true,
+  "rules": "18位；GB32100字符集0-9与大写字母去掉I/O/Z/S/V；加权校验位（权重1,3,9,27,19,26,16,17,20,29,25,13,8,24,10,30,28，模31，校验字符=字符集第(31-和%31)%31位）；两侧数字/字母边界；不校验登记/机构类别语义。9199前缀为合成，校验位按算法合成。",
+  "cases": [
+    {
+      "id": "d04-valid-basic",
+      "text": "统一社会信用代码9199MA1W7X4E2K0002见附件",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 8,
+          "end": 26,
+          "entity_type": "CN_USCC"
+        }
+      ]
+    },
+    {
+      "id": "d04-valid-digits-heavy",
+      "text": "代码91991100000000000N已登记",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 20,
+          "entity_type": "CN_USCC"
+        }
+      ]
+    },
+    {
+      "id": "d04-valid-letters",
+      "text": "代码9199ABCDEFGH123457已登记",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 20,
+          "entity_type": "CN_USCC"
+        }
+      ]
+    },
+    {
+      "id": "d04-wrong-check-digit",
+      "text": "代码9199MA1W7X4E2K0000校验不通过",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d04-charset-i",
+      "text": "含禁用字符I的91I9MA1W7X4E2K0002不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d04-charset-o",
+      "text": "含禁用字符O的91O9MA1W7X4E2K0002不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d04-lowercase",
+      "text": "小写9199ma1w7x4e2k0002不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d04-17-chars",
+      "text": "少一位9199MA1W7X4E2K000不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d04-19-chars",
+      "text": "多一位9199MA1W7X4E2K0002A不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d04-random-checksum-mismatch",
+      "text": "随机串0KX0AX4TF9G3KCG91Q不命中",
+      "expect": "miss",
+      "spans": []
+    }
+  ]
+}

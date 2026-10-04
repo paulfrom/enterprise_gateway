@@ -1,0 +1,1 @@
+"""Detection domain tests."""

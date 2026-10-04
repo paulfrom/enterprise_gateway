@@ -12,3 +12,8 @@ build/
 .codebase-memory/
 
 .uv-cache/
+.pgdata/
+models/
+evidence/
+reports/
+*.log

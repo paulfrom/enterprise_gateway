@@ -1,0 +1,134 @@
+{
+  "task": "D-03",
+  "entity_type": "CN_ID_NUMBER",
+  "synthetic": true,
+  "rules": "18位；GB11643加权校验位（权重7,9,10,5,8,4,2,1,6,3,7,9,10,5,8,4,2，模11映射10X98765432，仅大写X）；出生日期：年[1900,当年]、月01-12、日按公历当月天数（含闰年）、日期不晚于当日；两侧数字/字母边界；不校验地址码/顺序码语义。地址码9901xx为刻意不可分配的合成前缀，校验位按算法合成。",
+  "cases": [
+    {
+      "id": "d03-valid-basic",
+      "text": "身份证号990101199003077583请核对",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 4,
+          "end": 22,
+          "entity_type": "CN_ID_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d03-valid-x-check-digit",
+      "text": "证件号99010119900307004X有效",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 21,
+          "entity_type": "CN_ID_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d03-valid-leap-day",
+      "text": "生于990101200002290070的客户",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 20,
+          "entity_type": "CN_ID_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d03-valid-end-of-text",
+      "text": "证件号码：990101199003077583",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 5,
+          "end": 23,
+          "entity_type": "CN_ID_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d03-astral-char-prefix",
+      "text": "𠀁甲990101199003077583乙",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 20,
+          "entity_type": "CN_ID_NUMBER"
+        }
+      ]
+    },
+    {
+      "id": "d03-wrong-check-digit",
+      "text": "号码990101199003077580校验不通过",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-month-13",
+      "text": "校验位合法但日期非法990101199013077587不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-feb-30",
+      "text": "校验位合法但日期非法990101199002307586不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-nonleap-feb-29",
+      "text": "校验位合法但日期非法990101199102290072不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-day-32",
+      "text": "校验位合法但日期非法990101199003327589不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-year-1899",
+      "text": "校验位合法但年份非法99010118990307758X不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-year-2099-future",
+      "text": "校验位合法但年份在未来990101209903077585不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-17-digits",
+      "text": "少一位99010119900307758",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-19-digits",
+      "text": "多一位9901011990030775830",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-letter-glued",
+      "text": "粘连x990101199003077583Y不命中",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d03-lowercase-x-check",
+      "text": "小写校验位99010119900307004x不命中",
+      "expect": "miss",
+      "spans": []
+    }
+  ]
+}

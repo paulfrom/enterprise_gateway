@@ -1,0 +1,29 @@
+{
+  "id": "chatcmpl-multi012345",
+  "object": "chat.completion",
+  "created": 1727950001,
+  "model": "deepseek-v4-pro",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "选项一：发往 <<ENT_v1_REPLACE_TOKEN_1>>。"
+      },
+      "finish_reason": "stop"
+    },
+    {
+      "index": 1,
+      "message": {
+        "role": "assistant",
+        "content": "选项二：由 <<ENT_v1_REPLACE_TOKEN_2>> 签收。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 50,
+    "completion_tokens": 40,
+    "total_tokens": 90
+  }
+}

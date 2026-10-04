@@ -1,0 +1,49 @@
+{
+  "events": [
+    {
+      "tenant": "tenant-acme",
+      "domain": "scope-procurement",
+      "source_id": "src-synthetic-alpha",
+      "source_version": "v3",
+      "source_kind": "document",
+      "evidence_digest": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "evidence_offset": 11,
+      "purpose": "supplier-relationship-management",
+      "retention_policy": "bucket-180d",
+      "acl": [
+        "steward-01"
+      ],
+      "extraction_version": "extract-1.4.0"
+    },
+    {
+      "tenant": "tenant-acme",
+      "domain": "scope-procurement",
+      "source_id": "src-synthetic-beta",
+      "source_version": "v3",
+      "source_kind": "document",
+      "evidence_digest": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "evidence_offset": 42,
+      "purpose": "supplier-relationship-management",
+      "retention_policy": "bucket-180d",
+      "acl": [
+        "steward-01"
+      ],
+      "extraction_version": "extract-1.4.0"
+    },
+    {
+      "tenant": "tenant-acme",
+      "domain": "scope-hr",
+      "source_id": "src-synthetic-gamma",
+      "source_version": "v1",
+      "source_kind": "user_assertion",
+      "evidence_digest": "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+      "evidence_offset": 0,
+      "purpose": "onboarding-quality-review",
+      "retention_policy": "bucket-90d",
+      "acl": [
+        "steward-02"
+      ],
+      "extraction_version": "extract-1.4.0"
+    }
+  ]
+}

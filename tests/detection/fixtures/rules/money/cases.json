@@ -1,0 +1,186 @@
+{
+  "task": "D-05",
+  "entity_type": "MONEY_AMOUNT",
+  "synthetic": true,
+  "rules": "货币符号(¥/$/€)紧邻数字(前或后,跨度含符号与数字);货币单位邻近数字:多字单位(人民币/美元/万元等)可在数字前或后,单字元只在数字后(避免公元2026年误报);款项语境词(合同金额/总价款/违约金/定金/预付款/进度款/质保金/货款/价款/租金/金额,参数化)后经显式分隔符(冒号或空白)的裸数字;裸数字尾侧不得紧跟年/月/日/字母/连字符。年份/章节号/编号/无政策上下文的普通数字不命中。",
+  "cases": [
+    {
+      "id": "d05-symbol-yen-with-unit",
+      "text": "服务费¥3500元整",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 3,
+          "end": 9,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-symbol-dollar-thousands",
+      "text": "报价$1,234,567.89已确认",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 15,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-symbol-euro-decimal",
+      "text": "尾款€2500.75",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 10,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-symbol-suffix-dollar",
+      "text": "总价100$",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 6,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-unit-wan-yuan",
+      "text": "赔偿3.5万元",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 2,
+          "end": 7,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-unit-prefix-usd",
+      "text": "按美元800结算",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 1,
+          "end": 6,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-unit-prefix-rmb-trailing",
+      "text": "总价款为人民币12万元",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 4,
+          "end": 11,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-context-colon-bare",
+      "text": "合同金额：50000，已支付",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 5,
+          "end": 10,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-context-space-bare",
+      "text": "违约金 2500",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 4,
+          "end": 8,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-context-with-symbol",
+      "text": "违约金：¥5000元",
+      "expect": "hit",
+      "spans": [
+        {
+          "start": 4,
+          "end": 10,
+          "entity_type": "MONEY_AMOUNT",
+          "priority": 3
+        }
+      ]
+    },
+    {
+      "id": "d05-year",
+      "text": "2026年预算已批",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-chapter",
+      "text": "详见第3.2节规定",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-plain-number",
+      "text": "数量为5000个",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-serial-code",
+      "text": "编号A-2026-001",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-era-yuan-prefix",
+      "text": "公元2026年建成",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-context-year",
+      "text": "违约金：2026年支付",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-malformed-comma",
+      "text": "金额12,34元",
+      "expect": "miss",
+      "spans": []
+    },
+    {
+      "id": "d05-version-number",
+      "text": "版本v2.5发布",
+      "expect": "miss",
+      "spans": []
+    }
+  ]
+}

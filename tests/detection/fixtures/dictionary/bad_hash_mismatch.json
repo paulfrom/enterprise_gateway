@@ -1,0 +1,12 @@
+{
+  "dictionary_id": "ent-dict-tampered",
+  "version": "1.0.0",
+  "domain": "synthetic-demo",
+  "entries": [
+    {
+      "text": "CNRY-D06-tamper-entry-99110",
+      "entity_type": "ORG"
+    }
+  ],
+  "sha256": "f72080755cd0ed3ace9086e7b4c5856a2643c7c0c2ec0cc1a675f536c00ea4ce"
+}

@@ -1,0 +1,136 @@
+"""Controlled failure types and their code registry.
+
+Codes are the contract: tests and callers reference enum members, never
+free-form strings. Public messages never contain business text.
+"""
+
+from enum import StrEnum
+
+
+class SafetyCode(StrEnum):
+    INVALID_SCOPE = "INVALID_SCOPE"
+    INVALID_CLASSIFICATION = "INVALID_CLASSIFICATION"
+    UNCLASSIFIED_DATA = "UNCLASSIFIED_DATA"
+    LOCAL_ONLY_DATA = "LOCAL_ONLY_DATA"
+    DETECTION_INCOMPLETE = "DETECTION_INCOMPLETE"
+    UNKNOWN_DETECTOR = "UNKNOWN_DETECTOR"
+    DETECTION_FAILED = "DETECTION_FAILED"
+    INVALID_TEXT = "INVALID_TEXT"
+    INVALID_UNICODE = "INVALID_UNICODE"
+    RESERVED_TOKEN_LITERAL = "RESERVED_TOKEN_LITERAL"
+    INVALID_KEY_VERSION = "INVALID_KEY_VERSION"
+    INVALID_HMAC_KEY = "INVALID_HMAC_KEY"
+    MAPPING_LIFECYCLE = "MAPPING_LIFECYCLE"
+    MAPPING_NOT_ACTIVE = "MAPPING_NOT_ACTIVE"
+    INVALID_ENTITY_TYPE = "INVALID_ENTITY_TYPE"
+    EMPTY_ENTITY = "EMPTY_ENTITY"
+    TOKEN_COLLISION = "TOKEN_COLLISION"
+    MALFORMED_TOKEN = "MALFORMED_TOKEN"
+    UNKNOWN_TOKEN = "UNKNOWN_TOKEN"
+    INVALID_TEXT_LENGTH = "INVALID_TEXT_LENGTH"
+    INVALID_SPAN = "INVALID_SPAN"
+    SECRET_DETECTED = "SECRET_DETECTED"
+    # C-01 egress-policy contract
+    POLICY_NOT_JSON = "POLICY_NOT_JSON"
+    POLICY_NESTING_TOO_DEEP = "POLICY_NESTING_TOO_DEEP"
+    DUPLICATE_POLICY_KEY = "DUPLICATE_POLICY_KEY"
+    POLICY_NOT_OBJECT = "POLICY_NOT_OBJECT"
+    POLICY_VALIDATION_FAILED = "POLICY_VALIDATION_FAILED"
+    MISSING_CATEGORY = "MISSING_CATEGORY"
+    UNKNOWN_CATEGORY = "UNKNOWN_CATEGORY"
+    CATEGORY_NOT_APPROVED = "CATEGORY_NOT_APPROVED"
+    # C-02 identity contract
+    UNTRUSTED_HEADER_REJECTED = "UNTRUSTED_HEADER_REJECTED"
+    MISSING_IDENTITY = "MISSING_IDENTITY"
+    INVALID_IDENTITY = "INVALID_IDENTITY"
+    SCOPE_MISMATCH = "SCOPE_MISMATCH"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    UNAUTHORIZED_PURPOSE = "UNAUTHORIZED_PURPOSE"
+    MISSING_REQUIRED_ROLE = "MISSING_REQUIRED_ROLE"
+    AUTH_EXPIRED = "AUTH_EXPIRED"
+    FUTURE_DATED_AUTH = "FUTURE_DATED_AUTH"
+    # C-03 protocol contracts
+    MALFORMED_JSON = "MALFORMED_JSON"
+    INVALID_UTF8 = "INVALID_UTF8"
+    DUPLICATE_JSON_KEY = "DUPLICATE_JSON_KEY"
+    CONTRACT_VIOLATION = "CONTRACT_VIOLATION"
+    # C-04 static exemption contract
+    INVALID_REGISTRY = "INVALID_REGISTRY"
+    INVALID_TEMPLATE = "INVALID_TEMPLATE"
+    REGISTRY_PARSE_FAILED = "REGISTRY_PARSE_FAILED"
+    # C-05 package manifest contract
+    INVALID_MANIFEST = "INVALID_MANIFEST"
+    CORRUPTED_PACKAGE = "CORRUPTED_PACKAGE"
+    VERSION_MISMATCH = "VERSION_MISMATCH"
+    # C-06 quality audit contract
+    DATASET_CONTAMINATION = "DATASET_CONTAMINATION"
+    INVALID_SAMPLE = "INVALID_SAMPLE"
+    UNAPPROVED_THRESHOLDS = "UNAPPROVED_THRESHOLDS"
+    SECRET_LEAKAGE_HARD_FAILURE = "SECRET_LEAKAGE_HARD_FAILURE"
+    THRESHOLD_NOT_MET = "THRESHOLD_NOT_MET"
+    # P-04 ingress gate
+    POLICY_REJECTED = "POLICY_REJECTED"
+    PROTOCOL_VIOLATION = "PROTOCOL_VIOLATION"
+    UNSUPPORTED_PROTOCOL = "UNSUPPORTED_PROTOCOL"
+    INVALID_PAYLOAD = "INVALID_PAYLOAD"
+    # Egress detector-results boundary
+    INVALID_DETECTOR_RESULTS = "INVALID_DETECTOR_RESULTS"
+    # D-group recognizer contracts
+    INVALID_RECOGNIZER = "INVALID_RECOGNIZER"
+    # A-02 envelope encryption contract
+    INVALID_CIPHERTEXT = "INVALID_CIPHERTEXT"
+    DECRYPTION_FAILED = "DECRYPTION_FAILED"
+    KMS_UNAVAILABLE = "KMS_UNAVAILABLE"
+    INVALID_WRAPPED_KEY = "INVALID_WRAPPED_KEY"
+    # D-06/D-07 dictionary contracts
+    DICTIONARY_INVALID = "DICTIONARY_INVALID"
+    DICTIONARY_CONFLICT = "DICTIONARY_CONFLICT"
+    # A-01 durable intent writer
+    AUDIT_WRITE_FAILED = "AUDIT_WRITE_FAILED"
+    # A-07 observability whitelist
+    OBSERVABILITY_VIOLATION = "OBSERVABILITY_VIOLATION"
+    # K-01 observation event contract
+    EVENT_INVALID = "EVENT_INVALID"
+    COLLECTION_NOT_AUTHORIZED = "COLLECTION_NOT_AUTHORIZED"
+    # K-02 encrypted spool writer
+    SPOOL_FULL = "SPOOL_FULL"
+    SPOOL_WRITE_FAILED = "SPOOL_WRITE_FAILED"
+    # P-17 bound egress client
+    UPSTREAM_BINDING_VIOLATION = "UPSTREAM_BINDING_VIOLATION"
+    INVALID_UPSTREAM = "INVALID_UPSTREAM"
+    # A-03 evidence gate
+    EVIDENCE_GATE_FAILED = "EVIDENCE_GATE_FAILED"
+    # K-03 spool relay
+    RELAY_SUBMIT_FAILED = "RELAY_SUBMIT_FAILED"
+    # D-08 NER model artifact contract
+    NER_MODEL_INVALID = "NER_MODEL_INVALID"
+    NER_EVALUATION_FAILED = "NER_EVALUATION_FAILED"
+    # D-09 NER windowing offset recovery
+    NER_OFFSET_UNRECOVERABLE = "NER_OFFSET_UNRECOVERABLE"
+    # D-10 bounded inference executor
+    INFERENCE_TIMEOUT = "INFERENCE_TIMEOUT"
+    INFERENCE_QUEUE_FULL = "INFERENCE_QUEUE_FULL"
+    # P-16 admission limiter
+    ADMISSION_LIMIT_EXCEEDED = "ADMISSION_LIMIT_EXCEEDED"
+    # P-05 request replacer
+    UNSAFE_REPLACEMENT = "UNSAFE_REPLACEMENT"
+    # A-08 audit watermark guard
+    AUDIT_WATERMARK_BLOCKED = "AUDIT_WATERMARK_BLOCKED"
+
+
+class SafetyError(ValueError):
+    """A controlled failure whose public message never contains business text.
+
+    ``detail`` is restricted to static diagnostic text only: field names,
+    protocol names, component names, and similar structural identifiers. It
+    must never carry submitted business content, credentials, or payloads.
+    """
+
+    def __init__(self, code: SafetyCode, detail: str | None = None) -> None:
+        if not isinstance(code, SafetyCode):
+            raise TypeError("SafetyError requires a registered SafetyCode")
+        self.code = code
+        message = code.value
+        if detail:
+            message = f"{message} ({detail})"
+        super().__init__(message)
