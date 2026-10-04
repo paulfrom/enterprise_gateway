@@ -310,6 +310,15 @@ class ReconcileCorruptionTests(unittest.TestCase):
             self.assertTrue((Path(d) / "aaa-intent.result.json").exists())
             self.assertFalse((Path(d) / "aaa-intent.result.quarantined").exists())
 
+    def test_corrupt_or_empty_reconcile_document_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            commit_release_intent(d, make_intent("aaa-intent"))
+            reconcile_path = Path(d) / "aaa-intent.reconcile.json"
+            reconcile_path.write_bytes(b"")
+            with self.assertRaises(SafetyError) as ctx:
+                rr.reconcile_after_crash(d)
+            assert_clean_controlled(self, ctx, SafetyCode.CONTRACT_VIOLATION)
+
 
 if __name__ == "__main__":
     unittest.main()

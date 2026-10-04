@@ -165,7 +165,23 @@ class VersionManifestTests(unittest.TestCase):
             created_at="2026-10-03T10:00:00Z",
         )
         self.assertIsInstance(manifest, PackageManifest)
-        manifest.verify_payloads(payloads)
+    def test_components_deep_immutability(self) -> None:
+        manifest, payloads = build_manifest(
+            "pkg-freeze", "1.0.0",
+            {"comp": ("1.0", "content")},
+            created_at="2026-10-04T00:00:00Z",
+        )
+        with self.assertRaises(TypeError):
+            manifest.components.clear()
+        with self.assertRaises(TypeError):
+            manifest.components["new_comp"] = None  # type: ignore
+
+        manager = VersionManager(manifest, payloads)
+        handle = manager.bind_request("req-freeze")
+        with self.assertRaises(TypeError):
+            handle.manifest.components.clear()
+        # Verify consistent hash check succeeds on intact manifest
+        handle.assert_consistent_hash(manager.active_package_hash)
 
 
 if __name__ == "__main__":

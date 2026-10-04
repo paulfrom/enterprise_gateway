@@ -38,7 +38,7 @@ def _require_tz(dt: datetime, name: str) -> None:
         raise SafetyError(SafetyCode.INVALID_IDENTITY, f"{name} must include a timezone")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class TrustedIdentity:
     """An authenticated, immutable caller identity bound to a protection domain.
 
@@ -55,7 +55,35 @@ class TrustedIdentity:
     authenticated_at: datetime
     expires_at: datetime
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        subject_id: str,
+        tenant_id: str,
+        domain: str,
+        roles: frozenset[str],
+        purposes: frozenset[str],
+        source_acl: frozenset[str] | None = None,
+        auth_source: str = "",
+        authenticated_at: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        resolved_acl = (
+            frozenset({f"{domain}:restricted-candidate"})
+            if source_acl is None or not source_acl
+            else source_acl
+        )
+        object.__setattr__(self, "subject_id", subject_id)
+        object.__setattr__(self, "tenant_id", tenant_id)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "roles", roles)
+        object.__setattr__(self, "purposes", purposes)
+        object.__setattr__(self, "source_acl", resolved_acl)
+        object.__setattr__(self, "auth_source", auth_source)
+        object.__setattr__(self, "authenticated_at", authenticated_at)
+        object.__setattr__(self, "expires_at", expires_at)
+        self._validate()
+
+    def _validate(self) -> None:
         for field_name, value in [
             ("subject_id", self.subject_id),
             ("tenant_id", self.tenant_id),
@@ -91,6 +119,27 @@ class TrustedIdentity:
     def is_valid_at(self, now: datetime) -> bool:
         _require_tz(now, "now")
         return self.authenticated_at <= now < self.expires_at
+
+
+def validate_request_authorization(
+    identity: TrustedIdentity,
+    *,
+    now: datetime,
+    required_purpose: str = "model-query",
+) -> None:
+    """Validate identity validity period and required request intent/purpose."""
+    if not isinstance(identity, TrustedIdentity):
+        raise SafetyError(SafetyCode.INVALID_IDENTITY)
+    _require_tz(now, "now")
+    if identity.authenticated_at > now:
+        raise SafetyError(SafetyCode.FUTURE_DATED_AUTH, "identity is future-dated")
+    if identity.expires_at <= now:
+        raise SafetyError(SafetyCode.AUTH_EXPIRED, "identity has expired")
+    if required_purpose not in identity.purposes:
+        raise SafetyError(
+            SafetyCode.UNAUTHORIZED_PURPOSE,
+            f"identity lacks required purpose: {required_purpose}",
+        )
 
 
 def assert_no_client_header_spoofing(headers: Mapping[str, Any]) -> None:

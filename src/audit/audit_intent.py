@@ -46,6 +46,15 @@ class ReleaseIntent(BaseModel):
     policy_version: str
     package_version: str
     purpose: str
+    caller_id: str | None = None
+    tenant_id: str | None = None
+    protocol: str | None = None
+    request_model: str | None = None
+    upstream_model: str | None = None
+    channel_version: str | None = None
+    package_hash: str | None = None
+    route_id: str | None = None
+    model: str | None = None
 
     @field_validator("intent_id")
     @classmethod
@@ -83,7 +92,7 @@ def serialize_intent(intent: ReleaseIntent) -> bytes:
     """Canonical JSON bytes (sorted keys, compact separators, UTF-8)."""
     if not isinstance(intent, ReleaseIntent):
         raise TypeError("intent must be a ReleaseIntent")
-    payload = intent.model_dump(mode="json")
+    payload = intent.model_dump(mode="json", exclude_none=True)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
@@ -92,11 +101,26 @@ def commit_release_intent(directory: str | Path, intent: ReleaseIntent) -> Relea
 
     Write/fsync/rename failures (including ENOSPC) raise
     ``SafetyError(AUDIT_WRITE_FAILED)`` with no exception chain and produce no
-    permit handle.
+    permit handle. If an intent with the same intent_id already exists, it cannot
+    be overwritten and raises ``SafetyError(CONTRACT_VIOLATION)``.
     """
     if not isinstance(intent, ReleaseIntent):
         raise TypeError("intent must be a ReleaseIntent")
+    target_path = Path(directory) / f"{intent.intent_id}.intent.json"
     data = serialize_intent(intent)
+    if target_path.exists():
+        existing_data = target_path.read_bytes()
+        if existing_data != data:
+            raise SafetyError(
+                SafetyCode.CONTRACT_VIOLATION,
+                "cannot overwrite existing intent with different payload",
+            )
+        return ReleasePermit(
+            intent_id=intent.intent_id,
+            recorded_at=intent.recorded_at,
+            path=target_path,
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
     write_failed = False
     try:
         committed = durable_commit(directory, f"{intent.intent_id}.intent.json", data)

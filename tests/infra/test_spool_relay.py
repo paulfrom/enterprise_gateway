@@ -453,6 +453,25 @@ class QuarantineTests(unittest.TestCase):
             self.assertTrue(tmp_residual.exists())
             self.assertEqual(spool_record_files(d), [])
 
+    def test_misbound_envelope_is_quarantined_not_submitted(self):
+        kms = StaticTestKmsProvider()
+        event = build_events()[0]
+        # Encrypt event under a different domain in the envelope
+        record = encrypt_record(
+            kms, serialize_event(event),
+            domain="different-domain",
+            bucket=event.retention_policy,
+            record_id="misbound-evt-001",
+            purpose=f"{event.purpose}:knowledge_spool",
+        )
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "misbound-evt-001.env.json").write_bytes(serialize_record(record))
+            sink = InMemoryLedgerSink()
+            stats = SpoolRelay(d, kms, sink).relay_once()
+            self.assertEqual((stats.submitted, stats.failed, stats.quarantined), (0, 0, 1))
+            self.assertEqual(sink.contribution_count, 0)
+            self.assertEqual(stats.quarantined_records[0].code, SafetyCode.SCOPE_MISMATCH)
+
 
 if __name__ == "__main__":
     unittest.main()

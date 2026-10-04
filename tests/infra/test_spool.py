@@ -231,6 +231,18 @@ class OptionalGapPolicyTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 writer.collect("not-an-event", mode=CollectionMode.REQUIRED)  # type: ignore[arg-type]
 
+    def test_gap_records_bounded_by_watermark(self):
+        with tempfile.TemporaryDirectory() as d:
+            writer = make_writer(d, max_files=1)
+            writer.collect(build_event(), mode=CollectionMode.REQUIRED)
+            gap1 = writer.collect(build_event(), mode=CollectionMode.OPTIONAL_WITH_GAP_POLICY)
+            self.assertIsInstance(gap1, GapRecord)
+            # Second gap attempt exceeds max_gap_files and must raise SPOOL_WRITE_FAILED
+            with self.assertRaises(SafetyError) as ctx:
+                writer.collect(build_event(), mode=CollectionMode.OPTIONAL_WITH_GAP_POLICY)
+            self.assertEqual(ctx.exception.code, SafetyCode.SPOOL_WRITE_FAILED)
+            self.assertIn("gap_record", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

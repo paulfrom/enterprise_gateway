@@ -73,6 +73,59 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
             path.write_text(json.dumps(ReviewSettings().model_dump()), encoding="utf-8")
             self.assertFalse(load_settings(path).external_egress)
 
+    async def test_mounted_pipeline_roundtrip_and_safety_error(self):
+        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
+        from infra.errors import SafetyCode, SafetyError
+        from protocol.identity import TrustedIdentity
+
+        ident = TrustedIdentity(
+            subject_id="user-1",
+            tenant_id="tenant-1",
+            domain="corp.test",
+            roles=frozenset(["employee"]),
+            purposes=frozenset(["model-query"]),
+            auth_source="mTLS",
+            authenticated_at=datetime(2026, 10, 4, 8, 0, 0, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 10, 4, 18, 0, 0, tzinfo=timezone.utc),
+        )
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.domain = "corp.test"
+
+        # Mock success result
+        mock_response = MagicMock()
+        mock_response.model_dump.return_value = {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": "hello"}}]
+        }
+        mock_result = MagicMock()
+        mock_result.response = mock_response
+        mock_pipeline.process_request.return_value = mock_result
+
+        app = create_app(
+            pipeline=mock_pipeline,
+            trusted_identity=ident,
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://review") as client:
+            # Positive 200
+            res = await client.post("/v1/chat/completions", json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["id"], "chatcmpl-test")
+
+            # Missing identity returns 401 when no identity is available
+            app_no_id = create_app(pipeline=mock_pipeline)
+            async with AsyncClient(transport=ASGITransport(app=app_no_id), base_url="http://review") as client_no_id:
+                res_no_id = await client_no_id.post("/v1/chat/completions", json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "hi"}]})
+                self.assertEqual(res_no_id.status_code, 401)
+
+            # Safety error mapping (e.g. SECRET_DETECTED -> 403)
+            mock_pipeline.process_request.side_effect = SafetyError(SafetyCode.SECRET_DETECTED, "secret")
+            res_sec = await client.post("/v1/chat/completions", json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "sk-123"}]})
+            self.assertEqual(res_sec.status_code, 403)
+            self.assertEqual(res_sec.json()["error"]["code"], "SECRET_DETECTED")
+
 
 if __name__ == "__main__":
     unittest.main()

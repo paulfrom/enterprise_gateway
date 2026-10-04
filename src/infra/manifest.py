@@ -57,6 +57,37 @@ class ComponentEntry(BaseModel):
         return value
 
 
+class ImmutableDict(dict):
+    """Deeply immutable mapping to prevent tampering with manifest components."""
+
+    def __copy__(self) -> ImmutableDict:
+        return self
+
+    def __deepcopy__(self, memo: Any) -> ImmutableDict:
+        return self
+
+    def __setitem__(self, key: Any, value: Any) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+    def __delitem__(self, key: Any) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+    def clear(self) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+    def pop(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+    def popitem(self) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+    def update(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+    def setdefault(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("ImmutableDict cannot be modified")
+
+
 class PackageManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -65,6 +96,11 @@ class PackageManifest(BaseModel):
     created_at: str
     components: dict[str, ComponentEntry]
     package_hash: str
+
+    @field_validator("components", mode="after")
+    @classmethod
+    def _freeze_components(cls, value: Mapping[str, ComponentEntry]) -> ImmutableDict:
+        return ImmutableDict(value)
 
     @model_validator(mode="after")
     def _verify_package_hash(self) -> PackageManifest:
@@ -135,6 +171,11 @@ class RequestVersionHandle:
         """Verify that operations within the same request do not mix package hashes."""
         if current_hash != self.package_hash:
             raise SafetyError(SafetyCode.VERSION_MISMATCH)
+        expected = _compute_package_hash(
+            self.manifest.manifest_id, self.manifest.version, self.manifest.components
+        )
+        if expected.lower() != self.package_hash.lower():
+            raise SafetyError(SafetyCode.CORRUPTED_PACKAGE)
 
 
 def _require_tz(dt: datetime, name: str) -> None:
@@ -169,11 +210,12 @@ class VersionManager:
         else:
             _require_tz(now, "now")
             timestamp = now
+        manifest_copy = self._active_manifest.model_copy(deep=True)
         return RequestVersionHandle(
             request_id=request_id,
             package_hash=self._active_manifest.package_hash,
             version=self._active_manifest.version,
-            manifest=self._active_manifest,
+            manifest=manifest_copy,
             bound_at=timestamp,
         )
 

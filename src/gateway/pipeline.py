@@ -36,11 +36,16 @@ from detection.detection_orchestrator import DetectionOrchestrator
 from infra.egress_client import BoundEgressClient
 from infra.errors import SafetyCode, SafetyError
 from audit.evidence_gate import EvidenceGate, EvidencePermit, EvidenceSpec
-from protocol.identity import FORBIDDEN_CLIENT_IDENTITY_HEADERS, TrustedIdentity
+from protocol.identity import (
+    FORBIDDEN_CLIENT_IDENTITY_HEADERS,
+    TrustedIdentity,
+    validate_request_authorization,
+)
 from gateway.ingress import IngressValidator, ValidatedIngressRequest
-from knowledge.knowledge_events import ObservationEvent
+from infra.manifest import RequestVersionHandle
+from knowledge.knowledge_events import ObservationEvent, build_gateway_observation
 from masking.mapping import MappingContext
-from policy.policy import ClassificationPolicy
+from policy.policy import ClassificationPolicy, resolve_egress_policy
 from protocol.protocols import (
     CLAUDE_MESSAGES_PROTOCOL,
     DEEPSEEK_CHAT_PROTOCOL,
@@ -90,6 +95,8 @@ class ProtectedPipeline:
         spool_writer: SpoolWriter | None = None,
         exemption_registry: StaticExemptionRegistry | None = None,
         package_version: str = "0.1.0",
+        allowed_models: frozenset[str] | None = None,
+        version_handle: RequestVersionHandle | None = None,
     ) -> None:
         if protocol not in (DEEPSEEK_CHAT_PROTOCOL, CLAUDE_MESSAGES_PROTOCOL):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unsupported protocol")
@@ -107,6 +114,8 @@ class ProtectedPipeline:
         self.spool_writer = spool_writer
         self.exemption_registry = exemption_registry
         self.package_version = package_version
+        self.allowed_models = allowed_models
+        self.version_handle = version_handle
 
     def process_request(
         self,
@@ -119,6 +128,7 @@ class ProtectedPipeline:
         evidence_spec: EvidenceSpec | None = None,
         observation_event: ObservationEvent | None = None,
         collection_mode: CollectionMode | None = None,
+        auto_collect: bool = True,
     ) -> PipelineResult:
         """Execute the end-to-end protected pipeline for an incoming request.
 
@@ -128,15 +138,40 @@ class ProtectedPipeline:
             raise TypeError("context must be a MappingContext")
         context.require_active()
 
-        # Gate 1: Identity & Header Check (C-02)
+        now = datetime.now(timezone.utc)
+
+        # Gate 1: Identity validity period and required request intent/purpose (C-02, O-02)
+        validate_request_authorization(identity, now=now, required_purpose="model-query")
+
+        # Gate 1a: Untrusted Client Headers Check (C-02)
         for h in headers:
             if h.lower() in FORBIDDEN_CLIENT_IDENTITY_HEADERS:
                 raise SafetyError(SafetyCode.UNTRUSTED_HEADER_REJECTED, h)
 
+        # Gate 1b: Domain Scope Consistency Checks (C-02, O-05)
         if identity.domain != self.domain:
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "domain mismatch")
 
-        # Gate 2: Ingress validation (C-01, C-03, C-04)
+        if context.domain != self.domain:
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "context domain mismatch")
+
+        egress_policy = resolve_egress_policy(self.policy, category)
+        if egress_policy.scope != self.domain:
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "policy scope mismatch")
+
+        if (
+            self.detector._dictionary is not None
+            and getattr(self.detector._dictionary, "domain", None) != self.domain
+        ):
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "dictionary domain mismatch")
+
+        # Gate 1c: Version Provenance & RequestVersionHandle Consistency (C-05)
+        if self.version_handle is not None:
+            self.version_handle.assert_consistent_hash()
+            if self.version_handle.manifest.version != self.package_version:
+                raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "package version mismatch")
+
+        # Gate 2: Ingress validation (C-01, C-03, C-04, O-01)
         validated = IngressValidator.validate_request(
             raw_body=raw_body,
             protocol=self.protocol,
@@ -144,6 +179,7 @@ class ProtectedPipeline:
             category=category,
             policy=self.policy,
             exemption_registry=self.exemption_registry,
+            allowed_models=self.allowed_models,
         )
 
         raw_bytes = raw_body.encode("utf-8") if isinstance(raw_body, str) else raw_body
@@ -172,35 +208,76 @@ class ProtectedPipeline:
             # Gate 6: Audit Watermark Pre-flight Check (A-08)
             watermark_assessment = self.watermark_guard.check_egress_permitted()
 
-            # Gate 7: Evidence Gate: Intent + Encryption (A-03)
+            # Gate 7: Evidence Gate: Intent + Encryption (A-03, A-01)
             intent = ReleaseIntent(
                 intent_id=f"intent-{uuid.uuid4().hex[:12]}",
-                recorded_at=datetime.now(timezone.utc),
+                recorded_at=now,
                 domain=identity.domain,
                 category=category,
                 policy_version=self.policy.version,
                 package_version=self.package_version,
                 purpose="model-query",
+                route_id=self.channel_id,
+                model=validated.model,
             )
             evidence_permit = self.evidence_gate.admit(intent, evidence_spec)
 
-            # Gate 8: Knowledge Spooling (K-02)
+            # Gate 8: Knowledge Spooling (K-02, O-03)
             spool_permit: SpoolPermit | None = None
-            if self.spool_writer is not None and observation_event is not None:
-                spool_permit = self.spool_writer.collect(
-                    observation_event,
-                    mode=collection_mode or CollectionMode.REQUIRED,
-                )
+            mode = collection_mode or (
+                CollectionMode.REQUIRED if self.spool_writer is not None else CollectionMode.OFF
+            )
+            if mode == CollectionMode.REQUIRED:
+                if self.spool_writer is None:
+                    raise SafetyError(SafetyCode.SPOOL_WRITE_FAILED, "spool writer required but missing")
+                if observation_event is None:
+                    if auto_collect:
+                        digest = (
+                            hashlib.sha256(evidence_spec.plaintext).hexdigest()
+                            if evidence_spec is not None
+                            else hashlib.sha256(raw_bytes).hexdigest()
+                        )
+                        observation_event = build_gateway_observation(
+                            tenant=identity.tenant_id,
+                            domain=self.domain,
+                            request_id=f"req-{uuid.uuid4().hex[:12]}",
+                            evidence_digest=digest,
+                            source_acl=identity.source_acl,
+                        )
+                    else:
+                        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "required collection missing observation event")
+                spool_permit = self.spool_writer.collect(observation_event, mode=mode)
+            elif mode == CollectionMode.BEST_EFFORT:
+                if self.spool_writer is not None:
+                    if observation_event is None and auto_collect:
+                        digest = (
+                            hashlib.sha256(evidence_spec.plaintext).hexdigest()
+                            if evidence_spec is not None
+                            else hashlib.sha256(raw_bytes).hexdigest()
+                        )
+                        observation_event = build_gateway_observation(
+                            tenant=identity.tenant_id,
+                            domain=self.domain,
+                            request_id=f"req-{uuid.uuid4().hex[:12]}",
+                            evidence_digest=digest,
+                            source_acl=identity.source_acl,
+                        )
+                    if observation_event is not None:
+                        spool_permit = self.spool_writer.collect(observation_event, mode=mode)
 
             # Gate 9: Outbound Egress Send (P-17)
             redacted_payload = json.dumps(
                 redacted_request.model_dump(), ensure_ascii=False
             ).encode("utf-8")
 
+            egress_headers = {
+                "content-type": "application/json",
+                "x-protection-package-version": self.package_version,
+            }
             upstream_response = self.egress_client.request(
                 "POST",
                 self.path,
-                headers={"content-type": "application/json"},
+                headers=egress_headers,
                 content=redacted_payload,
             )
 
@@ -209,7 +286,10 @@ class ProtectedPipeline:
                 raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "upstream non-200")
 
             restored_response = restore_response(
-                self.protocol, upstream_response.content, context
+                self.protocol,
+                upstream_response.content,
+                context,
+                allowed_models=self.allowed_models,
             )
 
             return PipelineResult(

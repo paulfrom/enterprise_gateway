@@ -248,7 +248,7 @@ def _parse_iso(value: object) -> datetime | None:
         return None
 
 
-_INTENT_FIELDS = (
+_REQUIRED_INTENT_FIELDS = (
     "intent_id",
     "recorded_at",
     "domain",
@@ -257,23 +257,29 @@ _INTENT_FIELDS = (
     "package_version",
     "purpose",
 )
+_OPTIONAL_INTENT_FIELDS = (
+    "caller_id",
+    "tenant_id",
+    "protocol",
+    "request_model",
+    "upstream_model",
+    "channel_version",
+    "package_hash",
+)
+_ALL_ALLOWED_INTENT_FIELDS = set(_REQUIRED_INTENT_FIELDS) | set(_OPTIONAL_INTENT_FIELDS)
 
 
 def _valid_intent_payload(payload: object) -> bool:
-    """Structural revalidation of one A-01 intent document.
-
-    ``ReleaseIntent`` is strict and never coerces, so its own JSON cannot be
-    revalidated with ``model_validate``; the reconciler checks the same
-    contract structurally: exactly the A-01 field set, all non-empty strings,
-    a safe ``intent_id`` token, and a parseable timezone-aware timestamp.
-    """
+    """Structural revalidation of one A-01 intent document."""
     if not isinstance(payload, dict):
         return False
-    if set(payload) != set(_INTENT_FIELDS):
+    keys = set(payload)
+    if not set(_REQUIRED_INTENT_FIELDS).issubset(keys):
         return False
-    for key in _INTENT_FIELDS:
-        value = payload[key]
-        if not isinstance(value, str) or not value.strip():
+    if not keys.issubset(_ALL_ALLOWED_INTENT_FIELDS):
+        return False
+    for key, value in payload.items():
+        if value is not None and (not isinstance(value, str) or not value.strip()):
             return False
     if not _INTENT_ID_RE.fullmatch(payload["intent_id"]):
         return False
@@ -364,6 +370,17 @@ def reconcile_after_crash(directory: str | Path) -> ReconcileSummary:
     for intent_id in sorted(intents):
         reconcile_path = target_dir / f"{intent_id}{_RECONCILE_SUFFIX}"
         if reconcile_path.exists():
+            corrupt = False
+            try:
+                raw_bytes = reconcile_path.read_bytes()
+                if not raw_bytes:
+                    corrupt = True
+                else:
+                    ReconcileRecord.model_validate_json(raw_bytes)
+            except Exception:
+                corrupt = True
+            if corrupt:
+                raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "corrupt reconcile record")
             already += 1  # adjudicated earlier; never re-judged
             continue
         result = results.get(intent_id)

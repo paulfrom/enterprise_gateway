@@ -65,8 +65,10 @@ class DeepSeekChatRequest(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def _model_whitelisted(cls, value: str) -> str:
-        return _check_whitelist(DEEPSEEK_CHAT_PROTOCOL, DEEPSEEK_MODEL_WHITELIST, value)
+    def _model_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("model must be a non-empty string")
+        return value
 
 
 class ClaudeTextBlock(BaseModel):
@@ -99,14 +101,21 @@ class ClaudeMessagesRequest(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def _model_whitelisted(cls, value: str) -> str:
-        return _check_whitelist(CLAUDE_MESSAGES_PROTOCOL, CLAUDE_MODEL_WHITELIST, value)
+    def _model_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("model must be a non-empty string")
+        return value
 
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
-def _parse(protocol: str, model_cls: type[_ModelT], raw: str | bytes) -> _ModelT:
+def _parse(
+    protocol: str,
+    model_cls: type[_ModelT],
+    raw: str | bytes,
+    allowed_models: frozenset[str] | None = None,
+) -> _ModelT:
     if not isinstance(raw, (str, bytes)):
         raise SafetyError(SafetyCode.MALFORMED_JSON, protocol)
     payload = parse_strict_json(raw, reject=_reject_json(protocol))
@@ -117,12 +126,20 @@ def _parse(protocol: str, model_cls: type[_ModelT], raw: str | bytes) -> _ModelT
         validation_failed = True
     if validation_failed:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
+    if allowed_models is not None and parsed.model not in allowed_models:
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, f"model not in allowed models for {protocol}")
     return parsed
 
 
-def parse_deepseek_chat_completion(raw: str | bytes) -> DeepSeekChatRequest:
-    return _parse(DEEPSEEK_CHAT_PROTOCOL, DeepSeekChatRequest, raw)
+def parse_deepseek_chat_completion(
+    raw: str | bytes,
+    allowed_models: frozenset[str] | None = DEEPSEEK_MODEL_WHITELIST,
+) -> DeepSeekChatRequest:
+    return _parse(DEEPSEEK_CHAT_PROTOCOL, DeepSeekChatRequest, raw, allowed_models=allowed_models)
 
 
-def parse_claude_messages(raw: str | bytes) -> ClaudeMessagesRequest:
-    return _parse(CLAUDE_MESSAGES_PROTOCOL, ClaudeMessagesRequest, raw)
+def parse_claude_messages(
+    raw: str | bytes,
+    allowed_models: frozenset[str] | None = CLAUDE_MODEL_WHITELIST,
+) -> ClaudeMessagesRequest:
+    return _parse(CLAUDE_MESSAGES_PROTOCOL, ClaudeMessagesRequest, raw, allowed_models=allowed_models)

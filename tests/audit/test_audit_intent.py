@@ -135,6 +135,13 @@ class CommitFailureTests(unittest.TestCase):
             permit = commit_release_intent(d, make_intent())  # retry succeeds
             self.assertTrue(permit.path.exists())
 
+    def test_overwrite_intent_with_different_payload_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            commit_release_intent(d, make_intent(purpose="first-purpose"))
+            with self.assertRaises(SafetyError) as ctx:
+                commit_release_intent(d, make_intent(purpose="different-purpose"))
+            self.assertEqual(ctx.exception.code, SafetyCode.CONTRACT_VIOLATION)
+
 
 if __name__ == "__main__":
     unittest.main()

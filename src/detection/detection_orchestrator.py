@@ -205,6 +205,8 @@ class DetectionOrchestrator:
         """
         if not isinstance(text, str):
             raise SafetyError(SafetyCode.INVALID_TEXT, "text")
+        if not self._recognizers:
+            raise SafetyError(SafetyCode.DETECTION_INCOMPLETE, "rule")
         if self._dictionary is None:
             raise SafetyError(SafetyCode.DETECTION_INCOMPLETE, "dictionary")
         if self._ner_package_dir is None:

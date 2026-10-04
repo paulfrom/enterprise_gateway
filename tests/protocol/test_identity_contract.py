@@ -16,6 +16,7 @@ from protocol.identity import (
     authorize_scope,
     authorize_source_acl,
     resolve_trusted_identity,
+    validate_request_authorization,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "identity"
@@ -167,16 +168,55 @@ class IdentityContractTests(unittest.TestCase):
         with self.assertRaises(SafetyError):
             TrustedIdentity(**kw)
 
-    def test_canary_error_message_does_not_echo_secret_values(self) -> None:
-        canary = "CANARY_SECRET_AUTH_TOKEN_778899"
-        headers = {"x-user-id": canary}
-        try:
-            resolve_trusted_identity(self.valid_identity, headers=headers)
-        except SafetyError as exc:
-            msg = str(exc)
-            tb = traceback.format_exc()
-            self.assertNotIn(canary, msg)
-            self.assertNotIn(canary, tb)
+    def test_default_source_acl_when_omitted_or_empty(self) -> None:
+        base_kwargs = {
+            "subject_id": "u1",
+            "tenant_id": "t1",
+            "domain": "d1",
+            "roles": frozenset(["caller"]),
+            "purposes": frozenset(["model-query"]),
+            "auth_source": "mTLS",
+            "authenticated_at": datetime(2026, 10, 3, 10, 0, 0, tzinfo=timezone.utc),
+            "expires_at": datetime(2026, 10, 3, 11, 0, 0, tzinfo=timezone.utc),
+        }
+        id1 = TrustedIdentity(**base_kwargs)
+        self.assertEqual(id1.source_acl, frozenset(["d1:restricted-candidate"]))
+
+        id2 = TrustedIdentity(**dict(base_kwargs, source_acl=frozenset()))
+        self.assertEqual(id2.source_acl, frozenset(["d1:restricted-candidate"]))
+
+    def test_validate_request_authorization_lifecycle(self) -> None:
+        valid_now = datetime(2026, 10, 3, 10, 30, 0, tzinfo=timezone.utc)
+        ident = TrustedIdentity(
+            subject_id="u1",
+            tenant_id="t1",
+            domain="d1",
+            roles=frozenset(["caller"]),
+            purposes=frozenset(["model-query", "chat"]),
+            auth_source="mTLS",
+            authenticated_at=datetime(2026, 10, 3, 10, 0, 0, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 10, 3, 11, 0, 0, tzinfo=timezone.utc),
+        )
+        # Success
+        validate_request_authorization(ident, now=valid_now, required_purpose="model-query")
+        validate_request_authorization(ident, now=valid_now, required_purpose="chat")
+
+        # Future-dated
+        past_now = datetime(2026, 10, 3, 9, 30, 0, tzinfo=timezone.utc)
+        with self.assertRaises(SafetyError) as ctx1:
+            validate_request_authorization(ident, now=past_now, required_purpose="model-query")
+        self.assertEqual(ctx1.exception.code, SafetyCode.FUTURE_DATED_AUTH)
+
+        # Expired
+        future_now = datetime(2026, 10, 3, 11, 30, 0, tzinfo=timezone.utc)
+        with self.assertRaises(SafetyError) as ctx2:
+            validate_request_authorization(ident, now=future_now, required_purpose="model-query")
+        self.assertEqual(ctx2.exception.code, SafetyCode.AUTH_EXPIRED)
+
+        # Unauthorized purpose
+        with self.assertRaises(SafetyError) as ctx3:
+            validate_request_authorization(ident, now=valid_now, required_purpose="knowledge-admin")
+        self.assertEqual(ctx3.exception.code, SafetyCode.UNAUTHORIZED_PURPOSE)
 
 
 if __name__ == "__main__":

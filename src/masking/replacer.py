@@ -45,14 +45,20 @@ from detection.spans import Span, redact_text
 __all__ = ["replace_request"]
 
 _DEEPSEEK_MESSAGE_CONTENT = re.compile(r"messages\[(\d+)\]\.content\Z")
+_DEEPSEEK_STOP = re.compile(r"stop\Z")
+_DEEPSEEK_STOP_INDEX = re.compile(r"stop\[(\d+)\]\Z")
 _CLAUDE_SYSTEM = re.compile(r"system\Z")
 _CLAUDE_MESSAGE_CONTENT = re.compile(r"messages\[(\d+)\]\.content\Z")
 _CLAUDE_BLOCK_TEXT = re.compile(r"messages\[(\d+)\]\.content\[(\d+)\]\.text\Z")
+_CLAUDE_STOP_SEQUENCE_INDEX = re.compile(r"stop_sequences\[(\d+)\]\Z")
 
 _DEEPSEEK_CONTENT = "deepseek_content"
+_DEEPSEEK_STOP_KIND = "deepseek_stop"
+_DEEPSEEK_STOP_INDEX_KIND = "deepseek_stop_index"
 _CLAUDE_SYSTEM_KIND = "claude_system"
 _CLAUDE_CONTENT = "claude_content"
 _CLAUDE_BLOCK = "claude_block_text"
+_CLAUDE_STOP_SEQUENCE_INDEX_KIND = "claude_stop_sequence_index"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +76,16 @@ def _resolve_location(
     if not isinstance(path, str):
         return None
     if protocol == DEEPSEEK_CHAT_PROTOCOL:
+        if _DEEPSEEK_STOP.fullmatch(path):
+            if isinstance(parsed.stop, str):
+                return _Location(_DEEPSEEK_STOP_KIND, ())
+            return None
+        match_stop = _DEEPSEEK_STOP_INDEX.fullmatch(path)
+        if match_stop is not None:
+            idx = int(match_stop.group(1))
+            if isinstance(parsed.stop, list) and idx < len(parsed.stop):
+                return _Location(_DEEPSEEK_STOP_INDEX_KIND, (idx,))
+            return None
         match = _DEEPSEEK_MESSAGE_CONTENT.fullmatch(path)
         if match is None:
             return None
@@ -77,6 +93,12 @@ def _resolve_location(
         if index >= len(parsed.messages):
             return None
         return _Location(_DEEPSEEK_CONTENT, (index,))
+    match_stop_seq = _CLAUDE_STOP_SEQUENCE_INDEX.fullmatch(path)
+    if match_stop_seq is not None:
+        idx = int(match_stop_seq.group(1))
+        if isinstance(parsed.stop_sequences, list) and idx < len(parsed.stop_sequences):
+            return _Location(_CLAUDE_STOP_SEQUENCE_INDEX_KIND, (idx,))
+        return None
     match = _CLAUDE_BLOCK_TEXT.fullmatch(path)
     if match is not None:
         i, j = int(match.group(1)), int(match.group(2))
@@ -103,6 +125,16 @@ def _text_at(parsed: DeepSeekChatRequest | ClaudeMessagesRequest, location: _Loc
     kind = location.kind
     if kind == _DEEPSEEK_CONTENT:
         return parsed.messages[location.indices[0]].content
+    if kind == _DEEPSEEK_STOP_KIND:
+        return parsed.stop if isinstance(parsed.stop, str) else None
+    if kind == _DEEPSEEK_STOP_INDEX_KIND:
+        return parsed.stop[location.indices[0]] if isinstance(parsed.stop, list) else None
+    if kind == _CLAUDE_STOP_SEQUENCE_INDEX_KIND:
+        return (
+            parsed.stop_sequences[location.indices[0]]
+            if isinstance(parsed.stop_sequences, list)
+            else None
+        )
     if kind == _CLAUDE_SYSTEM_KIND:
         return parsed.system
     if kind == _CLAUDE_CONTENT:
@@ -119,6 +151,12 @@ def _set_text(payload: dict, location: _Location, value: str) -> None:
     kind = location.kind
     if kind == _DEEPSEEK_CONTENT:
         payload["messages"][location.indices[0]]["content"] = value
+    elif kind == _DEEPSEEK_STOP_KIND:
+        payload["stop"] = value
+    elif kind == _DEEPSEEK_STOP_INDEX_KIND:
+        payload["stop"][location.indices[0]] = value
+    elif kind == _CLAUDE_STOP_SEQUENCE_INDEX_KIND:
+        payload["stop_sequences"][location.indices[0]] = value
     elif kind == _CLAUDE_SYSTEM_KIND:
         payload["system"] = value
     elif kind == _CLAUDE_CONTENT:
@@ -213,8 +251,6 @@ def replace_request(
     replacements: dict[str, str] = {}
     for path in sorted(span_sets):
         spans = span_sets[path]
-        if not spans:
-            continue
         fragment = fragments_by_path[path]
         if _text_at(parsed, locations[path]) != fragment.content:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "fragment")

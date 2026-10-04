@@ -52,7 +52,14 @@ _MAX_REDIRECTS = 8
 # exists; the injected credential is the only Authorization ever sent.
 # Host is not caller-settable: it is derived from the bound URL by httpx.
 EGRESS_HEADER_WHITELIST: frozenset[str] = frozenset(
-    {"content-type", "accept", "authorization"}
+    {
+        "content-type",
+        "accept",
+        "authorization",
+        "x-api-key",
+        "anthropic-version",
+        "x-protection-package-version",
+    }
 )
 
 Resolver = Callable[[str], Iterable[str]]
@@ -112,6 +119,7 @@ class BoundUpstream:
     timeout_seconds: float
     allowed_addresses: frozenset[str]
     max_redirects: int = 0
+    package_version: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.channel_id, str) or not self.channel_id.strip():
@@ -147,6 +155,10 @@ class BoundUpstream:
             or self.timeout_seconds <= 0
         ):
             raise SafetyError(SafetyCode.INVALID_UPSTREAM, "timeout_seconds")
+        if self.package_version is not None and (
+            not isinstance(self.package_version, str) or not self.package_version.strip()
+        ):
+            raise SafetyError(SafetyCode.INVALID_UPSTREAM, "package_version")
         addresses = _normalize_addresses(self.allowed_addresses)
         if (
             not isinstance(self.max_redirects, int)
@@ -318,13 +330,24 @@ class BoundEgressClient:
                 raise TypeError("headers must be a mapping")
             for name, value in headers.items():
                 lowered = name.lower() if isinstance(name, str) else ""
+                # Strip any caller authentication headers unconditionally
+                if lowered in ("authorization", "x-api-key"):
+                    continue
                 if lowered not in EGRESS_HEADER_WHITELIST:
                     continue
-                if lowered == "authorization" and self._binding.credential is not None:
-                    continue
                 filtered[name] = value
+
         if self._binding.credential is not None:
-            filtered["Authorization"] = self._binding.credential
+            cred = self._binding.credential.strip()
+            if cred.startswith("sk-ant-"):
+                filtered["x-api-key"] = cred
+                filtered.setdefault("anthropic-version", "2023-06-01")
+            else:
+                filtered["Authorization"] = cred
+
+        if self._binding.package_version is not None:
+            filtered["x-protection-package-version"] = self._binding.package_version
+
         return filtered
 
     def request(

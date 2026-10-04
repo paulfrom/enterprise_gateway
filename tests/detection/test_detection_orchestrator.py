@@ -422,6 +422,16 @@ class BlockingPathTests(unittest.TestCase):
             orchestrator.detect("any text")
         self.assertEqual(ctx.exception.code, SafetyCode.NER_MODEL_INVALID)
 
+    def test_empty_recognizers_rejected(self) -> None:
+        orchestrator = _orchestrator(
+            recognizers=[],
+            dictionary=COMPILED,
+            ner_package_dir=MINI_PACKAGE,
+        )
+        with self.assertRaises(SafetyError) as ctx:
+            orchestrator.detect("any text")
+        self.assertEqual(ctx.exception.code, SafetyCode.DETECTION_INCOMPLETE)
+
 
 if __name__ == "__main__":
     unittest.main()

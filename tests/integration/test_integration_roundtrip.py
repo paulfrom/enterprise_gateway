@@ -20,7 +20,7 @@ Proves that:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -163,6 +163,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         )
 
         # Identity
+        _now = datetime.now(timezone.utc)
         self.identity = TrustedIdentity(
             subject_id="user-001",
             tenant_id="tenant-corp",
@@ -171,8 +172,8 @@ class IntegrationRoundtripTests(unittest.TestCase):
             purposes=frozenset({"model-query"}),
             source_acl=frozenset({"corp-internal"}),
             auth_source="mTLS",
-            authenticated_at=datetime(2026, 10, 4, 8, 0, 0, tzinfo=timezone.utc),
-            expires_at=datetime(2026, 10, 4, 18, 0, 0, tzinfo=timezone.utc),
+            authenticated_at=_now - timedelta(hours=1),
+            expires_at=_now + timedelta(hours=8),
         )
 
     def tearDown(self) -> None:
@@ -267,7 +268,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             purpose="model-query",
         )
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             result = pipeline.process_request(
                 raw_body=raw_req,
                 headers={"Authorization": "Bearer internal-gw"},
@@ -334,7 +335,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             ]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             result = pipeline.process_request(
                 raw_body=raw_req,
                 headers={},
@@ -360,7 +361,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
@@ -378,6 +379,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         spy = UpstreamSpyTransport(lambda r: httpx.Response(200))
         pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
 
+        _now = datetime.now(timezone.utc)
         wrong_domain_identity = TrustedIdentity(
             subject_id="user-002",
             tenant_id="tenant-corp",
@@ -386,8 +388,8 @@ class IntegrationRoundtripTests(unittest.TestCase):
             purposes=frozenset({"model-query"}),
             source_acl=frozenset({"corp-internal"}),
             auth_source="mTLS",
-            authenticated_at=datetime(2026, 10, 4, 8, 0, 0, tzinfo=timezone.utc),
-            expires_at=datetime(2026, 10, 4, 18, 0, 0, tzinfo=timezone.utc),
+            authenticated_at=_now - timedelta(hours=1),
+            expires_at=_now + timedelta(hours=8),
         )
 
         raw_req = json.dumps({
@@ -395,7 +397,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
@@ -417,7 +419,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
@@ -426,7 +428,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
                     category="FORBIDDEN",
                     context=ctx,
                 )
-            self.assertEqual(SafetyCode.POLICY_REJECTED, exc_info.exception.code)
+            self.assertEqual(SafetyCode.CATEGORY_NOT_APPROVED, exc_info.exception.code)
 
         self.assertEqual(0, len(spy.calls))
 
@@ -442,7 +444,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "this body exceeds 10 bytes"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
@@ -467,7 +469,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             ]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=secret_body,
@@ -496,7 +498,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
@@ -523,7 +525,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
@@ -546,7 +548,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}]
         })
 
-        with MappingContext("test-scope", "v1", TEST_HMAC_KEY) as ctx:
+        with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,

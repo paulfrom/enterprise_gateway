@@ -452,6 +452,38 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         self.assertEqual(sent["authorization"], CREDENTIAL)
         self.assertNotIn("CNRY-caller-rogue-1", json.dumps(sent))
 
+    def test_caller_x_api_key_is_stripped_and_anthropic_injected(self):
+        anthropic_binding = BoundUpstream(
+            channel_id="anthropic-channel",
+            scheme="http",
+            host=LOOPBACK,
+            port=self.server.port,
+            path_prefix="/v1",
+            credential="sk-ant-test-key-12345",
+            timeout_seconds=5.0,
+            allowed_addresses=frozenset([LOOPBACK]),
+            package_version="1.2.3",
+        )
+        client = BoundEgressClient(anthropic_binding, resolver=loopback_resolver)
+        try:
+            client.request(
+                "POST",
+                "/v1/messages",
+                headers={
+                    "x-api-key": "caller-secret-key-rogue",
+                    "Authorization": "Bearer caller-auth",
+                },
+                content=b"{}",
+            )
+            sent = self.server.recorded[-1]["headers"]
+            self.assertEqual(sent["x-api-key"], "sk-ant-test-key-12345")
+            self.assertEqual(sent["anthropic-version"], "2023-06-01")
+            self.assertEqual(sent["x-protection-package-version"], "1.2.3")
+            self.assertNotIn("authorization", sent)
+            self.assertNotIn("caller-secret-key-rogue", json.dumps(sent))
+        finally:
+            client.close()
+
     def test_caller_headers_must_be_a_mapping(self):
         with self.assertRaises(TypeError):
             self.client.request("POST", "/v1/chat/completions", headers=["x-a", "1"])

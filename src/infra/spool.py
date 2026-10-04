@@ -102,31 +102,41 @@ class SpoolWriter:
         self._kms = kms
         self._max_total_bytes = max_total_bytes
         self._max_files = max_files
+        self._max_gap_files = max_files
         self._directory.mkdir(parents=True, exist_ok=True)
 
     @property
     def directory(self) -> Path:
         return self._directory
 
-    def _usage(self) -> tuple[int, int]:
-        """Count every regular file in the spool directory.
+    def _usage(self) -> tuple[int, int, int]:
+        """Count regular files in the spool directory: (total_bytes, event_count, gap_count).
 
         The water-mark covers gap records, crash-residual ``.tmp`` files, and
-        even externally placed files — a conservative single-process
-        accounting; concurrent writers need an external lock.
+        even externally placed files.
         """
         total = 0
-        count = 0
+        event_count = 0
+        gap_count = 0
         for entry in self._directory.iterdir():
             if entry.is_file():
-                count += 1
                 total += entry.stat().st_size
-        return total, count
+                if entry.name.endswith(".gap.json"):
+                    gap_count += 1
+                else:
+                    event_count += 1
+        return total, event_count, gap_count
 
     def _check_watermark(self, directory: Path, incoming: int) -> None:
-        """durable_write capacity hook; raises SPOOL_FULL before any file exists."""
-        total, count = self._usage()
-        if count >= self._max_files or total + incoming > self._max_total_bytes:
+        """durable_write capacity hook for events; raises SPOOL_FULL before any file exists."""
+        total, event_count, _ = self._usage()
+        if event_count >= self._max_files or total + incoming > self._max_total_bytes:
+            raise SafetyError(SafetyCode.SPOOL_FULL)
+
+    def _check_gap_watermark(self, directory: Path, incoming: int) -> None:
+        """Capacity hook for gap records; enforces bounded queue on gaps as well."""
+        total, _, gap_count = self._usage()
+        if gap_count >= self._max_gap_files or total + incoming > self._max_total_bytes * 2:
             raise SafetyError(SafetyCode.SPOOL_FULL)
 
     def _spool_name(self, record_id: str) -> str:
@@ -170,8 +180,13 @@ class SpoolWriter:
         name = f"gap-{digest[:16]}-{os.urandom(4).hex()}.gap.json"
         write_failed = False
         try:
-            committed = durable_commit(self._directory, name, data)
-        except DurableWriteError:
+            committed = durable_commit(
+                self._directory,
+                name,
+                data,
+                capacity_check=self._check_gap_watermark,
+            )
+        except (DurableWriteError, SafetyError):
             write_failed = True
         if write_failed:
             # The policy allows a gap, but only a RECORDED one.

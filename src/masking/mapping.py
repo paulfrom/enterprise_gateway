@@ -84,6 +84,10 @@ class MappingContext:
             raise SafetyError(SafetyCode.MAPPING_NOT_ACTIVE)
 
     @property
+    def domain(self) -> str:
+        return self.scope
+
+    @property
     def entry_count(self) -> int:
         return len(self._values)
 

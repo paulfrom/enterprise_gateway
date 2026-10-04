@@ -61,6 +61,7 @@ class IngressValidator:
         category: str,
         policy: ClassificationPolicy,
         exemption_registry: StaticExemptionRegistry | None = None,
+        allowed_models: frozenset[str] | None = None,
     ) -> ValidatedIngressRequest:
         # 1. Enforce egress classification policy (C-01)
         try:
@@ -71,15 +72,21 @@ class IngressValidator:
         # 2. Strict candidate protocol parse (C-03)
         if protocol == DEEPSEEK_CHAT_PROTOCOL:
             try:
-                parsed = parse_deepseek_chat_completion(raw_body)
+                parsed = parse_deepseek_chat_completion(raw_body, allowed_models=allowed_models)
             except SafetyError as exc:
                 raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, exc.code.value) from None
             model_name = parsed.model
             raw_fragments = [(f"messages[{i}].content", msg.content) for i, msg in enumerate(parsed.messages)]
+            if parsed.stop is not None:
+                if isinstance(parsed.stop, str):
+                    raw_fragments.append(("stop", parsed.stop))
+                elif isinstance(parsed.stop, list):
+                    for k, s in enumerate(parsed.stop):
+                        raw_fragments.append((f"stop[{k}]", s))
 
         elif protocol == CLAUDE_MESSAGES_PROTOCOL:
             try:
-                parsed = parse_claude_messages(raw_body)
+                parsed = parse_claude_messages(raw_body, allowed_models=allowed_models)
             except SafetyError as exc:
                 raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, exc.code.value) from None
             model_name = parsed.model
@@ -93,6 +100,9 @@ class IngressValidator:
                     for j, block in enumerate(msg.content):
                         if isinstance(block, ClaudeTextBlock):
                             raw_fragments.append((f"messages[{i}].content[{j}].text", block.text))
+            if parsed.stop_sequences is not None:
+                for k, s in enumerate(parsed.stop_sequences):
+                    raw_fragments.append((f"stop_sequences[{k}]", s))
         else:
             raise SafetyError(
                 SafetyCode.UNSUPPORTED_PROTOCOL, f"protocol '{protocol}' is not supported"

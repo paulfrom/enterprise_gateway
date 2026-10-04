@@ -339,6 +339,31 @@ class ResponseRestorerTests(unittest.TestCase):
                 restore_response(DEEPSEEK_CHAT_PROTOCOL, raw, ctx)
             self.assertNotIn(canary, str(exc_info.exception))
 
+    def test_custom_allowed_models_positive_and_rejected(self) -> None:
+        custom_allowed = frozenset(["qwen-max", "deepseek-custom"])
+        with self.context as ctx:
+            raw = {
+                "id": "chatcmpl-custom",
+                "object": "chat.completion",
+                "created": 1727950000,
+                "model": "qwen-max",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "custom model reply"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            # Success with custom allowed
+            res = restore_response(DEEPSEEK_CHAT_PROTOCOL, raw, ctx, allowed_models=custom_allowed)
+            self.assertEqual(res.model, "qwen-max")
+
+            # Rejected when model is not in custom allowed
+            with self.assertRaises(SafetyError) as exc_info:
+                restore_response(DEEPSEEK_CHAT_PROTOCOL, raw, ctx, allowed_models=frozenset(["other-model"]))
+            self.assertEqual(SafetyCode.CONTRACT_VIOLATION, exc_info.exception.code)
+
 
 if __name__ == "__main__":
     unittest.main()

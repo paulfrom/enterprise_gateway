@@ -443,6 +443,50 @@ class ReplacerTests(unittest.TestCase):
                 replace_request(unsupported, {}, context)
             self.assertEqual(SafetyCode.UNSAFE_REPLACEMENT, failure.exception.code)
 
+    def test_stop_and_stop_sequences_redaction(self) -> None:
+        # DeepSeek stop string
+        body_ds = json.dumps({
+            "model": "deepseek-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stop": "STOP_CANARY_1",
+        })
+        val_ds = IngressValidator.validate_request(
+            body_ds, DEEPSEEK_CHAT_PROTOCOL, "scope-ext", "cat-approved", self.policy
+        )
+        self.assertEqual(val_ds.fragments[1].json_path, "stop")
+        with MappingContext("scope-ext", "v1", KEY) as context:
+            redacted = replace_request(
+                val_ds,
+                {"messages[0].content": (), "stop": (Span(0, 13, "ORG", 1),)},
+                context,
+            )
+            self.assertTrue(redacted.stop.startswith("<<ENT_v1_"))
+
+        # Claude stop_sequences list
+        body_cl = json.dumps({
+            "model": "claude-sonnet-5-5",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stop_sequences": ["STOP_CANARY_A", "STOP_CANARY_B"],
+        })
+        val_cl = IngressValidator.validate_request(
+            body_cl, CLAUDE_MESSAGES_PROTOCOL, "scope-ext", "cat-approved", self.policy
+        )
+        self.assertEqual(val_cl.fragments[1].json_path, "stop_sequences[0]")
+        self.assertEqual(val_cl.fragments[2].json_path, "stop_sequences[1]")
+        with MappingContext("scope-ext", "v1", KEY) as context:
+            redacted_cl = replace_request(
+                val_cl,
+                {
+                    "messages[0].content": (),
+                    "stop_sequences[0]": (Span(0, 13, "ORG", 1),),
+                    "stop_sequences[1]": (),
+                },
+                context,
+            )
+            self.assertTrue(redacted_cl.stop_sequences[0].startswith("<<ENT_v1_"))
+            self.assertEqual(redacted_cl.stop_sequences[1], "STOP_CANARY_B")
+
 
 if __name__ == "__main__":
     unittest.main()

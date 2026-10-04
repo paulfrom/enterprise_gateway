@@ -263,9 +263,16 @@ class SpoolRelay:
         if not isinstance(payload, dict):
             raise SafetyError(SafetyCode.EVENT_INVALID)
         try:
-            return ObservationEvent.model_validate_json(plaintext)
+            event = ObservationEvent.model_validate_json(plaintext)
         except ValidationError:
             raise SafetyError(SafetyCode.EVENT_INVALID) from None
+        if record.domain != event.domain:
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "envelope domain mismatch")
+        if record.bucket != event.retention_policy:
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "envelope retention bucket mismatch")
+        if not record.purpose.startswith(event.purpose):
+            raise SafetyError(SafetyCode.UNAUTHORIZED_PURPOSE, "envelope purpose mismatch")
+        return event
 
     def _quarantine(self, path: Path, code: SafetyCode) -> QuarantinedRecord:
         """Isolate an unreadable record: out of the relay path, kept on disk."""

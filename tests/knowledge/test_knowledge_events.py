@@ -81,34 +81,45 @@ class EventBuildTests(unittest.TestCase):
 
 
 class AuthorizationFailureTests(unittest.TestCase):
-    """Missing governance coordinates fail closed with COLLECTION_NOT_AUTHORIZED."""
+    """Missing governance coordinates or blank values fail closed with EVENT_INVALID."""
 
-    def test_empty_acl_rejected(self):
-        with self.assertRaises(SafetyError) as ctx:
-            build(acl=frozenset())
-        self.assertEqual(ctx.exception.code, SafetyCode.COLLECTION_NOT_AUTHORIZED)
+    def test_empty_acl_defaults_to_restricted_candidate(self):
+        event = build(acl=frozenset())
+        self.assertEqual(event.acl, frozenset({"scope-procurement:restricted-candidate"}))
 
     def test_blank_acl_member_rejected(self):
         with self.assertRaises(SafetyError) as ctx:
             build(acl=frozenset({"steward-01", " "}))
-        self.assertEqual(ctx.exception.code, SafetyCode.COLLECTION_NOT_AUTHORIZED)
+        self.assertEqual(ctx.exception.code, SafetyCode.EVENT_INVALID)
 
     def test_blank_purpose_rejected(self):
         with self.assertRaises(SafetyError) as ctx:
             build(purpose="  ")
-        self.assertEqual(ctx.exception.code, SafetyCode.COLLECTION_NOT_AUTHORIZED)
+        self.assertEqual(ctx.exception.code, SafetyCode.EVENT_INVALID)
 
     def test_blank_retention_policy_rejected(self):
         with self.assertRaises(SafetyError) as ctx:
             build(retention_policy="")
-        self.assertEqual(ctx.exception.code, SafetyCode.COLLECTION_NOT_AUTHORIZED)
+        self.assertEqual(ctx.exception.code, SafetyCode.EVENT_INVALID)
 
     def test_missing_source_identity_rejected(self):
         for override in ({"source_id": ""}, {"source_version": ""}, {"source_version": "  "}):
             with self.subTest(override=override):
                 with self.assertRaises(SafetyError) as ctx:
                     build(**override)
-                self.assertEqual(ctx.exception.code, SafetyCode.COLLECTION_NOT_AUTHORIZED)
+                self.assertEqual(ctx.exception.code, SafetyCode.EVENT_INVALID)
+
+    def test_build_gateway_observation(self):
+        from knowledge.knowledge_events import build_gateway_observation
+        event = build_gateway_observation(
+            tenant="corp-tenant",
+            domain="corp.test",
+            request_id="req-12345",
+            evidence_digest=DIGEST,
+        )
+        self.assertEqual(event.domain, "corp.test")
+        self.assertEqual(event.source_id, "req:req-12345")
+        self.assertEqual(event.acl, frozenset({"corp.test:restricted-candidate"}))
 
 
 class SchemaFailureTests(unittest.TestCase):

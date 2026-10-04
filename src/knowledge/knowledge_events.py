@@ -33,8 +33,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serial
 from infra.errors import SafetyCode, SafetyError
 from knowledge.knowledge import SourceKind
 
-__all__ = ["EvidenceRef", "ObservationEvent", "build_observation_event",
-           "serialize_event", "event_sha256"]
+__all__ = [
+    "EvidenceRef",
+    "ObservationEvent",
+    "build_observation_event",
+    "build_gateway_observation",
+    "serialize_event",
+    "event_sha256",
+]
 
 _SHA256_HEX_LEN = 64
 
@@ -115,31 +121,37 @@ def build_observation_event(
     observed_at: datetime,
     purpose: str,
     retention_policy: str,
-    acl: Iterable[str],
+    acl: Iterable[str] | None = None,
     extraction_version: str,
 ) -> ObservationEvent:
-    """Build a minimal observation event from APPROVED material metadata.
+    """Build a minimal observation event from approved material metadata.
 
-    Accepts only the evidence digest and offset — the signature has no
-    parameter for source text, so passing the full text is a ``TypeError``
-    by construction. Authorization invariants (non-empty ACL, purpose,
-    retention policy, source identity) fail closed with
-    ``COLLECTION_NOT_AUTHORIZED``; schema violations fail with
-    ``EVENT_INVALID``.
+    Accepts only the evidence digest and offset — full text is excluded at the
+    signature level. Per Document 11 §4.2, missing client ACL does not reject
+    collection; an empty ACL defaults to a domain-governed restricted candidate
+    access scope.
     """
-    if not isinstance(acl, (frozenset, set, tuple, list)):
-        raise SafetyError(SafetyCode.EVENT_INVALID, "acl_shape")
-    members = tuple(acl)
-    if not members or any(not _authorized(member) for member in members):
-        raise SafetyError(SafetyCode.COLLECTION_NOT_AUTHORIZED)
+    if acl is None:
+        members = (f"{domain}:restricted-candidate",)
+    else:
+        if not isinstance(acl, (frozenset, set, tuple, list)):
+            raise SafetyError(SafetyCode.EVENT_INVALID, "acl_shape")
+        members = tuple(acl)
+        if not members:
+            members = (f"{domain}:restricted-candidate",)
+        elif any(not _authorized(member) for member in members):
+            raise SafetyError(SafetyCode.EVENT_INVALID, "blank_acl_member")
+
     for label, value in (
+        ("tenant", tenant),
+        ("domain", domain),
         ("source_id", source_id),
         ("source_version", source_version),
         ("purpose", purpose),
         ("retention_policy", retention_policy),
     ):
         if not _authorized(value):
-            raise SafetyError(SafetyCode.COLLECTION_NOT_AUTHORIZED, label)
+            raise SafetyError(SafetyCode.EVENT_INVALID, label)
     invalid = False
     try:
         event = ObservationEvent(
@@ -177,3 +189,41 @@ def serialize_event(event: ObservationEvent) -> bytes:
 def event_sha256(event: ObservationEvent) -> str:
     """Stable digest of the canonical serialized event (record identity)."""
     return hashlib.sha256(serialize_event(event)).hexdigest()
+
+
+def build_gateway_observation(
+    *,
+    tenant: str,
+    domain: str,
+    request_id: str,
+    evidence_digest: str,
+    evidence_offset: int = 0,
+    observed_at: datetime | None = None,
+    source_acl: Iterable[str] | None = None,
+    purpose: str = "knowledge-accumulation",
+    retention_policy: str = "standard-retention",
+    extraction_version: str = "extract-1.0.0",
+) -> ObservationEvent:
+    """Auto-generate an observation event from an incoming gateway request context.
+
+    Per Document 11 §4.2, all gateway inputs are collectible by default. If no
+    client ACL is present, a domain-governed restricted-candidate access scope
+    is assigned.
+    """
+    from datetime import timezone
+    if observed_at is None:
+        observed_at = datetime.now(timezone.utc)
+    return build_observation_event(
+        tenant=tenant,
+        domain=domain,
+        source_id=f"req:{request_id}",
+        source_version="v1",
+        source_kind=SourceKind.USER_ASSERTION,
+        evidence_digest=evidence_digest,
+        evidence_offset=evidence_offset,
+        observed_at=observed_at,
+        purpose=purpose,
+        retention_policy=retention_policy,
+        acl=source_acl,
+        extraction_version=extraction_version,
+    )

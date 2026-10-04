@@ -99,9 +99,9 @@ class DeepSeekChatResponse(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def _model_whitelisted(cls, value: str) -> str:
-        if value not in DEEPSEEK_MODEL_WHITELIST:
-            raise ValueError("model not in deepseek contract whitelist")
+    def _model_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("model must be a non-empty string")
         return value
 
 
@@ -135,9 +135,9 @@ class ClaudeMessagesResponse(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def _model_whitelisted(cls, value: str) -> str:
-        if value not in CLAUDE_MODEL_WHITELIST:
-            raise ValueError("model not in claude contract whitelist")
+    def _model_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("model must be a non-empty string")
         return value
 
 
@@ -178,6 +178,7 @@ def restore_response(
     protocol: str,
     raw_response: str | bytes | dict | DeepSeekChatResponse | ClaudeMessagesResponse,
     context: MappingContext,
+    allowed_models: frozenset[str] | None = None,
 ) -> DeepSeekChatResponse | ClaudeMessagesResponse:
     """Restore mapped tokens in editable positions of an upstream non-streaming response.
 
@@ -222,6 +223,18 @@ def restore_response(
 
     if validation_failed:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
+
+    target_allowed_models = (
+        allowed_models
+        if allowed_models is not None
+        else (
+            DEEPSEEK_MODEL_WHITELIST
+            if protocol == DEEPSEEK_CHAT_PROTOCOL
+            else CLAUDE_MODEL_WHITELIST
+        )
+    )
+    if target_allowed_models is not None and parsed_input.model not in target_allowed_models:
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "model not allowed")
 
     # 3. Guard: fail closed if any token appears in uneditable fields
     _assert_no_tokens_in_uneditable(protocol, parsed_input)
