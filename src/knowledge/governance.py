@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 import json
 from typing import Sequence
 from uuid import UUID, uuid4
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from knowledge.storage import PostgresKnowledgeStorage
 
 from detection.dictionary import DictionaryEntry, compute_dictionary_hash
 from infra.errors import SafetyCode, SafetyError
@@ -30,14 +34,74 @@ from knowledge.knowledge import (
     Source,
     Tombstone,
     TrustedActor,
+    Modality,
+    Predicate,
+    SourceKind,
 )
 
 
 class KnowledgeGovernanceService:
     """Orchestrates candidate review, publication, ACL enforcement, and dictionary compilation."""
 
-    def __init__(self, domain: str) -> None:
+    def __init__(self, domain: str, storage: PostgresKnowledgeStorage | None = None) -> None:
         self.domain = domain
+        self.storage = storage
+        self._approvals: dict[UUID, tuple[Approval, ...]] = {}
+        self._publications: dict[UUID, Publication] = {}
+        self._revoked: set[UUID] = set()
+        self._withdrawn_sources: set[tuple] = set()
+
+    def _validate(self, item: Candidate | Publication, now: datetime) -> None:
+        scope = (item.claim.subject.tenant_id, self.domain)
+        if now.tzinfo is None or (item.claim.subject.tenant_id, item.claim.subject.domain) != scope:
+            raise KnowledgeError('invalid time or scope')
+        if not item.evidence or not item.purpose:
+            raise KnowledgeError('evidence and purpose required')
+        for ev in item.evidence:
+            if (ev.source.tenant_id, ev.source.domain) != scope or ev.source.purpose != item.purpose:
+                raise KnowledgeError('evidence scope or purpose mismatch')
+            if ev.source.observed_at > now or ev.source.retention_until <= now or ev.source.key in self._withdrawn_sources:
+                raise KnowledgeError('source inactive')
+        derived = frozenset.intersection(*(ev.source.acl for ev in item.evidence))
+        if not item.acl or not item.acl <= derived:
+            raise KnowledgeError('asset ACL exceeds source access')
+
+    def _authorize(self, item: Candidate | Publication, actor: TrustedActor, role: Role) -> None:
+        if (actor.tenant_id, actor.domain) != (item.claim.subject.tenant_id, self.domain):
+            raise KnowledgeError('actor scope mismatch')
+        if role not in actor.roles or actor.subject_id not in item.acl or item.purpose not in actor.purposes:
+            raise KnowledgeError('actor lacks role, source access, or purpose')
+
+    def _stored_candidate(self, candidate: Candidate, actor: TrustedActor) -> None:
+        if self.storage:
+            import psycopg
+            with psycopg.connect(self.storage.connection_uri) as conn:
+                self.storage.set_session_identity(conn, actor)
+                stored = self.storage.load_candidate(conn,candidate.candidate_id)
+            if stored != candidate:
+                raise KnowledgeError('candidate differs from authoritative repository')
+            self._approvals[candidate.candidate_id] = stored.approvals
+
+    def _active_publication(self, pub: Publication, now: datetime, actor: TrustedActor) -> bool:
+        if self.storage:
+            import psycopg
+            try:
+                with psycopg.connect(self.storage.connection_uri) as conn:
+                    self.storage.set_session_identity(conn,actor)
+                    stored = self.storage.load_publication(conn,pub.publication_id)
+                if stored != pub:
+                    return False
+            except KnowledgeError:
+                return False
+        elif self._publications.get(pub.publication_id) != pub:
+            return False
+        if pub.publication_id in self._revoked or pub.valid_until <= now:
+            return False
+        try:
+            self._validate(pub, now)
+        except KnowledgeError:
+            return False
+        return True
 
     # -------------------------------------------------------------------------
     # K-07: Derivative ACL Calculation
@@ -52,8 +116,10 @@ class KnowledgeGovernanceService:
             raise KnowledgeError("cannot derive ACL from empty evidence set")
 
         effective_acl: set[str] | None = None
+        tenant = evidences[0].source.tenant_id
+        purpose = evidences[0].source.purpose
         for ev in evidences:
-            if ev.source.domain != self.domain:
+            if ev.source.domain != self.domain or ev.source.tenant_id != tenant or ev.source.purpose != purpose:
                 raise KnowledgeError("cross-domain evidence detected in ACL calculation")
             if effective_acl is None:
                 effective_acl = set(ev.source.acl)
@@ -81,11 +147,15 @@ class KnowledgeGovernanceService:
         Requires distinct reviewers. Transitions to APPROVED when both
         SECURITY_REVIEWER and BUSINESS_REVIEWER have approved.
         """
-        if reviewer.domain != self.domain:
-            raise KnowledgeError("reviewer domain mismatch")
-        if role not in reviewer.roles:
-            raise KnowledgeError(f"reviewer {reviewer.subject_id} does not possess role {role}")
-        if candidate.state not in (CandidateState.PROPOSED, CandidateState.APPROVED):
+        now = now or datetime.now(timezone.utc)
+        self._validate(candidate, now)
+        self._authorize(candidate, reviewer, role)
+        self._stored_candidate(candidate,reviewer)
+        if role not in (Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER) or not verification_ref.strip():
+            raise KnowledgeError('review requires approved role and verification record')
+        if candidate.approvals != self._approvals.get(candidate.candidate_id, ()):
+            raise KnowledgeError('unverified approval history')
+        if candidate.state != CandidateState.PROPOSED:
             raise KnowledgeError(f"cannot approve candidate in state {candidate.state}")
 
         # Check for duplicate approval from same reviewer or same role
@@ -104,7 +174,14 @@ class KnowledgeGovernanceService:
             verification_ref=verification_ref,
             approved_at=now,
         )
-        updated_approvals = candidate.approvals + (new_approval,)
+        updated_approvals = tuple(sorted((*candidate.approvals,new_approval),
+                                 key=lambda approval: 0 if approval.role == Role.SECURITY_REVIEWER else 1))
+        if self.storage:
+            import psycopg
+            with psycopg.connect(self.storage.connection_uri) as conn:
+                self.storage.set_session_identity(conn,reviewer)
+                self.storage.save_approval(conn,candidate.candidate_id,new_approval)
+        self._approvals[candidate.candidate_id] = updated_approvals
 
         # Check if requirements for APPROVED are satisfied:
         # Must have both SECURITY_REVIEWER and BUSINESS_REVIEWER
@@ -130,10 +207,18 @@ class KnowledgeGovernanceService:
         reason: str,
     ) -> Candidate:
         """Reject a candidate."""
-        if reviewer.domain != self.domain:
-            raise KnowledgeError("reviewer domain mismatch")
+        self._validate(candidate, datetime.now(timezone.utc))
+        self._authorize(candidate, reviewer, Role.BUSINESS_REVIEWER)
+        self._stored_candidate(candidate,reviewer)
+        if candidate.state != CandidateState.PROPOSED:
+            raise KnowledgeError('only proposed candidates can be rejected')
         if not reason.strip():
             raise KnowledgeError("rejection reason cannot be empty")
+        if self.storage:
+            import psycopg
+            with psycopg.connect(self.storage.connection_uri) as conn:
+                self.storage.set_session_identity(conn,reviewer)
+                self.storage.reject_transactional(conn,candidate.candidate_id,reason)
 
         return Candidate(
             candidate_id=candidate.candidate_id,
@@ -154,10 +239,10 @@ class KnowledgeGovernanceService:
         now: datetime | None = None,
     ) -> tuple[Publication, Candidate]:
         """Publish a fully approved candidate. Fails if candidate is not in APPROVED state."""
-        if publisher.domain != self.domain:
-            raise KnowledgeError("publisher domain mismatch")
-        if Role.PUBLISHER not in publisher.roles:
-            raise KnowledgeError(f"actor {publisher.subject_id} does not possess Role.PUBLISHER")
+        now = now or datetime.now(timezone.utc)
+        self._validate(candidate, now)
+        self._authorize(candidate, publisher, Role.PUBLISHER)
+        self._stored_candidate(candidate,publisher)
         if candidate.state != CandidateState.APPROVED:
             raise KnowledgeError(f"candidate must be in state APPROVED to publish, got {candidate.state}")
 
@@ -165,6 +250,18 @@ class KnowledgeGovernanceService:
             now = datetime.now(timezone.utc)
         if valid_until <= now:
             raise KnowledgeError("publication valid_until must be strictly in the future")
+        approvals = self._approvals.get(candidate.candidate_id, ())
+        if candidate.approvals != approvals or len(approvals) != 2 or {a.role for a in approvals} != {Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER}:
+            raise KnowledgeError('publication requires two verified distinct approvals')
+        if any(a.approved_at > now for a in approvals):
+            raise KnowledgeError('publication predates approval')
+        if candidate.claim.modality != Modality.ASSERTED or candidate.claim.predicate == Predicate.CO_OCCURS_WITH:
+            raise KnowledgeError('only verified asserted business facts publish')
+        if all(ev.source.source_kind == SourceKind.MODEL_OUTPUT for ev in candidate.evidence):
+            raise KnowledgeError('model-only evidence cannot establish facts')
+        if any(pub.candidate_id == candidate.candidate_id for pub in self._publications.values()):
+            raise KnowledgeError('candidate already published or withdrawn')
+        valid_until = min(valid_until, *(ev.source.retention_until for ev in candidate.evidence))
 
         pub_id = uuid4()
         publication = Publication(
@@ -186,6 +283,14 @@ class KnowledgeGovernanceService:
             state=CandidateState.PUBLISHED,
             approvals=candidate.approvals,
         )
+        if self.storage:
+            import psycopg
+            with psycopg.connect(self.storage.connection_uri) as conn:
+                self.storage.set_session_identity(conn,publisher)
+                claim_id = conn.execute('SELECT claim_id FROM knowledge_candidates WHERE candidate_id=%s',
+                                        (candidate.candidate_id,)).fetchone()[0]
+                self.storage.publish_transactional(conn,publication,claim_id)
+        self._publications[pub_id] = publication
         return publication, updated_candidate
 
     # -------------------------------------------------------------------------
@@ -214,12 +319,11 @@ class KnowledgeGovernanceService:
         lines: list[str] = []
         for pub in publications:
             # Check expiration
-            if pub.valid_until <= now:
+            if not self._active_publication(pub, now, consumer):
                 continue
             # ACL Check: consumer must have access
             # consumer.subject_id or role-based acl
-            consumer_tokens = {consumer.subject_id, f"{self.domain}:reader"} | {f"{self.domain}:{r.value}" for r in consumer.roles}
-            if not pub.acl.intersection(consumer_tokens) and f"{self.domain}:restricted-candidate" not in pub.acl:
+            if (consumer.tenant_id, consumer.domain) != (pub.claim.subject.tenant_id, self.domain) or pub.purpose not in consumer.purposes or consumer.subject_id not in pub.acl:
                 continue
 
             record = {
@@ -256,6 +360,7 @@ class KnowledgeGovernanceService:
         version: str,
         publications: Sequence[Publication],
         now: datetime | None = None,
+        *, consumer: TrustedActor,
     ) -> dict:
         """Compile active publications into a dictionary payload for compile_dictionary.
 
@@ -266,7 +371,9 @@ class KnowledgeGovernanceService:
 
         seen_entities: dict[str, str] = {}
         for pub in publications:
-            if pub.valid_until <= now:
+            if not self._active_publication(pub, now, consumer):
+                continue
+            if (consumer.tenant_id, consumer.domain) != (pub.claim.subject.tenant_id, self.domain) or consumer.subject_id not in pub.acl or pub.purpose not in consumer.purposes:
                 continue
             sub = pub.claim.subject
             obj = pub.claim.object
@@ -300,17 +407,14 @@ class KnowledgeGovernanceService:
         now: datetime | None = None,
     ) -> Tombstone:
         """Revoke a publication due to source invalidation or steward action (K-13)."""
-        if steward.domain != self.domain:
-            raise KnowledgeError("steward domain mismatch")
-        if Role.DATA_STEWARD not in steward.roles:
-            raise KnowledgeError("actor must possess Role.DATA_STEWARD to revoke publication")
+        self._authorize(publication, steward, Role.DATA_STEWARD)
         if not reason.strip():
             raise KnowledgeError("revocation reason cannot be empty")
 
         if now is None:
             now = datetime.now(timezone.utc)
 
-        return Tombstone(
+        tombstone = Tombstone(
             publication_id=publication.publication_id,
             candidate_id=publication.candidate_id,
             tenant_id=publication.claim.subject.tenant_id,
@@ -318,3 +422,28 @@ class KnowledgeGovernanceService:
             reason=reason,
             effective_at=now,
         )
+        if self.storage:
+            import psycopg
+            with psycopg.connect(self.storage.connection_uri) as conn:
+                self.storage.set_session_identity(conn,steward)
+                self.storage.revoke_transactional(conn,tombstone)
+        self._revoked.add(publication.publication_id)
+        return tombstone
+
+    def withdraw_source(self, source: Source, steward: TrustedActor, reason: str,
+                        now: datetime | None = None) -> tuple[Tombstone, ...]:
+        now = now or datetime.now(timezone.utc)
+        if (source.tenant_id, source.domain) != (steward.tenant_id, steward.domain) or steward.domain != self.domain:
+            raise KnowledgeError('steward scope mismatch')
+        if Role.DATA_STEWARD not in steward.roles or steward.subject_id not in source.acl or source.purpose not in steward.purposes or not reason.strip():
+            raise KnowledgeError('withdrawal requires authorized stewardship')
+        if self.storage:
+            import psycopg
+            with psycopg.connect(self.storage.connection_uri) as conn:
+                self.storage.set_session_identity(conn,steward)
+                result = self.storage.invalidate_source(conn,source,reason,now)
+            self._withdrawn_sources.add(source.key)
+            return result
+        self._withdrawn_sources.add(source.key)
+        return tuple(self.revoke_publication(pub, steward, reason, now) for pub in self._publications.values()
+                     if pub.publication_id not in self._revoked and any(ev.source.key == source.key for ev in pub.evidence))

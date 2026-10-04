@@ -1,34 +1,19 @@
-"""K-01 minimal observation events for governed knowledge collection.
+"""Minimal extractable observation, serialized only for encrypted knowledge spool.
 
-Collection is NOT detection: an observation event is generated only for
-material whose source, purpose, ACL, and retention are all provable (DESIGN
-§7). The event is minimal by construction — source coordinates, a digest +
-offset evidence reference, timestamps, governance metadata, and the
-extraction version. No full text, excerpts, employee profiles, or payloads
-exist on this schema: ``extra="forbid"`` plus the absence of any content
-field makes oversharing a schema error, not a policy choice.
-
-The factory :func:`build_observation_event` is the only construction path and
-its signature accepts a digest and an offset — never the source text. A
-caller holding only the original material cannot hand it to this module
-(``TypeError``), which keeps full text out of the event at the signature
-level, not just by convention.
-
-Failure split: missing authorization coordinates (empty ACL, blank purpose,
-blank retention policy, missing source identity) raise
-``COLLECTION_NOT_AUTHORIZED`` — the source must not be collected at all.
-Shape violations (bad digest, naive timestamp, wrong types, extra fields)
-raise ``EVENT_INVALID``.
+Default collection and reading authorization are separate. The event contains a
+bounded input fragment, exact source coordinates and authenticated governance
+metadata; ordinary logs must never serialize it. Missing reliable source identity
+cannot establish independent evidence, even when a fragment can be collected.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer, field_validator, model_validator
 
 from infra.errors import SafetyCode, SafetyError
 from knowledge.knowledge import SourceKind
@@ -46,7 +31,7 @@ _SHA256_HEX_LEN = 64
 
 
 class EvidenceRef(BaseModel):
-    """Minimal evidence pointer: content digest + character offset. No text."""
+    """Minimal evidence pointer: content digest + character offset in original source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -61,8 +46,16 @@ class EvidenceRef(BaseModel):
         return value
 
 
+class ObservationMention(BaseModel):
+    model_config = ConfigDict(extra='forbid',frozen=True,strict=True)
+    name: str = Field(min_length=1,repr=False)
+    entity_type: str = Field(min_length=1)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+
 class ObservationEvent(BaseModel):
-    """Minimal governed observation; metadata only, no full text anywhere."""
+    """Minimal governed observation; with bounded encrypted evidence and source access scope."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -77,6 +70,20 @@ class ObservationEvent(BaseModel):
     retention_policy: str
     acl: frozenset[str] = Field(min_length=1)
     extraction_version: str
+    evidence_text: str = Field(min_length=1, max_length=65536, repr=False)
+    source_independence_verified: bool = False
+    retention_until: datetime
+    mentions: tuple[ObservationMention,...] = ()
+
+    @model_validator(mode='after')
+    def _evidence_and_retention(self):
+        if hashlib.sha256(self.evidence_text.encode('utf-8')).hexdigest() != self.evidence_ref.digest:
+            raise ValueError('evidence digest mismatch')
+        if self.retention_until.tzinfo is None or self.retention_until <= self.observed_at:
+            raise ValueError('invalid retention deadline')
+        if any(m.end>len(self.evidence_text) or m.start>=m.end or self.evidence_text[m.start:m.end]!=m.name for m in self.mentions):
+            raise ValueError('invalid observed entity coordinates')
+        return self
 
     @field_validator("tenant", "domain", "source_id", "source_version",
                      "purpose", "retention_policy", "extraction_version")
@@ -123,11 +130,15 @@ def build_observation_event(
     retention_policy: str,
     acl: Iterable[str] | None = None,
     extraction_version: str,
+    evidence_text: str,
+    retention_until: datetime,
+    source_independence_verified: bool = False,
+    mentions: tuple[ObservationMention,...] = (),
 ) -> ObservationEvent:
     """Build a minimal observation event from approved material metadata.
 
-    Accepts only the evidence digest and offset — full text is excluded at the
-    signature level. Per Document 11 §4.2, missing client ACL does not reject
+    Accepts a bounded fragment with a verified digest and source offset.
+    Per Document 11 §4.2, missing client ACL does not reject
     collection; an empty ACL defaults to a domain-governed restricted candidate
     access scope.
     """
@@ -166,6 +177,10 @@ def build_observation_event(
             retention_policy=retention_policy,
             acl=frozenset(members),
             extraction_version=extraction_version,
+            evidence_text=evidence_text,
+            retention_until=retention_until,
+            source_independence_verified=source_independence_verified,
+            mentions=mentions,
         )
     except (ValidationError, ValueError):
         invalid = True
@@ -177,8 +192,8 @@ def build_observation_event(
 def serialize_event(event: ObservationEvent) -> bytes:
     """Canonical JSON bytes (sorted keys, compact separators, UTF-8).
 
-    The serialized form contains digests and governance metadata only; a byte
-    scan over it must never find source text (see K-01 tests' canary check).
+    These bytes contain sensitive evidence and may only be encrypted into spool;
+    they are not suitable for logging or public evidence attachments.
     """
     if not isinstance(event, ObservationEvent):
         raise TypeError("event must be an ObservationEvent")
@@ -203,6 +218,12 @@ def build_gateway_observation(
     purpose: str = "knowledge-accumulation",
     retention_policy: str = "standard-retention",
     extraction_version: str = "extract-1.0.0",
+    evidence_text: str,
+    source_kind: SourceKind = SourceKind.USER_ASSERTION,
+    source_independence_verified: bool = False,
+    retention_until: datetime | None = None,
+    source_version: str | None = None,
+    mentions: tuple[ObservationMention,...] = (),
 ) -> ObservationEvent:
     """Auto-generate an observation event from an incoming gateway request context.
 
@@ -213,12 +234,12 @@ def build_gateway_observation(
     from datetime import timezone
     if observed_at is None:
         observed_at = datetime.now(timezone.utc)
-    return build_observation_event(
+    event = build_observation_event(
         tenant=tenant,
         domain=domain,
-        source_id=f"req:{request_id}",
-        source_version="v1",
-        source_kind=SourceKind.USER_ASSERTION,
+        source_id=(f"req:{request_id}" if source_independence_verified else f"unverified:{source_kind.value}:{evidence_digest}"),
+        source_version=source_version or evidence_digest[:32],
+        source_kind=source_kind,
         evidence_digest=evidence_digest,
         evidence_offset=evidence_offset,
         observed_at=observed_at,
@@ -226,4 +247,16 @@ def build_gateway_observation(
         retention_policy=retention_policy,
         acl=source_acl,
         extraction_version=extraction_version,
+        evidence_text=evidence_text,
+        retention_until=retention_until or observed_at + timedelta(days=30),
+        source_independence_verified=source_independence_verified,
+        mentions=mentions,
     )
+    if source_independence_verified:
+        return event
+    # Equal content in different trusted access scopes is not the same source.
+    # Replays within a scope remain stable and never establish independence.
+    scope_material=json.dumps([event.tenant,event.domain,event.source_kind.value,event.evidence_ref.digest,
+                               event.purpose,event.retention_policy,sorted(event.acl)],
+                              ensure_ascii=False,separators=(',',':')).encode('utf-8')
+    return event.model_copy(update={'source_id':f'unverified:{source_kind.value}:'+hashlib.sha256(scope_material).hexdigest()})

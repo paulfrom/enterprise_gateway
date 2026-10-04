@@ -50,7 +50,7 @@ class IngressValidatorTests(unittest.TestCase):
             category="cat-approved",
             policy=self.policy,
             exemption_registry=self.exemption_registry,
-        )
+        allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
 
         self.assertEqual(validated.protocol, DEEPSEEK_CHAT_PROTOCOL)
         self.assertEqual(validated.model, "deepseek-flash")
@@ -76,7 +76,7 @@ class IngressValidatorTests(unittest.TestCase):
             domain="test-domain",
             category="cat-approved",
             policy=self.policy,
-        )
+        allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
         self.assertEqual(validated.protocol, CLAUDE_MESSAGES_PROTOCOL)
         self.assertEqual(validated.model, "claude-sonnet-5-5")
         self.assertEqual(len(validated.fragments), 1)
@@ -94,22 +94,13 @@ class IngressValidatorTests(unittest.TestCase):
                 domain="test-domain",
                 category="cat-secret",
                 policy=self.policy,
-            )
+            allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
         self.assertEqual(ctx.exception.code, SafetyCode.POLICY_REJECTED)
 
-    def test_stream_rejected_at_ingress(self) -> None:
-        with open(FIXTURES_DIR / "deepseek_stream_rejected.json", "r", encoding="utf-8") as f:
-            raw_body = f.read()
-
-        with self.assertRaises(SafetyError) as ctx:
-            IngressValidator.validate_request(
-                raw_body=raw_body,
-                protocol=DEEPSEEK_CHAT_PROTOCOL,
-                domain="test-domain",
-                category="cat-approved",
-                policy=self.policy,
-            )
-        self.assertEqual(ctx.exception.code, SafetyCode.PROTOCOL_VIOLATION)
+    def test_admitted_stream_parses_at_ingress(self):
+        raw=(FIXTURES_DIR/'deepseek_stream_rejected.json').read_text(encoding='utf-8')
+        result=IngressValidator.validate_request(raw,DEEPSEEK_CHAT_PROTOCOL,'test-domain','cat-approved',self.policy,allowed_models=frozenset({'deepseek-flash'}))
+        self.assertTrue(result.parsed_request.stream)
 
     def test_tools_rejected_at_ingress(self) -> None:
         with open(FIXTURES_DIR / "claude_tools_rejected.json", "r", encoding="utf-8") as f:
@@ -122,7 +113,7 @@ class IngressValidatorTests(unittest.TestCase):
                 domain="test-domain",
                 category="cat-approved",
                 policy=self.policy,
-            )
+            allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
         self.assertEqual(ctx.exception.code, SafetyCode.PROTOCOL_VIOLATION)
 
     def test_unsupported_protocol_rejected(self) -> None:
@@ -133,7 +124,7 @@ class IngressValidatorTests(unittest.TestCase):
                 domain="test-domain",
                 category="cat-approved",
                 policy=self.policy,
-            )
+            allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
         self.assertEqual(ctx.exception.code, SafetyCode.UNSUPPORTED_PROTOCOL)
 
 

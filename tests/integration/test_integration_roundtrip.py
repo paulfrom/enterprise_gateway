@@ -47,7 +47,7 @@ from protocol.identity import TrustedIdentity
 from detection.inference_executor import InferenceExecutor
 from knowledge.knowledge_events import ObservationEvent
 from masking.mapping import MappingContext
-from gateway.pipeline import ProtectedPipeline
+from gateway.pipeline import ProtectedPipeline, UpstreamFailure
 from policy.policy import (
     CategoryLabel,
     CategoryRule,
@@ -180,7 +180,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         self.executor.close()
         self.temp_dir.cleanup()
 
-    def _create_pipeline(self, protocol: str, spy_transport: httpx.BaseTransport) -> ProtectedPipeline:
+    def _create_pipeline(self, protocol: str, spy_transport: httpx.BaseTransport, **options) -> ProtectedPipeline:
         bound_upstream = BoundUpstream(
             channel_id="chan-01",
             scheme="http",
@@ -198,6 +198,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         )
         path = "/v1/chat/completions" if protocol == DEEPSEEK_CHAT_PROTOCOL else "/v1/messages"
         return ProtectedPipeline(
+            allowed_models=options.pop('allowed_models',frozenset({"deepseek-flash" if protocol==DEEPSEEK_CHAT_PROTOCOL else "claude-sonnet-5-5"})),
             channel_id="chan-01",
             protocol=protocol,
             domain=self.domain,
@@ -209,6 +210,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             evidence_gate=self.evidence_gate,
             egress_client=egress_client,
             spool_writer=self.spool_writer,
+            **options,
         )
 
     def test_deepseek_protected_roundtrip_positive(self) -> None:
@@ -434,10 +436,9 @@ class IntegrationRoundtripTests(unittest.TestCase):
 
     def test_admission_limit_exceeded_blocks_egress_and_upstream_is_zero(self) -> None:
         spy = UpstreamSpyTransport(lambda r: httpx.Response(200))
+        # Bind the small budget before creating the immutable protection package.
+        self.admission_limiter = AdmissionLimiter(max_body_bytes=10)
         pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
-
-        # Configure tiny admission body limit
-        pipeline.admission_limiter = AdmissionLimiter(max_body_bytes=10)
 
         raw_req = json.dumps({
             "model": "deepseek-flash",
@@ -513,12 +514,11 @@ class IntegrationRoundtripTests(unittest.TestCase):
 
     def test_evidence_gate_failure_blocks_egress_and_upstream_is_zero(self) -> None:
         spy = UpstreamSpyTransport(lambda r: httpx.Response(200))
-        pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
-
         # Point intent directory to a non-writable/invalid file path
         invalid_intent_dir = self.base_path / "intent_as_file"
         invalid_intent_dir.write_text("not a dir", encoding="utf-8")
-        pipeline.evidence_gate = EvidenceGate(intent_directory=invalid_intent_dir)
+        self.evidence_gate = EvidenceGate(intent_directory=invalid_intent_dir)
+        pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
 
         raw_req = json.dumps({
             "model": "deepseek-flash",
@@ -549,7 +549,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         })
 
         with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
-            with self.assertRaises(SafetyError) as exc_info:
+            with self.assertRaises(UpstreamFailure) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
                     headers={},
@@ -557,7 +557,9 @@ class IntegrationRoundtripTests(unittest.TestCase):
                     category="STANDARD",
                     context=ctx,
                 )
-            self.assertEqual(SafetyCode.CONTRACT_VIOLATION, exc_info.exception.code)
+            self.assertEqual(500, exc_info.exception.response.status_code)
+            self.assertEqual('UPSTREAM_INTERNAL_ERROR',exc_info.exception.response.body['error']['code'])
+            self.assertNotIn('Internal Server Error',str(exc_info.exception.response.body))
 
         self.assertEqual(1, len(spy.calls))
 

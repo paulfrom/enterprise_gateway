@@ -72,7 +72,7 @@ class ReplacerTests(unittest.TestCase):
             category="cat-approved",
             policy=self.policy,
             exemption_registry=registry,
-        )
+        allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
 
     @staticmethod
     def _span(fragment, needle, entity_type, priority=3):
@@ -125,7 +125,7 @@ class ReplacerTests(unittest.TestCase):
         self.assertNotIn("13900001111", serialized)
         self.assertNotIn("02155556666", serialized)
         self.assertNotIn("sk-synthetic-", serialized)
-        self.assertEqual(result, parse_deepseek_chat_completion(serialized))
+        self.assertEqual(result, parse_deepseek_chat_completion(serialized,allowed_models=frozenset({"deepseek-flash"})))
 
     def test_claude_hits_replaced_all_editable_positions(self) -> None:
         validated = self._validated(CLAUDE_MESSAGES_PROTOCOL, self.claude_body)
@@ -169,7 +169,7 @@ class ReplacerTests(unittest.TestCase):
         serialized = json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
         self.assertNotIn("13800002222", serialized)
         self.assertNotIn("HT-2026-SYNTH-0007", serialized)
-        self.assertEqual(result, parse_claude_messages(serialized))
+        self.assertEqual(result, parse_claude_messages(serialized,allowed_models=frozenset({"claude-sonnet-5-5"})))
 
     def test_request_without_hits_is_byte_identical(self) -> None:
         validated = self._validated(DEEPSEEK_CHAT_PROTOCOL, self.deepseek_body)
@@ -443,49 +443,15 @@ class ReplacerTests(unittest.TestCase):
                 replace_request(unsupported, {}, context)
             self.assertEqual(SafetyCode.UNSAFE_REPLACEMENT, failure.exception.code)
 
-    def test_stop_and_stop_sequences_redaction(self) -> None:
-        # DeepSeek stop string
-        body_ds = json.dumps({
-            "model": "deepseek-flash",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stop": "STOP_CANARY_1",
-        })
-        val_ds = IngressValidator.validate_request(
-            body_ds, DEEPSEEK_CHAT_PROTOCOL, "scope-ext", "cat-approved", self.policy
-        )
-        self.assertEqual(val_ds.fragments[1].json_path, "stop")
-        with MappingContext("scope-ext", "v1", KEY) as context:
-            redacted = replace_request(
-                val_ds,
-                {"messages[0].content": (), "stop": (Span(0, 13, "ORG", 1),)},
-                context,
-            )
-            self.assertTrue(redacted.stop.startswith("<<ENT_v1_"))
-
-        # Claude stop_sequences list
-        body_cl = json.dumps({
-            "model": "claude-sonnet-5-5",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "hello"}],
-            "stop_sequences": ["STOP_CANARY_A", "STOP_CANARY_B"],
-        })
-        val_cl = IngressValidator.validate_request(
-            body_cl, CLAUDE_MESSAGES_PROTOCOL, "scope-ext", "cat-approved", self.policy
-        )
-        self.assertEqual(val_cl.fragments[1].json_path, "stop_sequences[0]")
-        self.assertEqual(val_cl.fragments[2].json_path, "stop_sequences[1]")
-        with MappingContext("scope-ext", "v1", KEY) as context:
-            redacted_cl = replace_request(
-                val_cl,
-                {
-                    "messages[0].content": (),
-                    "stop_sequences[0]": (Span(0, 13, "ORG", 1),),
-                    "stop_sequences[1]": (),
-                },
-                context,
-            )
-            self.assertTrue(redacted_cl.stop_sequences[0].startswith("<<ENT_v1_"))
-            self.assertEqual(redacted_cl.stop_sequences[1], "STOP_CANARY_B")
+    def test_sensitive_stop_parameters_are_rejected_as_structure(self):
+        for protocol,model,fields,path in ((DEEPSEEK_CHAT_PROTOCOL,'deepseek-flash',{'stop':'ORG_CANARY'},'stop'),(CLAUDE_MESSAGES_PROTOCOL,'claude-sonnet-5-5',{'stop_sequences':['ORG_CANARY'],'max_tokens':32},'stop_sequences[0]')):
+            body=json.dumps({'model':model,'messages':[{'role':'user','content':'hello'}],**fields})
+            validated=IngressValidator.validate_request(body,protocol,'scope-ext','cat-approved',self.policy,allowed_models=frozenset({model}))
+            spans={f.json_path:() for f in validated.fragments}
+            spans[path]=(Span(0,10,'ORG',1),)
+            with MappingContext('scope-ext','v1',KEY) as context,self.assertRaises(SafetyError) as raised:
+                replace_request(validated,spans,context)
+            self.assertEqual(raised.exception.code,SafetyCode.UNSAFE_REPLACEMENT)
 
 
 if __name__ == "__main__":

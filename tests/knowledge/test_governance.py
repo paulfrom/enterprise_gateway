@@ -38,28 +38,28 @@ class TestKnowledgeGovernance(unittest.TestCase):
             tenant_id="tenant-corp",
             domain=self.domain,
             roles=frozenset({Role.SECURITY_REVIEWER}),
-            purposes=frozenset({"knowledge-governance"}),
+            purposes=frozenset({"procurement"}),
         )
         self.biz_reviewer = TrustedActor(
             subject_id="biz-01",
             tenant_id="tenant-corp",
             domain=self.domain,
             roles=frozenset({Role.BUSINESS_REVIEWER}),
-            purposes=frozenset({"knowledge-governance"}),
+            purposes=frozenset({"procurement"}),
         )
         self.publisher = TrustedActor(
             subject_id="pub-01",
             tenant_id="tenant-corp",
             domain=self.domain,
             roles=frozenset({Role.PUBLISHER}),
-            purposes=frozenset({"knowledge-publishing"}),
+            purposes=frozenset({"procurement"}),
         )
         self.steward = TrustedActor(
             subject_id="steward-01",
             tenant_id="tenant-corp",
             domain=self.domain,
             roles=frozenset({Role.DATA_STEWARD}),
-            purposes=frozenset({"knowledge-lifecycle"}),
+            purposes=frozenset({"procurement"}),
         )
 
         self.source1 = Source(
@@ -68,7 +68,7 @@ class TestKnowledgeGovernance(unittest.TestCase):
             source_id="src-01",
             version="v1",
             source_kind=SourceKind.USER_ASSERTION,
-            acl=frozenset({f"{self.domain}:team-a", f"{self.domain}:team-b"}),
+            acl=frozenset({f"{self.domain}:team-a", f"{self.domain}:team-b", "sec-01", "biz-01", "pub-01", "steward-01", "user-allowed"}),
             purpose="procurement",
             observed_at=self.now,
             retention_until=self.now + timedelta(days=60),
@@ -88,6 +88,10 @@ class TestKnowledgeGovernance(unittest.TestCase):
         self.ent_jia = Entity(uuid4(), "tenant-corp", self.domain, "ORG", "甲公司")
         self.ent_yi = Entity(uuid4(), "tenant-corp", self.domain, "ORG", "乙公司")
         self.claim = Claim(self.ent_yi, Predicate.SUPPLIES, self.ent_jia)
+
+    def approve(self, candidate):
+        c = self.service.approve_candidate(candidate,self.sec_reviewer,Role.SECURITY_REVIEWER,'security/verified')
+        return self.service.approve_candidate(c,self.biz_reviewer,Role.BUSINESS_REVIEWER,'business/verified')
 
     def test_k07_derived_acl_is_strict_intersection(self) -> None:
         """K-07: Derivative knowledge ACL is intersection of source ACLs, never union."""
@@ -167,10 +171,11 @@ class TestKnowledgeGovernance(unittest.TestCase):
             candidate_id=uuid4(),
             claim=self.claim,
             evidence=(ev,),
-            acl=frozenset({f"{self.domain}:team-secret"}),
+            acl=self.source1.acl - {"user-allowed"},
             purpose="procurement",
-            state=CandidateState.APPROVED,
+            state=CandidateState.PROPOSED,
         )
+        candidate = self.approve(candidate)
         pub, _ = self.service.publish_candidate(
             candidate, self.publisher, self.now + timedelta(days=90)
         )
@@ -181,17 +186,18 @@ class TestKnowledgeGovernance(unittest.TestCase):
             tenant_id="tenant-corp",
             domain=self.domain,
             roles=frozenset(),
-            purposes=frozenset({"knowledge-read"}),
+            purposes=frozenset({"procurement"}),
         )
         # Manually mock matching subject_id in ACL
         candidate_with_user = Candidate(
             candidate_id=uuid4(),
             claim=self.claim,
             evidence=(ev,),
-            acl=frozenset({"user-allowed"}),
+            acl=self.source1.acl,
             purpose="procurement",
-            state=CandidateState.APPROVED,
+            state=CandidateState.PROPOSED,
         )
+        candidate_with_user = self.approve(candidate_with_user)
         pub2, _ = self.service.publish_candidate(
             candidate_with_user, self.publisher, self.now + timedelta(days=90)
         )
@@ -214,14 +220,15 @@ class TestKnowledgeGovernance(unittest.TestCase):
             evidence=(ev,),
             acl=self.source1.acl,
             purpose="procurement",
-            state=CandidateState.APPROVED,
+            state=CandidateState.PROPOSED,
         )
+        candidate = self.approve(candidate)
         pub, _ = self.service.publish_candidate(
             candidate, self.publisher, self.now + timedelta(days=90)
         )
 
         dict_payload = self.service.compile_approved_dictionary_payload(
-            "dict-kb-01", "v1.0.0", [pub]
+            "dict-kb-01", "v1.0.0", [pub], consumer=self.publisher
         )
         self.assertEqual("dict-kb-01", dict_payload["dictionary_id"])
         self.assertEqual("v1.0.0", dict_payload["version"])
@@ -245,8 +252,9 @@ class TestKnowledgeGovernance(unittest.TestCase):
             evidence=(ev,),
             acl=self.source1.acl,
             purpose="procurement",
-            state=CandidateState.APPROVED,
+            state=CandidateState.PROPOSED,
         )
+        candidate = self.approve(candidate)
         pub, _ = self.service.publish_candidate(
             candidate, self.publisher, self.now + timedelta(days=90)
         )

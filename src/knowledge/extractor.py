@@ -12,6 +12,7 @@ Extracts business relations (such as Predicate.SUPPLIES) from observed text with
 from __future__ import annotations
 
 import re
+import hashlib
 from typing import Sequence
 from uuid import UUID, uuid4
 
@@ -36,7 +37,7 @@ _SUPPLIES_NEGATIVE = re.compile(
     r"(?P<buyer>[^\s，。！？、]+?)\s*(?:未向|未曾向|未从|没有向|并未向)\s*(?P<supplier>[^\s，。！？、]+?)\s*(?:采购|购买|订购|购入)\s*(?P<item>[^\s，。！？、]+)?"
 )
 _HYPOTHETICAL_MARKERS = ("计划", "拟", "如果", "若", "打算", "预计", "准备", "拟定")
-_QUESTION_MARKERS = ("吗", "？", "?", "是否", "能否", "可否")
+_QUESTION_MARKERS = ("吗", "？", "?", "是否", "能否", "可否", "请问", "请查询")
 
 
 class RelationExtractor:
@@ -63,6 +64,7 @@ class RelationExtractor:
         """
         if source.domain != self.domain:
             raise KnowledgeError("source domain mismatch in relation extraction")
+        self._verify(text, source, entities, content_sha256)
 
         candidates: list[Candidate] = []
         if len(entities) < 2:
@@ -87,8 +89,9 @@ class RelationExtractor:
                     mid2 = match.group("mid2") or ""
 
                     # Polarity check
-                    neg_markers = ("未", "没有", "未曾", "并未", "不曾")
-                    is_neg = any(m in mid1 or m in mid2 for m in neg_markers)
+                    neg_markers = ("未", "没有", "不", "否认", "否定")
+                    context = self._sentence(text, span_start, span_end)
+                    is_neg = any(m in mid1 or m in mid2 for m in neg_markers) or any(m in context for m in ('说法不实', '并不属实', '并非事实', '消息不实'))
                     polarity = Polarity.NEGATIVE if is_neg else Polarity.POSITIVE
 
                     # Modality check
@@ -125,6 +128,8 @@ class RelationExtractor:
 
         Co-occurrence is explicitly Predicate.CO_OCCURS_WITH and NEVER Predicate.SUPPLIES.
         """
+        self._verify(text, source, entities, content_sha256)
+        entities = [entity for entity in entities if entity.name in text]
         if len(entities) < 2:
             return []
 
@@ -139,7 +144,7 @@ class RelationExtractor:
                     predicate=Predicate.CO_OCCURS_WITH,
                     object=e2,
                     polarity=Polarity.POSITIVE,
-                    modality=Modality.ASSERTED,
+                    modality=self._detect_modality(text, 0, len(text), source.source_kind),
                 )
                 evidence = Evidence(source, content_sha256, 0, len(text))
                 candidates.append(
@@ -167,9 +172,9 @@ class RelationExtractor:
             return Modality.HYPOTHETICAL
 
         # Check sentence window around match
-        window_start = max(0, span_start - 20)
-        window_end = min(len(text), span_end + 20)
-        context = text[window_start:window_end]
+        context = self._sentence(text, span_start, span_end)
+        if any(marker in context for marker in ('引用', '传言', '据称', '听说', '“', '”', '报道', '曾经', '过去', '去年', '截至', '目前', '以前')) or re.search(r'\d{4}年|\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b', context):
+            return Modality.HYPOTHETICAL
 
         # Check for question
         if any(qm in context for qm in _QUESTION_MARKERS):
@@ -180,3 +185,15 @@ class RelationExtractor:
             return Modality.HYPOTHETICAL
 
         return Modality.ASSERTED
+
+    @staticmethod
+    def _sentence(text: str, start: int, end: int) -> str:
+        left = max(text.rfind(mark, 0, start) for mark in ('。','！','？','\n')) + 1
+        right = min((pos for mark in ('。','！','？','\n') if (pos := text.find(mark, end)) >= 0), default=len(text))
+        return text[left:right + 1]
+
+    def _verify(self, text: str, source: Source, entities: Sequence[Entity], digest: str) -> None:
+        if hashlib.sha256(text.encode('utf-8')).hexdigest() != digest:
+            raise KnowledgeError('evidence digest mismatch')
+        if source.domain != self.domain or any((e.tenant_id, e.domain) != (source.tenant_id, source.domain) for e in entities):
+            raise KnowledgeError('entity or evidence scope mismatch')

@@ -9,6 +9,36 @@ from protocol.sse import ServerSentEvent, SseIncrementalParser
 
 
 class TestSseIncrementalParser(unittest.TestCase):
+    def test_exact_event_budget_cr_eof_and_split_crlf(self):
+        for raw in (b"data:" + b"x" * 93 + b"\r\r", b"data:" + b"x" * 93 + b"\r\n\r\n"):
+            for cut in range(len(raw) + 1):
+                parser = SseIncrementalParser(max_buffer_bytes=100)
+                events = list(parser.feed(raw[:cut])) + list(parser.feed(raw[cut:])) + list(parser.flush())
+                self.assertEqual(["x" * 93], [event.data for event in events])
+
+    def test_accumulated_multiline_event_budget_and_eof_truncation(self):
+        parser = SseIncrementalParser(max_buffer_bytes=40)
+        list(parser.feed(b"data: " + b"x" * 15 + b"\n"))
+        with self.assertRaises(SafetyError):
+            list(parser.feed(b"data: " + b"y" * 15 + b"\n"))
+        for content in (b"data: incomplete", b"data: complete\n", b"data: \xe4"):
+            parser = SseIncrementalParser()
+            list(parser.feed(content))
+            with self.assertRaises(SafetyError):
+                list(parser.flush())
+
+    def test_every_byte_crlf_multiline_and_utf8_corruption(self):
+        parser = SseIncrementalParser()
+        result = []
+        for byte in "data: 公司甲\r\ndata: second\r\n\r\n".encode():
+            result.extend(parser.feed(bytes([byte])))
+        self.assertEqual(["公司甲\nsecond"], [item.data for item in result])
+        self.assertEqual([], list(parser.flush()))
+        parser = SseIncrementalParser()
+        list(parser.feed(b"data: \xe4"))
+        with self.assertRaises(SafetyError):
+            list(parser.feed(b"\xff\n\n"))
+
     def test_standard_message_dispatch(self) -> None:
         """Parses standard SSE message blocks."""
         parser = SseIncrementalParser()

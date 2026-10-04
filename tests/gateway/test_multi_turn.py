@@ -153,6 +153,7 @@ class TestMultiTurnConversation(unittest.TestCase):
         client = BoundEgressClient(binding=bound, transport=transport, resolver=lambda h: ("127.0.0.1",))
 
         pipeline = ProtectedPipeline(
+            allowed_models=frozenset({"deepseek-flash"}),
             channel_id="chan-turn",
             domain=self.domain,
             protocol=DEEPSEEK_CHAT_PROTOCOL,
@@ -171,29 +172,29 @@ class TestMultiTurnConversation(unittest.TestCase):
 
         # Turn 1
         key1 = b"turn-1-hmac-key-32bytes-secret!!"
-        rep1 = session.execute_turn("请查询 阿尔法科技 的员工 张三 的基本信息。", "STANDARD", key1)
+        rep1 = session.execute_turn("请查询 阿尔法科技 的员工 张三 的基本信息。", "STANDARD", key1,model="deepseek-flash")
         self.assertIn("阿尔法科技", rep1)
         self.assertIn("张三", rep1)
 
         # Turn 2
         key2 = b"turn-2-hmac-key-32bytes-secret!!"
-        rep2 = session.execute_turn("再查询他的同事 李四 的信息。", "STANDARD", key2)
+        rep2 = session.execute_turn("再查询他的同事 李四 的信息。", "STANDARD", key2,model="deepseek-flash")
         self.assertIn("李四", rep2)
 
         # Turn 3
         key3 = b"turn-3-hmac-key-32bytes-secret!!"
-        rep3 = session.execute_turn("对比 张三 和 李四 的考勤记录。", "STANDARD", key3)
+        rep3 = session.execute_turn("对比 张三 和 李四 的考勤记录。", "STANDARD", key3,model="deepseek-flash")
         self.assertIn("张三", rep3)
         self.assertIn("李四", rep3)
 
         # Turn 4
         key4 = b"turn-4-hmac-key-32bytes-secret!!"
-        rep4 = session.execute_turn("总结 阿尔法科技 这两位员工的表现。", "STANDARD", key4)
+        rep4 = session.execute_turn("总结 阿尔法科技 这两位员工的表现。", "STANDARD", key4,model="deepseek-flash")
         self.assertIn("阿尔法科技", rep4)
 
         # Turn 5
         key5 = b"turn-5-hmac-key-32bytes-secret!!"
-        rep5 = session.execute_turn("将报告发送给 张三 确认。", "STANDARD", key5)
+        rep5 = session.execute_turn("将报告发送给 张三 确认。", "STANDARD", key5,model="deepseek-flash")
         self.assertIn("张三", rep5)
 
         # Verify 5 turns executed
@@ -216,6 +217,7 @@ class TestMultiTurnConversation(unittest.TestCase):
         )
         client = BoundEgressClient(binding=bound, transport=transport, resolver=lambda h: ("127.0.0.1",))
         pipeline = ProtectedPipeline(
+            allowed_models=frozenset({"deepseek-flash"}),
             channel_id="chan-turn",
             domain=self.domain,
             protocol=DEEPSEEK_CHAT_PROTOCOL,
@@ -235,7 +237,7 @@ class TestMultiTurnConversation(unittest.TestCase):
 
         # Inject reserved token prefix directly in user input
         with self.assertRaises(SafetyError) as exc_info:
-            session.execute_turn("这是上次的令牌 <<ENT_v1_fake>> 请继续", "STANDARD", key)
+            session.execute_turn("这是上次的令牌 <<ENT_v1_fake>> 请继续", "STANDARD", key,model="deepseek-flash")
         self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, exc_info.exception.code)
 
 

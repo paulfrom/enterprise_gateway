@@ -7,9 +7,11 @@
    * **请求级精确伪名替换**：基于 HMAC 机制在请求内存中建立临时原值映射，在受支持文本字段内精确恢复已知令牌；不保证检测零漏检或模型语义正确。
    * **全链路安全防护**：涵盖上游错误正文丢弃、异常断链防泄露、AES-GCM 信封加密落盘重放（Spool）、以及 KEK 密钥轮转与销毁。
 2. **企业受控知识资产沉淀**：
-   * 按获准来源、原始 ACL、用途与有效期沉淀知识事实，支持有向业务关系抽取、双人审批发布、事务 Outbox 原子通知、PostgreSQL 关系持久化及 Row Level Security (RLS) 跨域隔离。
+   * 输入默认可进入知识采集与分析；来源、知识访问权限、用途与有效期分别治理。代码包含有向关系抽取、审批、事务 Outbox、PostgreSQL 持久化与 RLS 组件，自动候选须验证后发布。
 
-当前代码库已实现并全面验证核心引擎、双协议流式解析与恢复、工具聚合校验、多轮防护、以及 PostgreSQL 知识生命周期闭环。未配置准入生产凭据时，HTTP 默认服务保持 503 安全阻断，真实供应商连通与生产发布须经 R-10 准入审查。
+已支持严格 Chat Completions 与 Messages 子集的受保护 HTTP 非流式、SSE、工具与多轮往返，以及加密采集产物到独立 worker、PostgreSQL、审批、授权消费、词典和撤回/到期的本地闭环。技术验证使用合成上游与业务身份，不能代表实际客户端、供应商或生产基础设施准入；未装配默认服务保持503。
+
+SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，此前只发送固定保活。原始及恢复后响应各有8MiB预算，工具参数恢复后每调用64KiB、全请求256KiB。该模式的首业务内容等待时间需要实际客户端联调；历史thinking必须由已绑定验证器验签，网关receipt只证明本域完整版本绑定。
 
 ---
 
@@ -28,7 +30,7 @@
 ## 系统架构与模块划分
 
 ```
-[ 客户端请求 ] 
+[ 客户端请求 ]
       │
       ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -94,6 +96,8 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 ~~~
 
 ### 2. 运行自动化测试套件
+完整测试需要真实隔离PostgreSQL及非owner、无superuser/BYPASSRLS的应用角色。通过`GATEWAY_TEST_PG_CONFIG`指定受控JSON配置文件，或使用被Git忽略的`.env.test`；字段为`app_dsn`、`admin_dsn`、`schema`、`application_role`。`schema`必须使用`gw_test_`前缀；每个测试进程创建新的随机schema，缺配置直接失败。管理连接需有创建schema和定义受限函数的权限；管理owner与应用角色分别使用独立连接，不使用生产数据库替代隔离测试。
+
 ~~~powershell
 # Windows 快速验证脚本
 .\scripts\check.ps1
@@ -101,6 +105,8 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 # 或直接使用 uv 执行全量测试
 uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -t . -v
 ~~~
+
+应用集成通过`gateway.app.create_app`装配完整`ProtectedPipeline`、服务端`enterprise_credentials`和至少32字节`hmac_key`。流水线需要实际规则/词典/NER、固定模型映射与出站绑定、审计/加密spool及完整版本；企业凭据逐请求验证，供应商凭据只由固定出站客户端生成。配置变化构造新装配，在途请求继续使用原route、协议、工具和验证器快照。
 
 ### 3. 本地启动网关服务
 ~~~powershell
@@ -113,8 +119,8 @@ uv run --frozen --no-editable --cache-dir .uv-cache python -m uvicorn gateway.ap
 |---|---|---|
 | `GET /healthz` | 进程健康存活探针 | `200 OK`，服务正常运行 |
 | `GET /readyz` | 业务就绪检查探针 | 固定 `503`，列出未满足的生产准入条件 |
-| `POST /v1/chat/completions` | Chat Completions 候选入口 | 固定 `503 CHANNEL_NOT_ADMITTED`，不读取正文或调用上游 |
-| `POST /v1/messages` | Messages 候选入口 | 固定 `503 CHANNEL_NOT_ADMITTED`，不读取正文或调用上游 |
+| `POST /v1/chat/completions` | Chat Completions 受保护入口 | 默认未装配为 `503`；完整装配后执行认证、准入、检测、留证/采集及恢复 |
+| `POST /v1/messages` | Messages 受保护入口 | 默认未装配为 `503`；完整装配后按固定 Messages 渠道处理 |
 
 ---
 
@@ -123,3 +129,5 @@ uv run --frozen --no-editable --cache-dir .uv-cache python -m uvicorn gateway.ap
 1. **不可绕过性**：网关必须部署为客户端到大模型上游的唯一出口，且上游服务必须配置仅接受来自网关 IP/证书的请求。
 2. **内存物理擦除限制**：原值映射在请求结束时由 Python 垃圾回收机制释放对象引用，在解释器层面不保证物理 RAM 位的硬件擦除。
 3. **推断风险防范**：文本实体替换能够消除直接标识符泄露，但不能完全阻止模型基于上下文语境产生的反向间接推断，高敏绝密数据应直接配置为 `LOCAL_ONLY` 强阻断。
+4. **知识数据库权限**：候选读取核验自身和全部来源权限，拒绝状态持久化。归一描述表不并集ACL；固定search_path、撤销PUBLIC执行权的受限管理函数需要专用管理owner，应用角色不得继承其BYPASSRLS权限。读取与来源撤回/到期通过行锁明确事务顺序。
+5. **客观限制**：不支持任意协议或未知字段透传；没有真实供应商签名接受、实际WorkBuddy组合、企业IAM/KMS、生产网络与发布的通用通过声明。具体验签算法及信任材料仍须审查准入，语法守卫不能证明任意Python算法安全。

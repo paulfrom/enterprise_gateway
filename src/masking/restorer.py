@@ -21,11 +21,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext
+from protocol.protocols import DeepSeekToolCall, ClaudeToolUseBlock, ClaudeThinkingBlock
+from protocol.tool_buffer import BoundedToolCallBuffer
+import json
 from protocol.protocols import (
     CLAUDE_MESSAGES_PROTOCOL,
-    CLAUDE_MODEL_WHITELIST,
     DEEPSEEK_CHAT_PROTOCOL,
-    DEEPSEEK_MODEL_WHITELIST,
 )
 from infra.strict_json import JsonRejectKind, parse_strict_json
 
@@ -74,7 +75,8 @@ class DeepSeekResponseMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     role: Literal["assistant"]
-    content: str
+    content: str | None = None
+    tool_calls: list[DeepSeekToolCall] | None = None
 
 
 class DeepSeekChoice(BaseModel):
@@ -82,7 +84,7 @@ class DeepSeekChoice(BaseModel):
 
     index: int
     message: DeepSeekResponseMessage
-    finish_reason: Literal["stop", "length", "content_filter"] | None = None
+    finish_reason: Literal["stop", "length", "content_filter", 'tool_calls'] | None = None
 
 
 class DeepSeekChatResponse(BaseModel):
@@ -128,8 +130,8 @@ class ClaudeMessagesResponse(BaseModel):
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
     model: str
-    content: Annotated[list[ClaudeTextBlockResponse], Field(min_length=1)]
-    stop_reason: Literal["end_turn", "max_tokens", "stop_sequence"] | None = None
+    content: Annotated[list[ClaudeTextBlockResponse | ClaudeToolUseBlock | ClaudeThinkingBlock], Field(min_length=1)]
+    stop_reason: Literal["end_turn", "max_tokens", "stop_sequence", 'tool_use'] | None = None
     stop_sequence: str | None = None
     usage: ClaudeUsage | None = None
 
@@ -139,6 +141,18 @@ class ClaudeMessagesResponse(BaseModel):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("model must be a non-empty string")
         return value
+
+
+class ClaudeUpstreamThinkingBlock(BaseModel):
+    """Supplier wire state has a supplier signature and no gateway receipt."""
+    model_config = ConfigDict(extra='forbid',frozen=True,strict=True)
+    type: Literal['thinking']
+    thinking: str
+    signature: str = Field(min_length=1)
+
+
+class ClaudeUpstreamMessagesResponse(ClaudeMessagesResponse):
+    content: Annotated[list[ClaudeTextBlockResponse | ClaudeToolUseBlock | ClaudeUpstreamThinkingBlock],Field(min_length=1)]
 
 
 _ResponseModelT = TypeVar("_ResponseModelT", bound=BaseModel)
@@ -166,6 +180,8 @@ def _assert_no_tokens_in_uneditable(protocol: str, parsed: DeepSeekChatResponse 
         ]
         for block in parsed.content:
             uneditable_strings.append(block.type)
+            if isinstance(block,ClaudeUpstreamThinkingBlock):
+                uneditable_strings.extend((block.thinking,block.signature))
     else:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
 
@@ -179,6 +195,8 @@ def restore_response(
     raw_response: str | bytes | dict | DeepSeekChatResponse | ClaudeMessagesResponse,
     context: MappingContext,
     allowed_models: frozenset[str] | None = None,
+    allowed_tools=None,
+    state_validator=None,
 ) -> DeepSeekChatResponse | ClaudeMessagesResponse:
     """Restore mapped tokens in editable positions of an upstream non-streaming response.
 
@@ -198,7 +216,7 @@ def restore_response(
     if protocol == DEEPSEEK_CHAT_PROTOCOL:
         model_cls: type[DeepSeekChatResponse] | type[ClaudeMessagesResponse] = DeepSeekChatResponse
     elif protocol == CLAUDE_MESSAGES_PROTOCOL:
-        model_cls = ClaudeMessagesResponse
+        model_cls = ClaudeUpstreamMessagesResponse
     else:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unsupported protocol")
 
@@ -224,34 +242,49 @@ def restore_response(
     if validation_failed:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
 
-    target_allowed_models = (
-        allowed_models
-        if allowed_models is not None
-        else (
-            DEEPSEEK_MODEL_WHITELIST
-            if protocol == DEEPSEEK_CHAT_PROTOCOL
-            else CLAUDE_MODEL_WHITELIST
-        )
-    )
-    if target_allowed_models is not None and parsed_input.model not in target_allowed_models:
+    if not allowed_models or parsed_input.model not in allowed_models:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "model not allowed")
 
     # 3. Guard: fail closed if any token appears in uneditable fields
     _assert_no_tokens_in_uneditable(protocol, parsed_input)
 
     # 4. Perform in-memory exact restoration on editable positions
-    restored_payload = parsed_input.model_dump()
+    restored_payload = parsed_input.model_dump(exclude_unset=True)
 
     if isinstance(parsed_input, DeepSeekChatResponse):
         for idx, choice in enumerate(parsed_input.choices):
-            restored_payload["choices"][idx]["message"]["content"] = context.restore(choice.message.content)
+            if choice.message.content is not None:
+                restored_payload["choices"][idx]["message"]["content"] = context.restore(choice.message.content)
+            buffer = BoundedToolCallBuffer()
+            for j, call in enumerate(choice.message.tool_calls or []):
+                if _has_reserved_token(call.id) or _has_reserved_token(call.function.name):
+                    raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'tool structure')
+                buffer.register_tool(call.id,call.function.name)
+                buffer.feed_argument_delta(call.id,call.function.arguments)
+            for j, call in enumerate(choice.message.tool_calls or []):
+                args = buffer.finalize_and_verify(call.id,context,allowed_tools=allowed_tools or {})
+                restored_payload['choices'][idx]['message']['tool_calls'][j]['function']['arguments'] = json.dumps(args,ensure_ascii=False,separators=(',',':'))
     elif isinstance(parsed_input, ClaudeMessagesResponse):
+        buffer = BoundedToolCallBuffer()
         for idx, block in enumerate(parsed_input.content):
-            restored_payload["content"][idx]["text"] = context.restore(block.text)
+            if isinstance(block, ClaudeTextBlockResponse):
+                restored_payload["content"][idx]["text"] = context.restore(block.text)
+            elif isinstance(block, ClaudeToolUseBlock):
+                if _has_reserved_token(block.id) or _has_reserved_token(block.name):
+                    raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'tool structure')
+                buffer.register_tool(block.id,block.name)
+                buffer.feed_argument_delta(block.id,json.dumps(block.input,ensure_ascii=False))
+                restored_payload['content'][idx]['input'] = buffer.finalize_and_verify(block.id,context,allowed_tools=allowed_tools or {})
+            else:
+                if state_validator is None: raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'unverified reasoning state')
+                from protocol.history_state import ReasoningBlock
+                verified = state_validator.admit_upstream_block(ReasoningBlock('thinking',block.thinking,block.signature,{}))
+                restored_payload['content'][idx]['metadata'] = dict(verified.metadata)
 
     # 5. Validate restored result against protocol contract
     try:
-        restored_result = model_cls.model_validate(restored_payload)
+        output_cls=ClaudeMessagesResponse if protocol==CLAUDE_MESSAGES_PROTOCOL else DeepSeekChatResponse
+        restored_result = output_cls.model_validate(restored_payload)
     except ValidationError:
         validation_failed = True
 

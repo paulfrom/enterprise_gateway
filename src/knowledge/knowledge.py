@@ -55,6 +55,7 @@ class CandidateState(StrEnum):
 
 
 class Role(StrEnum):
+    KNOWLEDGE_PROCESSOR = "knowledge_processor"
     SECURITY_REVIEWER = "security_reviewer"
     BUSINESS_REVIEWER = "business_reviewer"
     PUBLISHER = "publisher"
@@ -118,6 +119,7 @@ class Source:
     purpose: str
     observed_at: datetime
     retention_until: datetime
+    independence_verified: bool = False
 
     def __post_init__(self) -> None:
         _time(self.observed_at)
@@ -211,7 +213,7 @@ class Candidate:
 
     @property
     def independent_source_count(self) -> int:
-        return len({item.source.key for item in self.evidence})
+        return len({item.source.key for item in self.evidence if item.source.independence_verified and item.source.source_kind != SourceKind.MODEL_OUTPUT})
 
 
 @dataclass(frozen=True)

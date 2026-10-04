@@ -12,6 +12,15 @@ TEST_HMAC_KEY = b"secure-stream-test-key-32bytes!!"
 
 
 class TestBranchStreamingRestorer(unittest.TestCase):
+    def test_every_character_and_all_two_part_splits(self) -> None:
+        with MappingContext("corp.test", "v1", TEST_HMAC_KEY) as ctx:
+            token = ctx.token_for("ORG", "SYNTHETIC_ORG")
+            for chunks in ([*token], *([token[:i], token[i:]] for i in range(len(token) + 1))):
+                restorer = BranchStreamingRestorer(ctx)
+                output = "".join(restorer.feed("b", chunk) for chunk in chunks)
+                output += restorer.finalize("b")
+                self.assertEqual("SYNTHETIC_ORG", output)
+
     def setUp(self) -> None:
         self.domain = "corp.test"
 

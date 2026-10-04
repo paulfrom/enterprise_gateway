@@ -92,6 +92,9 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
 
         mock_pipeline = MagicMock()
         mock_pipeline.domain = "corp.test"
+        mock_pipeline.path = "/v1/chat/completions"
+        mock_pipeline.request_timeout = 60.0
+        mock_pipeline.body_limit = 65536
 
         # Mock success result
         mock_response = MagicMock()
@@ -101,16 +104,18 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
         }
         mock_result = MagicMock()
         mock_result.response = mock_response
+        mock_result.upstream_stream = None
         mock_pipeline.process_request.return_value = mock_result
 
         app = create_app(
             pipeline=mock_pipeline,
-            trusted_identity=ident,
+            enterprise_credentials={"valid-token":ident},
+            hmac_key=b"0123456789abcdef0123456789abcdef",
         )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://review") as client:
             # Positive 200
-            res = await client.post("/v1/chat/completions", json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "hi"}]})
+            res = await client.post("/v1/chat/completions", headers={"authorization":"Bearer valid-token"}, json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "hi"}]})
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["id"], "chatcmpl-test")
 
@@ -122,7 +127,7 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
 
             # Safety error mapping (e.g. SECRET_DETECTED -> 403)
             mock_pipeline.process_request.side_effect = SafetyError(SafetyCode.SECRET_DETECTED, "secret")
-            res_sec = await client.post("/v1/chat/completions", json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "sk-123"}]})
+            res_sec = await client.post("/v1/chat/completions", headers={"authorization":"Bearer valid-token"}, json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "sk-123"}]})
             self.assertEqual(res_sec.status_code, 403)
             self.assertEqual(res_sec.json()["error"]["code"], "SECRET_DETECTED")
 

@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -39,7 +39,9 @@ def build_event():
         source_id="src-contract-alpha",
         source_version="v3",
         source_kind=SourceKind.DOCUMENT,
-        evidence_digest="ab" * 32,
+        evidence_digest=hashlib.sha256(CANARY_TEXT.encode()).hexdigest(),
+        evidence_text=CANARY_TEXT,
+        retention_until=datetime(2026, 11, 3, tzinfo=timezone.utc),
         evidence_offset=7,
         observed_at=datetime(2026, 10, 3, 13, 2, 11, tzinfo=timezone.utc),
         purpose="supplier-relationship-management",

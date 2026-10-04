@@ -2,29 +2,59 @@
   "manifest": {
     "manifest_id": "pkg-prod-v2",
     "version": "2.0.0",
-    "created_at": "2026-10-03T10:00:00Z",
+    "created_at": "2026-10-04T00:00:00Z",
     "components": {
-      "exemption": {
-        "name": "exemption",
-        "version": "2.0",
-        "sha256": "b40f20f657c958a667dadbb9fc0a54d5fc9e55fccc20d1a03a7d68786658660d"
+      "ner": {
+        "name": "ner",
+        "version": "2.0.0",
+        "sha256": "3909f3217fdd68652b9ce7319a0ad0e2ab91b566f10b49b1c5f9413afd2b7b08"
+      },
+      "protocol": {
+        "name": "protocol",
+        "version": "2.0.0",
+        "sha256": "2d9ea08c6a5a174d8018a313a1a1c8a89dd863abeafaf0e57d6d13e3b80924f7"
+      },
+      "dictionary": {
+        "name": "dictionary",
+        "version": "2.0.0",
+        "sha256": "259ca3a133c92034f4f00f7244bf15303cd329d5700f5f1a27ce777b0897ec7d"
+      },
+      "route": {
+        "name": "route",
+        "version": "2.0.0",
+        "sha256": "64c8cc3f9a78382d75366a09eda0d32afa27dc1d2bde68978ca6e1a45106e084"
+      },
+      "mapping": {
+        "name": "mapping",
+        "version": "2.0.0",
+        "sha256": "27a05c434ae9e96c5f3802e809cf63e6e966aaefc919b6a8f4d14937581a743a"
       },
       "policy": {
         "name": "policy",
-        "version": "2.0",
-        "sha256": "3e2e1cca1e9ef3c312938762bf4359200a06d42f01516456d2f1583b1d1f21c1"
+        "version": "2.0.0",
+        "sha256": "ab561b6959c36ea9b56752245d4e482eec9d7f589db01a2f057c1f061281b695"
       },
-      "protocols": {
-        "name": "protocols",
-        "version": "2.0",
-        "sha256": "da4230484316bf0d6a45303ce0e0e26cd077bb1dcb0fdbe2a1fb2b4c1d150ca4"
+      "rules": {
+        "name": "rules",
+        "version": "2.0.0",
+        "sha256": "19a87359aa2f12d4cec08713f2df28d733d5f5886d991a3ce738aaa0d4bb0b46"
+      },
+      "audit": {
+        "name": "audit",
+        "version": "2.0.0",
+        "sha256": "3abc56cd1e56c35ec519ef63ba2bbc5d71ce8577abc5cbec291dc84fb3c7c714"
       }
     },
-    "package_hash": "e10fdf0392b25a199e5511d65d326759172c38f1e709e6516db01c60e912d36b"
+    "package_hash": "8122635a3cdcfc2f13d7f6388a1e04f477363fc4aec86bce16cbe118c57e1a29"
   },
   "payloads": {
-    "exemption": "{\"version\": \"2.0.0\", \"templates\": []}",
-    "policy": "{\"version\": \"2.0\", \"rules\": []}",
-    "protocols": "{\"supported\": [\"deepseek\", \"claude\"]}"
+    "ner": "{\"synthetic_component\": \"ner\", \"version\": \"2.0.0\"}",
+    "protocol": "{\"synthetic_component\": \"protocol\", \"version\": \"2.0.0\"}",
+    "dictionary": "{\"synthetic_component\": \"dictionary\", \"version\": \"2.0.0\"}",
+    "route": "{\"synthetic_component\": \"route\", \"version\": \"2.0.0\"}",
+    "mapping": "{\"synthetic_component\": \"mapping\", \"version\": \"2.0.0\"}",
+    "policy": "{\"synthetic_component\": \"policy\", \"version\": \"2.0.0\"}",
+    "rules": "{\"synthetic_component\": \"rules\", \"version\": \"2.0.0\"}",
+    "audit": "{\"synthetic_component\": \"audit\", \"version\": \"2.0.0\"}"
   }
 }

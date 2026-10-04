@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 from infra.errors import SafetyCode, SafetyError
 from infra.strict_json import JsonRejectKind, parse_strict_json
 
+REQUIRED_COMPONENTS = frozenset({'policy', 'rules', 'dictionary', 'ner', 'mapping', 'protocol', 'audit', 'route'})
+
 
 def _compute_package_hash(manifest_id: str, version: str, components: Mapping[str, ComponentEntry]) -> str:
     """Deterministically compute the root hash over a canonical JSON structure.
@@ -104,6 +106,10 @@ class PackageManifest(BaseModel):
 
     @model_validator(mode="after")
     def _verify_package_hash(self) -> PackageManifest:
+        if set(self.components) != REQUIRED_COMPONENTS:
+            raise ValueError('complete protection package required')
+        if any(name != component.name for name,component in self.components.items()):
+            raise ValueError('component name mismatch')
         expected = _compute_package_hash(self.manifest_id, self.version, self.components)
         if self.package_hash.lower() != expected.lower():
             raise ValueError("package_hash does not match component specification")
@@ -116,6 +122,7 @@ class PackageManifest(BaseModel):
                 raise SafetyError(
                     SafetyCode.CORRUPTED_PACKAGE, f"missing required component: {comp_name}"
                 )
+
             raw = payloads[comp_name]
             raw_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
             actual_digest = hashlib.sha256(raw_bytes).hexdigest()
@@ -124,6 +131,10 @@ class PackageManifest(BaseModel):
                     SafetyCode.CORRUPTED_PACKAGE,
                     f"digest mismatch for component: {comp_name}",
                 )
+
+    def require_complete(self) -> None:
+        if set(self.components) != REQUIRED_COMPONENTS:
+            raise SafetyError(SafetyCode.INVALID_MANIFEST, 'incomplete protection package')
 
 
 def _reject_json(kind: JsonRejectKind) -> NoReturn:

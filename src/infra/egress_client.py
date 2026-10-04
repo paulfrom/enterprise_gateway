@@ -120,8 +120,11 @@ class BoundUpstream:
     allowed_addresses: frozenset[str]
     max_redirects: int = 0
     package_version: str | None = None
+    credential_header: str = 'authorization'
 
     def __post_init__(self) -> None:
+        if self.credential_header not in ('authorization', 'x-api-key'):
+            raise SafetyError(SafetyCode.INVALID_UPSTREAM,'credential header')
         if not isinstance(self.channel_id, str) or not self.channel_id.strip():
             raise SafetyError(SafetyCode.INVALID_UPSTREAM, "channel_id")
         if not isinstance(self.scheme, str) or self.scheme.lower() not in _ALLOWED_SCHEMES:
@@ -339,7 +342,7 @@ class BoundEgressClient:
 
         if self._binding.credential is not None:
             cred = self._binding.credential.strip()
-            if cred.startswith("sk-ant-"):
+            if self._binding.credential_header == 'x-api-key':
                 filtered["x-api-key"] = cred
                 filtered.setdefault("anthropic-version", "2023-06-01")
             else:
@@ -357,6 +360,7 @@ class BoundEgressClient:
         *,
         headers: Mapping[str, str] | None = None,
         content: str | bytes | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         """Send one request to the bound origin and return the response as-is.
 
@@ -370,7 +374,13 @@ class BoundEgressClient:
         url = self._bound_url(path)
         out_headers = self._filter_headers(headers)
         for _ in range(self._binding.max_redirects + 1):
-            response = self._client.request(method, url, headers=out_headers, content=content)
+            failed = False
+            try:
+                response = self._client.request(method, url, headers=out_headers, content=content, timeout=timeout or self._binding.timeout_seconds)
+            except SafetyError: raise
+            except Exception: failed = True
+            if failed:
+                raise SafetyError(SafetyCode.INVALID_UPSTREAM,'transport failure')
             if not _is_redirect(response) or self._binding.max_redirects == 0:
                 return response
             location = response.headers.get("location")
@@ -380,6 +390,17 @@ class BoundEgressClient:
             if response.status_code == 303:
                 method, content = "GET", None
         raise SafetyError(SafetyCode.UPSTREAM_BINDING_VIOLATION, "redirect limit")
+
+    def open_stream(self, method: str, path: str, *, headers=None, content=None, timeout=None) -> httpx.Response:
+        request = self._client.build_request(method,self._bound_url(path),headers=self._filter_headers(headers),content=content,timeout=timeout or self._binding.timeout_seconds)
+        failed = False
+        try:
+            response = self._client.send(request,stream=True,follow_redirects=False)
+        except SafetyError: raise
+        except Exception: failed = True
+        if failed:
+            raise SafetyError(SafetyCode.INVALID_UPSTREAM,'transport failure')
+        return response
 
     def close(self) -> None:
         self._client.close()

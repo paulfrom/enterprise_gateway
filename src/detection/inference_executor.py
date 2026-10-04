@@ -144,6 +144,7 @@ class _Job:
     kwargs: dict
     deadline: float
     result_q: queue.Queue
+    cancel: Any = None
 
 
 class InferenceExecutor:
@@ -219,6 +220,7 @@ class InferenceExecutor:
         func: Callable[..., Any],
         *args: Any,
         timeout: float,
+        cancel=None,
         **kwargs: Any,
     ) -> Any:
         """Run ``func(*args, **kwargs)`` in a worker process under a time budget.
@@ -256,6 +258,7 @@ class InferenceExecutor:
             kwargs=kwargs,
             deadline=time.monotonic() + timeout,
             result_q=queue.Queue(maxsize=1),
+            cancel=cancel if cancel is not None else threading.Event(),
         )
         with self._submit_lock:
             if self._closed:
@@ -267,7 +270,11 @@ class InferenceExecutor:
             # Cannot block: the queue is internally unbounded and ``_queued``
             # carries the backpressure accounting.
             self._pending.put_nowait(job)
-        status, payload = job.result_q.get()
+        try:
+            status, payload = job.result_q.get(timeout=timeout + _JOIN_TIMEOUT * 2 + 1)
+        except queue.Empty:
+            job.cancel.set()
+            raise SafetyError(SafetyCode.INFERENCE_TIMEOUT) from None
         if status == "return":
             return payload
         raise payload
@@ -350,7 +357,7 @@ class InferenceExecutor:
         # The budget is anchored once at submit (``job.deadline``) and is
         # never re-anchored: queue wait, the pickle pre-check, pipe setup,
         # and spawn all consume it, exactly as the submit() docstring states.
-        if job.deadline - time.monotonic() <= 0:
+        if job.deadline - time.monotonic() <= 0 or job.cancel.is_set():
             self._reject(job, SafetyError(SafetyCode.INFERENCE_TIMEOUT))
             return
         # Verify picklability before spawning: a spawn-time pickling failure
@@ -377,7 +384,7 @@ class InferenceExecutor:
             self._live.add(proc)
             self._running += 1
         try:
-            frame = self._await_frame(parent_conn, proc, job.deadline)
+            frame = self._await_frame(parent_conn, proc, job.deadline, job.cancel)
             # Every outcome below (ok/error/timeout/dead/close) ends this
             # worker; it is never reused. Reap before delivering so a
             # returned result implies the worker has exited and its handle
@@ -405,14 +412,14 @@ class InferenceExecutor:
                 self._live.discard(proc)
                 self._running -= 1
 
-    def _await_frame(self, conn: Any, proc: Any, deadline: float) -> tuple | None:
+    def _await_frame(self, conn: Any, proc: Any, deadline: float, cancel=None) -> tuple | None:
         """Poll for the worker's outcome frame; ``None`` means timed out/died.
 
         ``deadline`` is the submit-time budget anchor; it is never
         re-anchored here, so worker startup time consumes budget.
         """
         while True:
-            if self._closed:
+            if self._closed or (cancel is not None and cancel.is_set()):
                 return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:

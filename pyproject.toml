@@ -9,11 +9,14 @@ description = "Fail-closed enterprise privacy and knowledge contracts"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "ahocorasick-rs>=1.0.3",
+  "anyio>=4,<5",
   "cryptography>=50.0.2",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
+  "jsonschema>=4.25,<5",
   "onnxruntime>=1.30.0",
   "presidio-analyzer>=2.2.364",
+  "psycopg[binary]>=3.3,<4",
   "pydantic>=2.11,<3",
   "tokenizers>=0.22,<0.24",
   "uvicorn>=0.35,<1",

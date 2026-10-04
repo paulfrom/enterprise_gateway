@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
+import hmac
 
 from infra.errors import SafetyCode, SafetyError
 
@@ -212,3 +213,26 @@ def authorize_role(identity: TrustedIdentity, required_role: str) -> None:
         raise SafetyError(SafetyCode.INVALID_IDENTITY)
     if not isinstance(required_role, str) or required_role not in identity.roles:
         raise SafetyError(SafetyCode.MISSING_REQUIRED_ROLE)
+
+
+class EnterpriseAuthenticator:
+    """Server-owned credential bindings; the HTTP request proves possession."""
+
+    def __init__(self, credentials: Mapping[str, TrustedIdentity]) -> None:
+        if not credentials or any(not isinstance(k, str) or not k or not isinstance(v, TrustedIdentity) for k, v in credentials.items()):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        self._credentials = tuple(credentials.items())
+
+    def authenticate(self, headers: Mapping[str, str]) -> TrustedIdentity:
+        assert_no_client_header_spoofing(headers)
+        authorization = headers.get('authorization', '')
+        if not authorization.startswith('Bearer ') or not authorization[7:]:
+            raise SafetyError(SafetyCode.MISSING_IDENTITY)
+        token = authorization[7:]
+        identity = None
+        for credential, candidate in self._credentials:
+            if hmac.compare_digest(token.encode('utf-8'), credential.encode('utf-8')):
+                identity = candidate
+        if identity is None:
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        return identity

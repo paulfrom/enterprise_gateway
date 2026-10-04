@@ -104,23 +104,9 @@ def _canonical_json(payload: dict) -> bytes:
 
 
 def compute_dedup_key(event: ObservationEvent) -> str:
-    """Deterministic dedup key: SHA-256 over a canonical JSON pre-image.
+    """Semantic source+version+coordinates+scope identity, excluding replay clocks.
 
-    Documented format — the pre-image is canonical JSON (sorted keys, compact
-    separators, UTF-8) of exactly these fields::
-
-        {
-          "source_id": <event.source_id>,
-          "source_version": <event.source_version>,
-          "evidence_digest": <event.evidence_ref.digest>,
-          "evidence_offset": <event.evidence_ref.offset>,
-          "event_sha256": <SHA-256 hex of serialize_event(event)>
-        }
-
-    ``event_sha256`` is the digest of the canonical serialized event, i.e. the
-    规范编码的事件内容 component; identity of all five components is required
-    for two submissions to share a key, so historical redelivery and retries
-    of the same event collapse onto one ledger contribution (DESIGN §7).
+    Observation time and ciphertext randomness cannot increase contributions.
     """
     if not isinstance(event, ObservationEvent):
         raise TypeError("event must be an ObservationEvent")
@@ -129,7 +115,12 @@ def compute_dedup_key(event: ObservationEvent) -> str:
         "source_version": event.source_version,
         "evidence_digest": event.evidence_ref.digest,
         "evidence_offset": event.evidence_ref.offset,
-        "event_sha256": hashlib.sha256(serialize_event(event)).hexdigest(),
+        "tenant": event.tenant,
+        "domain": event.domain,
+        "source_kind": event.source_kind.value,
+        "purpose": event.purpose,
+        "acl": sorted(event.acl),
+        "extraction_version": event.extraction_version,
     })
     return hashlib.sha256(preimage).hexdigest()
 
@@ -270,7 +261,7 @@ class SpoolRelay:
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "envelope domain mismatch")
         if record.bucket != event.retention_policy:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "envelope retention bucket mismatch")
-        if not record.purpose.startswith(event.purpose):
+        if record.purpose != event.purpose + ':knowledge-spool':
             raise SafetyError(SafetyCode.UNAUTHORIZED_PURPOSE, "envelope purpose mismatch")
         return event
 

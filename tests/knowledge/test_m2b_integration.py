@@ -1,299 +1,265 @@
-"""K-10 End-to-end synthetic knowledge vertical slice integration suite.
-
-Verifies the entire lifecycle against the live PostgreSQL database:
-1. Gateway Observation event generated from input
-2. Spool writing and encrypted persistence
-3. Worker extraction of business relations (K-11)
-4. Candidate persistence to PostgreSQL with FK integrity (K-04)
-5. Two-party governance review & state machine (K-06)
-6. Transactional outbox publication (K-12)
-7. Versioned JSONL export with ACL access control (K-08)
-8. Dictionary package compilation (K-09) and runtime dictionary usage
-9. Revocation, tombstoning, and consumer receipt confirmation (K-13)
-10. Row Level Security cross-domain isolation (K-14)
-"""
-
-from __future__ import annotations
-
-from datetime import datetime, timedelta, timezone
+"""Real PG worker lifecycle from encrypted spool; HTTP origin is verified by the gateway suite."""
+import unittest
+from dataclasses import replace
+from datetime import datetime,timedelta,timezone
 from hashlib import sha256
-import json
 from pathlib import Path
 import tempfile
-import unittest
-from uuid import UUID, uuid4
-
+from unittest.mock import patch
+from uuid import uuid4
 import psycopg
-
-from detection.dictionary import analyze_dictionary, compile_dictionary
 from infra.envelope_crypto import StaticTestKmsProvider
-from infra.spool import CollectionMode, SpoolWriter
-from knowledge.extractor import RelationExtractor
-from knowledge.governance import KnowledgeGovernanceService
-from knowledge.knowledge import (
-    Approval,
-    Candidate,
-    CandidateState,
-    Claim,
-    Entity,
-    Evidence,
-    Modality,
-    Polarity,
-    Predicate,
-    Publication,
-    Role,
-    Source,
-    SourceKind,
-    Tombstone,
-    TrustedActor,
-)
+from infra.spool import SpoolWriter,CollectionMode
+from infra.errors import SafetyError
+from infra.spool_relay import compute_dedup_key
+from knowledge.knowledge import *
 from knowledge.knowledge_events import build_gateway_observation
+from knowledge.governance import KnowledgeGovernanceService
 from knowledge.storage import PostgresKnowledgeStorage
-
-LIVE_PG_URI = "postgresql://paul:lslin%4032@42.193.11.211:5432/enter_gateway"
-
+from knowledge.worker import KnowledgeWorker,PostgresKnowledgeSink,GovernedConsumer
+from tests.pg_support import get_test_dsn,prepare_test_database
 
 class TestM2BKnowledgeIntegration(unittest.TestCase):
+    def test_same_text_different_trusted_source_acl_does_not_collide(self):
+        first=self.observe()
+        self.acl=self.acl|{'other-authorized-member'}
+        second=self.observe()
+        self.writer.collect(first,mode=CollectionMode.REQUIRED)
+        self.writer.collect(second,mode=CollectionMode.REQUIRED)
+        self.assertEqual(2,self.worker.run_once().submitted)
+        self.assertNotEqual(first.source_id,second.source_id)
+        self.assertEqual(0,self.load(first).independent_source_count)
+        self.assertEqual(0,self.load(second).independent_source_count)
+
     @classmethod
-    def setUpClass(cls) -> None:
-        cls.storage = PostgresKnowledgeStorage(LIVE_PG_URI)
-        cls.storage.init_database(enable_rls=True)
+    def setUpClass(cls):
+        prepare_test_database()
+        cls.storage=PostgresKnowledgeStorage(get_test_dsn())
 
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.spool_dir = Path(self.temp_dir.name) / "spool"
-        self.spool_dir.mkdir(parents=True, exist_ok=True)
-        self.kms = StaticTestKmsProvider()
+    def setUp(self):
+        self.domain='worker-'+uuid4().hex;self.now=datetime.now(timezone.utc)
+        self.acl=frozenset({'worker','security','business','publisher','reader','reader2','steward'})
+        self.temp=tempfile.TemporaryDirectory();self.spool=Path(self.temp.name)
+        self.kms=StaticTestKmsProvider();self.writer=SpoolWriter(self.spool,self.kms)
+        self.worker=KnowledgeWorker(self.spool,self.kms,PostgresKnowledgeSink(self.storage,self.actor('worker')))
 
-        self.test_domain = f"m2b-test-{uuid4().hex[:8]}"
-        self.governance = KnowledgeGovernanceService(self.test_domain)
-        self.extractor = RelationExtractor(self.test_domain)
+    def tearDown(self):self.temp.cleanup()
 
-        self.conn = psycopg.connect(LIVE_PG_URI)
-        self.storage.set_session_domain(self.conn, self.test_domain)
+    def actor(self,name,*roles):
+        return TrustedActor(name,'tenant-a',self.domain,frozenset(roles),frozenset({'knowledge'}))
 
-        self.now = datetime.now(timezone.utc)
+    def observe(self,text='采购记录显示：甲公司向乙公司采购设备五台。请查询合同编号HT-2026-001。',**extra):
+        return build_gateway_observation(tenant='tenant-a',domain=self.domain,request_id='message-1',
+            evidence_text=text,evidence_digest=sha256(text.encode()).hexdigest(),observed_at=self.now,
+            source_acl=self.acl,purpose='knowledge',retention_until=self.now+timedelta(days=2),**extra)
 
-    def tearDown(self) -> None:
-        self.conn.rollback()
-        self.conn.close()
-        self.temp_dir.cleanup()
+    def load(self,event):
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('worker'))
+            ids=conn.execute('SELECT candidate_ids FROM knowledge_observations WHERE dedup_key=%s',(compute_dedup_key(event),)).fetchone()[0]
+            self.assertEqual(1,len(ids))
+            return self.storage.load_candidate(conn,ids[0])
 
-    def test_k10_full_knowledge_lifecycle(self) -> None:
-        """K-10: Complete end-to-end knowledge lifecycle with real PostgreSQL."""
-        # ---------------------------------------------------------------------
-        # Stage 1: Gateway Observation Event Generation & Spooling (K-01, K-02)
-        # ---------------------------------------------------------------------
-        request_id = f"req-{uuid4().hex[:12]}"
-        prompt_text = "甲公司向乙公司采购设备五台，合同编号HT-2026-001。"
-        prompt_digest = sha256(prompt_text.encode("utf-8")).hexdigest()
+    def publish(self,c):
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        c=service.approve_candidate(c,self.actor('security',Role.SECURITY_REVIEWER),Role.SECURITY_REVIEWER,'verified/security',self.now)
+        # Recreate service to prove persisted approvals survive worker/process lifecycle.
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        c=service.approve_candidate(c,self.actor('business',Role.BUSINESS_REVIEWER),Role.BUSINESS_REVIEWER,'verified/business',self.now)
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        pub,_=service.publish_candidate(c,self.actor('publisher',Role.PUBLISHER),self.now+timedelta(days=30),self.now)
+        return pub
 
-        obs_event = build_gateway_observation(
-            tenant="tenant-corp",
-            domain=self.test_domain,
-            request_id=request_id,
-            evidence_digest=prompt_digest,
-            source_acl=[f"{self.test_domain}:procurement-team"],
-            observed_at=self.now,
-        )
-        self.assertEqual(f"req:{request_id}", obs_event.source_id)
-        self.assertEqual(prompt_digest, obs_event.evidence_ref.digest)
+    def test_worker_extracts_decrypted_spool_and_lifecycle_is_durable(self):
+        event=self.observe();self.writer.collect(event,mode=CollectionMode.REQUIRED)
+        self.assertNotIn('甲公司'.encode(),next(self.spool.glob('*.env.json')).read_bytes())
+        stats=self.worker.run_once();self.assertEqual(1,stats.submitted)
+        c=self.load(event);self.assertEqual('乙公司',c.claim.subject.name);self.assertEqual('甲公司',c.claim.object.name)
+        self.assertEqual(0,c.independent_source_count)
+        pub=self.publish(c)
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertTrue(service.export_versioned_jsonl([pub],self.actor('reader'),'v1',self.now))
+        dictionary=service.compile_approved_dictionary_payload('dictionary','v1',[pub],self.now,consumer=self.actor('reader'))
+        self.assertEqual({'甲公司','乙公司'},{e['text'] for e in dictionary['entries']})
+        consumer=GovernedConsumer(self.storage,self.actor('reader'))
+        with self.assertRaises(RuntimeError):consumer.consume_once(fail_after_apply=True)
+        self.assertEqual((),consumer.active_publication_ids())
+        self.assertEqual(1,consumer.consume_once());self.assertEqual(0,consumer.consume_once())
+        self.assertEqual((pub.publication_id,),consumer.active_publication_ids())
+        consumer2=GovernedConsumer(self.storage,self.actor('reader2'))
+        self.assertEqual(1,consumer2.consume_once())
+        service.withdraw_source(c.evidence[0].source,self.actor('steward',Role.DATA_STEWARD),'permissions withdrawn',self.now)
+        restart=KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertEqual('',restart.export_versioned_jsonl([pub],self.actor('reader'),'v2',self.now))
+        self.assertEqual([],restart.compile_approved_dictionary_payload('dictionary','v2',[pub],self.now,consumer=self.actor('reader'))['entries'])
+        self.assertEqual(1,consumer.consume_once());self.assertEqual(1,consumer2.consume_once())
+        self.assertEqual((),consumer.active_publication_ids());self.assertEqual((),consumer2.active_publication_ids())
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('reader'))
+            self.assertEqual(2,conn.execute("SELECT count(*) FROM consumer_receipts WHERE action='tombstone_applied'").fetchone()[0])
 
-        # Write to encrypted spool
-        spool_writer = SpoolWriter(directory=self.spool_dir, kms=self.kms)
-        permit = spool_writer.collect(obs_event, mode=CollectionMode.REQUIRED)
-        self.assertIsNotNone(permit)
-        spool_files = list(self.spool_dir.glob("*.env.json"))
-        self.assertEqual(1, len(spool_files))
+    def test_at_least_once_crash_after_pg_commit_and_history_retry(self):
+        event=self.observe();self.writer.collect(event,mode=CollectionMode.REQUIRED)
+        with patch('infra.spool_relay._confirm_remove',side_effect=OSError('injected crash after PG commit')):
+            with self.assertRaises(SafetyError):self.worker.run_once()
+        self.assertEqual(1,self.worker.run_once().skipped)
+        retry=self.observe();retry=retry.model_copy(update={'observed_at':self.now+timedelta(seconds=10),'retention_until':self.now+timedelta(days=2,seconds=10)})
+        self.writer.collect(retry,mode=CollectionMode.REQUIRED)
+        self.assertEqual(1,self.worker.run_once().skipped)
+        self.assertEqual(0,self.load(event).independent_source_count)
 
-        # ---------------------------------------------------------------------
-        # Stage 2: Worker Extraction & Persistence to PostgreSQL (K-04, K-11)
-        # ---------------------------------------------------------------------
-        source = Source(
-            tenant_id=obs_event.tenant,
-            domain=obs_event.domain,
-            source_id=obs_event.source_id,
-            version=obs_event.source_version,
-            source_kind=obs_event.source_kind,
-            acl=obs_event.acl,
-            purpose=obs_event.purpose,
-            observed_at=obs_event.observed_at,
-            retention_until=self.now + timedelta(days=90),
-        )
-        self.storage.save_source(self.conn, source)
+    def test_publication_crash_before_commit_rolls_back_state_and_outbox(self):
+        event=self.observe();self.writer.collect(event,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        c=self.load(event)
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        c=service.approve_candidate(c,self.actor('security',Role.SECURITY_REVIEWER),Role.SECURITY_REVIEWER,'verified/security',self.now)
+        c=service.approve_candidate(c,self.actor('business',Role.BUSINESS_REVIEWER),Role.BUSINESS_REVIEWER,'verified/business',self.now)
+        original=self.storage.publish_transactional
+        def fail_after_insert(*args,**kwargs):
+            original(*args,**kwargs)
+            raise RuntimeError('injected publication crash before commit')
+        with patch.object(self.storage,'publish_transactional',side_effect=fail_after_insert):
+            with self.assertRaises(RuntimeError):
+                service.publish_candidate(c,self.actor('publisher',Role.PUBLISHER),self.now+timedelta(days=1),self.now)
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('publisher',Role.PUBLISHER))
+            stored=self.storage.load_candidate(conn,c.candidate_id)
+            self.assertEqual(CandidateState.APPROVED,stored.state)
+            self.assertEqual(0,conn.execute('SELECT count(*) FROM knowledge_publications WHERE candidate_id=%s',(c.candidate_id,)).fetchone()[0])
+            self.assertEqual([],self.storage.fetch_pending_outbox(conn))
+        pub,_=KnowledgeGovernanceService(self.domain,self.storage).publish_candidate(c,self.actor('publisher',Role.PUBLISHER),self.now+timedelta(days=1),self.now)
+        self.assertTrue(KnowledgeGovernanceService(self.domain,self.storage).export_versioned_jsonl([pub],self.actor('reader'),'v1',self.now))
 
-        ent_jia = Entity(uuid4(), "tenant-corp", self.test_domain, "ORG", "甲公司")
-        ent_yi = Entity(uuid4(), "tenant-corp", self.test_domain, "ORG", "乙公司")
-        self.storage.save_entity(self.conn, ent_jia)
-        self.storage.save_entity(self.conn, ent_yi)
+    def test_source_steward_outside_derived_acl_can_revoke_without_read_expansion(self):
+        shared=self.acl-{'steward'}
+        first=self.observe().model_copy(update={'source_id':'source-a','acl':shared|{'steward-a'},'source_independence_verified':True})
+        second=self.observe().model_copy(update={'source_id':'source-b','acl':shared|{'steward-b'},'source_independence_verified':True})
+        self.writer.collect(first,mode=CollectionMode.REQUIRED);self.writer.collect(second,mode=CollectionMode.REQUIRED)
+        self.assertEqual(2,self.worker.run_once().submitted)
+        a=self.load(first);b=self.load(second)
+        merged=Candidate(uuid4(),a.claim,(*a.evidence,*b.evidence),shared,'knowledge')
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('worker'))
+            evidence_ids=[self.storage.save_evidence(conn,ev) for ev in merged.evidence]
+            self.storage.save_candidate(conn,merged,evidence_ids)
+        pub=self.publish(merged)
+        steward=self.actor('steward-a',Role.DATA_STEWARD)
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,steward)
+            self.assertIsNone(conn.execute('SELECT publication_id FROM knowledge_publications WHERE publication_id=%s',(pub.publication_id,)).fetchone())
+        consumer=GovernedConsumer(self.storage,self.actor('reader'));consumer.consume_once()
+        consumer2=GovernedConsumer(self.storage,self.actor('reader2'));consumer2.consume_once()
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertEqual(1,len(service.withdraw_source(a.evidence[0].source,steward,'source permission revoked',self.now)))
+        self.assertEqual(1,consumer.consume_once());self.assertEqual(1,consumer2.consume_once())
+        self.assertEqual((),consumer.active_publication_ids());self.assertEqual((),consumer2.active_publication_ids())
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,steward)
+            self.assertIsNone(conn.execute('SELECT publication_id FROM knowledge_publications WHERE publication_id=%s',(pub.publication_id,)).fetchone())
+        # The independent remaining source's candidate is still readable.
+        self.assertEqual(CandidateState.PROPOSED,self.load(second).state)
 
-        # Extract business relation candidates
-        candidates = self.extractor.extract_from_text(
-            prompt_text, source, [ent_jia, ent_yi], prompt_digest
-        )
-        self.assertEqual(1, len(candidates))
-        candidate = candidates[0]
-        self.assertEqual("乙公司", candidate.claim.subject.name)
-        self.assertEqual(Predicate.SUPPLIES, candidate.claim.predicate)
-        self.assertEqual("甲公司", candidate.claim.object.name)
-        self.assertEqual(Polarity.POSITIVE, candidate.claim.polarity)
-        self.assertEqual(Modality.ASSERTED, candidate.claim.modality)
+    def test_source_management_channel_rejects_wrong_scope_role_acl_and_purpose(self):
+        event=self.observe();self.writer.collect(event,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        source=self.load(event).evidence[0].source
+        valid=self.actor('steward',Role.DATA_STEWARD)
+        for actor in (replace(valid,tenant_id='other'),replace(valid,domain='other'),
+                      replace(valid,subject_id='outsider'),replace(valid,purposes=frozenset({'other'})),
+                      replace(valid,roles=frozenset())):
+            with self.subTest(actor=actor.subject_id,tenant=actor.tenant_id,purposes=actor.purposes):
+                with psycopg.connect(get_test_dsn()) as conn:
+                    self.storage.set_session_identity(conn,actor)
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        self.storage.invalidate_source(conn,source,'withdrawal',self.now)
+                    conn.rollback()
+        self.assertEqual(CandidateState.PROPOSED,self.load(event).state)
 
-        # Persist candidate and evidence to real PostgreSQL
-        eid = self.storage.save_evidence(self.conn, candidate.evidence[0])
-        claim_id = self.storage.save_candidate(self.conn, candidate, [eid])
-        self.conn.commit()
+    def test_default_collection_acl_remains_isolated_after_pg_worker_processing(self):
+        restricted=f'{self.domain}:restricted-candidate'
+        event=self.observe().model_copy(update={'acl':frozenset({restricted})})
+        writer=SpoolWriter(self.spool,self.kms);writer.collect(event,mode=CollectionMode.REQUIRED)
+        worker=KnowledgeWorker(self.spool,self.kms,PostgresKnowledgeSink(self.storage,self.actor('worker',Role.KNOWLEDGE_PROCESSOR),processing_acl=(restricted,)))
+        self.assertEqual(1,worker.run_once().submitted)
+        for actor in (self.actor('reader'),self.actor('security',Role.SECURITY_REVIEWER)):
+            with psycopg.connect(get_test_dsn()) as conn:
+                self.storage.set_session_identity(conn,actor)
+                self.assertIsNone(conn.execute('SELECT source_id FROM knowledge_sources WHERE domain=%s',(self.domain,)).fetchone())
+                self.assertEqual(0,conn.execute('SELECT count(*) FROM knowledge_candidates WHERE domain=%s',(self.domain,)).fetchone()[0])
 
-        # ---------------------------------------------------------------------
-        # Stage 3: Two-Reviewer Governance Workflow (K-06)
-        # ---------------------------------------------------------------------
-        sec_reviewer = TrustedActor(
-            subject_id="sec-officer-01",
-            tenant_id="tenant-corp",
-            domain=self.test_domain,
-            roles=frozenset({Role.SECURITY_REVIEWER}),
-            purposes=frozenset({"knowledge-governance"}),
-        )
-        biz_reviewer = TrustedActor(
-            subject_id="biz-officer-01",
-            tenant_id="tenant-corp",
-            domain=self.test_domain,
-            roles=frozenset({Role.BUSINESS_REVIEWER}),
-            purposes=frozenset({"knowledge-governance"}),
-        )
-        publisher = TrustedActor(
-            subject_id="pub-officer-01",
-            tenant_id="tenant-corp",
-            domain=self.test_domain,
-            roles=frozenset({Role.PUBLISHER}),
-            purposes=frozenset({"knowledge-publishing"}),
-        )
+    def test_rejected_candidate_is_persisted_and_stale_object_cannot_approve(self):
+        event=self.observe();self.writer.collect(event,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        c=self.load(event)
+        rejected=KnowledgeGovernanceService(self.domain,self.storage).reject_candidate(c,self.actor('business',Role.BUSINESS_REVIEWER),'verified rejection')
+        self.assertEqual(CandidateState.REJECTED,rejected.state)
+        self.assertEqual(CandidateState.REJECTED,self.load(event).state)
+        self.assertEqual('verified rejection',self.load(event).rejection_reason)
+        with self.assertRaises(KnowledgeError):
+            KnowledgeGovernanceService(self.domain,self.storage).approve_candidate(c,self.actor('security',Role.SECURITY_REVIEWER),Role.SECURITY_REVIEWER,'external/verification',self.now)
 
-        c_sec = self.governance.approve_candidate(
-            candidate, sec_reviewer, Role.SECURITY_REVIEWER, "audit/sec/001", self.now
-        )
-        self.storage.save_approval(self.conn, candidate.candidate_id, c_sec.approvals[0])
-        self.assertEqual(CandidateState.PROPOSED, c_sec.state)
+    def test_distinct_source_acl_consumers_read_context_without_shared_descriptor_expansion(self):
+        common=self.acl-{'reader','reader2'}
+        first=self.observe().model_copy(update={'source_id':'scope-a','acl':common|{'reader'}})
+        second=self.observe().model_copy(update={'source_id':'scope-b','acl':common|{'reader2'}})
+        self.writer.collect(first,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        self.writer.collect(second,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        a=self.load(first);b=self.load(second);pa=self.publish(a);pb=self.publish(b)
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertTrue(service.export_versioned_jsonl([pa],self.actor('reader'),'v1',self.now))
+        self.assertTrue(service.export_versioned_jsonl([pb],self.actor('reader2'),'v1',self.now))
+        self.assertEqual('',service.export_versioned_jsonl([pa],self.actor('reader2'),'v1',self.now))
+        self.assertEqual('',service.export_versioned_jsonl([pb],self.actor('reader'),'v1',self.now))
+        for consumer,pub in ((self.actor('reader'),pa),(self.actor('reader2'),pb)):
+            self.assertEqual(2,len(service.compile_approved_dictionary_payload('dictionary','v1',[pub],self.now,consumer=consumer)['entries']))
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('reader2'))
+            self.assertEqual(0,conn.execute('SELECT count(*) FROM knowledge_entities WHERE entity_id=%s',(b.claim.subject.entity_id,)).fetchone()[0])
+            descriptor=self.storage.load_candidate(conn,b.candidate_id)
+            self.assertEqual(b.claim,descriptor.claim)
+            with self.assertRaises(KnowledgeError):self.storage.load_candidate(conn,a.candidate_id)
+            conn.rollback()
+        for actor in (replace(self.actor('reader2'),tenant_id='other'),replace(self.actor('reader2'),domain='other'),
+                      replace(self.actor('reader2'),purposes=frozenset({'other'})),self.actor('outsider')):
+            with psycopg.connect(get_test_dsn()) as conn:
+                self.storage.set_session_identity(conn,actor)
+                with self.assertRaises(KnowledgeError):self.storage.load_candidate(conn,b.candidate_id)
+                conn.rollback()
+        with psycopg.connect(get_test_dsn()) as conn:
+            with self.assertRaises(KnowledgeError):self.storage.load_candidate(conn,b.candidate_id)
+            conn.rollback()
+            self.storage.set_session_identity(conn,self.actor('reader'))
+            with self.assertRaises(KnowledgeError):self.storage.load_candidate(conn,uuid4())
+            conn.rollback()
+            self.storage.set_session_identity(conn,self.actor('reader'))
+            conn.execute("SELECT set_config('app.subjects',%s::text[]::text,true)",(['reader2'],))
+            with self.assertRaises(KnowledgeError):self.storage.load_candidate(conn,b.candidate_id)
+            conn.rollback()
+        service.withdraw_source(a.evidence[0].source,self.actor('steward',Role.DATA_STEWARD),'scope a revoked',self.now)
+        restart=KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertEqual('',restart.export_versioned_jsonl([pa],self.actor('reader'),'v2',self.now))
+        self.assertTrue(restart.export_versioned_jsonl([pb],self.actor('reader2'),'v2',self.now))
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('reader2'))
+            self.assertEqual(0,conn.execute('SELECT count(*) FROM knowledge_entities WHERE entity_id=%s',(b.claim.subject.entity_id,)).fetchone()[0])
 
-        c_biz = self.governance.approve_candidate(
-            c_sec, biz_reviewer, Role.BUSINESS_REVIEWER, "audit/biz/001", self.now
-        )
-        self.storage.save_approval(self.conn, candidate.candidate_id, c_biz.approvals[1])
-        self.assertEqual(CandidateState.APPROVED, c_biz.state)
-
-        # ---------------------------------------------------------------------
-        # Stage 4: Transactional Outbox Publishing (K-12)
-        # ---------------------------------------------------------------------
-        pub, _ = self.governance.publish_candidate(
-            c_biz, publisher, self.now + timedelta(days=180), self.now
-        )
-        self.storage.publish_transactional(self.conn, pub, claim_id)
-        self.conn.commit()
-
-        # Verify outbox event on real database
-        with psycopg.connect(LIVE_PG_URI) as verify_conn:
-            self.storage.set_session_domain(verify_conn, self.test_domain)
-            pending_outbox = self.storage.fetch_pending_outbox(verify_conn)
-            self.assertEqual(1, len(pending_outbox))
-            event = pending_outbox[0]
-            self.assertEqual("KNOWLEDGE_PUBLISHED", event["event_type"])
-            self.assertEqual(pub.publication_id, event["aggregate_id"])
-
-            # Mark processed
-            self.storage.mark_outbox_processed(verify_conn, [event["outbox_id"]])
-            verify_conn.commit()
-
-        # ---------------------------------------------------------------------
-        # Stage 5: Authorized Versioned JSONL Export (K-08)
-        # ---------------------------------------------------------------------
-        consumer = TrustedActor(
-            subject_id="procurement-agent-01",
-            tenant_id="tenant-corp",
-            domain=self.test_domain,
-            roles=frozenset({Role.SECURITY_REVIEWER}),
-            purposes=frozenset({"knowledge-read"}),
-        )
-        # Authorize consumer via ACL token
-        pub_with_consumer = Publication(
-            publication_id=pub.publication_id,
-            candidate_id=pub.candidate_id,
-            claim=pub.claim,
-            evidence=pub.evidence,
-            acl=frozenset({consumer.subject_id}),
-            purpose=pub.purpose,
-            published_at=pub.published_at,
-            valid_until=pub.valid_until,
-        )
-        jsonl = self.governance.export_versioned_jsonl([pub_with_consumer], consumer, "v1.0.0")
-        self.assertTrue(len(jsonl) > 0)
-        parsed_record = json.loads(jsonl.splitlines()[0])
-        self.assertEqual("乙公司", parsed_record["subject"]["name"])
-        self.assertEqual("甲公司", parsed_record["object"]["name"])
-
-        # ---------------------------------------------------------------------
-        # Stage 6: Dictionary Package Compilation & Runtime Use (K-09)
-        # ---------------------------------------------------------------------
-        dict_payload = self.governance.compile_approved_dictionary_payload(
-            "dict-procurement-v1", "v1.0.0", [pub]
-        )
-        compiled_dict = compile_dictionary(dict_payload)
-        self.assertEqual("dict-procurement-v1", compiled_dict.dictionary_id)
-        # Both entities are recognized by the compiled dictionary
-        text_test = "这是甲公司的办公地点"
-        detection = analyze_dictionary(text_test, compiled_dict)
-        self.assertEqual(1, len(detection.spans))
-        span = detection.spans[0]
-        self.assertEqual("ORG", span.entity_type)
-        self.assertEqual("甲公司", text_test[span.start:span.end])
-
-        # ---------------------------------------------------------------------
-        # Stage 7: Invalidation, Tombstoning & Consumer Receipt (K-13)
-        # ---------------------------------------------------------------------
-        steward = TrustedActor(
-            subject_id="steward-01",
-            tenant_id="tenant-corp",
-            domain=self.test_domain,
-            roles=frozenset({Role.DATA_STEWARD}),
-            purposes=frozenset({"knowledge-lifecycle"}),
-        )
-        tombstone = self.governance.revoke_publication(
-            pub, steward, "Customer procurement contract terminated"
-        )
-        self.storage.revoke_transactional(self.conn, tombstone)
-        self.conn.commit()
-
-        # Consumer confirms invalidation with receipt
-        self.storage.record_consumer_receipt(
-            self.conn,
-            consumer_id=consumer.subject_id,
-            event_id=pub.publication_id,
-            domain=self.test_domain,
-            action="tombstone_applied",
-        )
-        self.conn.commit()
-
-        # Verify receipt in DB
-        with self.conn.cursor() as cur:
-            cur.execute(
-                "SELECT status FROM consumer_receipts WHERE consumer_id = %s",
-                (consumer.subject_id,),
-            )
-            receipt_status = cur.fetchone()[0]
-            self.assertEqual("confirmed", receipt_status)
-
-        # ---------------------------------------------------------------------
-        # Stage 8: Row Level Security Cross-Domain Isolation (K-14)
-        # ---------------------------------------------------------------------
-        with psycopg.connect(LIVE_PG_URI) as cross_conn:
-            self.storage.set_session_domain(cross_conn, "unrelated-other-domain")
-            with cross_conn.cursor() as cur:
-                cur.execute(
-                    "SELECT count(*) FROM knowledge_entities WHERE entity_id IN (%s, %s)",
-                    (ent_jia.entity_id, ent_yi.entity_id),
-                )
-                count = cur.fetchone()[0]
-                self.assertEqual(0, count)  # Completely hidden by RLS!
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_expiry_rejects_stale_export_and_consumer_snapshot(self):
+        event=self.observe();self.writer.collect(event,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        c=self.load(event);pub=self.publish(c)
+        consumer=GovernedConsumer(self.storage,self.actor('reader'));consumer.consume_once()
+        service=KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertEqual('',service.export_versioned_jsonl([pub],self.actor('reader'),'v2',self.now+timedelta(days=3)))
+        self.assertEqual((),consumer.active_publication_ids(self.now+timedelta(days=3)))
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('steward',Role.DATA_STEWARD))
+            self.assertEqual(1,len(self.storage.expire_sources(conn,self.now+timedelta(days=3))))
+        self.assertEqual(1,consumer.consume_once())
+        self.assertEqual((),consumer.active_publication_ids())
+        self.assertEqual('',KnowledgeGovernanceService(self.domain,self.storage).export_versioned_jsonl([pub],self.actor('reader'),'v2',self.now))
+        # A separate active asset tests policy-shortened retention snapshots.
+        event2=self.observe('丙公司向丁公司采购设备')
+        self.writer.collect(event2,mode=CollectionMode.REQUIRED);self.worker.run_once()
+        c=self.load(event2);pub=self.publish(c)
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('steward',Role.DATA_STEWARD))
+            conn.execute('UPDATE knowledge_sources SET retention_until=%s WHERE source_id=%s',(self.now+timedelta(seconds=1),c.evidence[0].source.source_id))
+        # Authoritative metadata changes invalidate old snapshots immediately.
+        self.assertEqual('',KnowledgeGovernanceService(self.domain,self.storage).export_versioned_jsonl([pub],self.actor('reader'),'v2',self.now))

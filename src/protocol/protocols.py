@@ -5,9 +5,9 @@ else fails closed with a SafetyError whose message never contains submitted
 business text. Contract snapshot fixed from official sources read 2026-10-03.
 """
 
-from typing import Annotated, Callable, ClassVar, Literal, NoReturn, TypeVar
+from typing import Annotated, Any, Callable, ClassVar, Literal, NoReturn, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from infra.errors import SafetyCode, SafetyError
 from infra.strict_json import JsonRejectKind, parse_strict_json
@@ -15,10 +15,6 @@ from infra.strict_json import JsonRejectKind, parse_strict_json
 DEEPSEEK_CHAT_PROTOCOL = "deepseek-chat-completions"
 CLAUDE_MESSAGES_PROTOCOL = "claude-messages"
 
-DEEPSEEK_MODEL_WHITELIST: frozenset[str] = frozenset({"deepseek-flash", "deepseek-v4-pro"})
-CLAUDE_MODEL_WHITELIST: frozenset[str] = frozenset(
-    {"claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5-5"}
-)
 
 
 def _reject_json(protocol: str) -> Callable[[JsonRejectKind], NoReturn]:
@@ -47,8 +43,51 @@ class DeepSeekResponseFormat(BaseModel):
 class DeepSeekMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | None = None
+    tool_calls: list['DeepSeekToolCall'] | None = None
+    tool_call_id: str | None = None
+
+    @model_validator(mode='after')
+    def _valid_role_content(self):
+        if self.role == 'tool':
+            if not self.tool_call_id or self.content is None or self.tool_calls:
+                raise ValueError('tool result shape')
+        elif self.tool_call_id is not None or (self.tool_calls is not None and self.role != 'assistant') or (self.content is None and not self.tool_calls):
+            raise ValueError('message shape')
+        return self
+
+
+class ToolFunction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    name: Annotated[str, Field(min_length=1)]
+    arguments: str
+
+
+class DeepSeekToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    id: Annotated[str, Field(min_length=1)]
+    type: Literal['function']
+    function: ToolFunction
+
+
+class ToolDefinitionFunction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    name: Annotated[str, Field(min_length=1)]
+    description: str | None = None
+    parameters: dict[str, Any]
+
+
+class DeepSeekToolDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    type: Literal['function']
+    function: ToolDefinitionFunction
+
+
+class DeepSeekNamedTool(BaseModel):
+    model_config = ConfigDict(extra='forbid',frozen=True,strict=True)
+    type: Literal['function']
+    function: dict[Literal['name'],str]
 
 
 class DeepSeekChatRequest(BaseModel):
@@ -62,6 +101,9 @@ class DeepSeekChatRequest(BaseModel):
     top_p: Annotated[float, Field(gt=0, le=1)] | None = None
     stop: str | Annotated[list[str], Field(max_length=16)] | None = None
     response_format: DeepSeekResponseFormat | None = None
+    stream: bool = False
+    tools: list[DeepSeekToolDefinition] | None = None
+    tool_choice: Literal['auto','none','required'] | DeepSeekNamedTool | None = None
 
     @field_validator("model")
     @classmethod
@@ -78,11 +120,54 @@ class ClaudeTextBlock(BaseModel):
     text: str
 
 
+class ClaudeToolUseBlock(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    type: Literal['tool_use']
+    id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1)]
+    input: dict[str, Any]
+
+
+class ClaudeToolResultBlock(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    type: Literal['tool_result']
+    tool_use_id: Annotated[str, Field(min_length=1)]
+    content: str
+    is_error: bool | None = None
+
+
+class ClaudeThinkingBlock(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    type: Literal['thinking']
+    thinking: str
+    signature: str
+    metadata: dict[str, str]
+
+
+class ClaudeToolDefinition(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    name: Annotated[str, Field(min_length=1)]
+    description: str | None = None
+    input_schema: dict[str, Any]
+
+
+class ClaudeToolChoice(BaseModel):
+    model_config = ConfigDict(extra='forbid',frozen=True,strict=True)
+    type: Literal['auto','any','tool','none']
+    name: str | None = None
+    disable_parallel_tool_use: bool | None = None
+
+    @model_validator(mode='after')
+    def _name_required(self):
+        if (self.type=='tool') != (self.name is not None): raise ValueError('tool choice name')
+        return self
+
+
 class ClaudeMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     role: Literal["user", "assistant"]
-    content: str | Annotated[list[ClaudeTextBlock], Field(min_length=1)]
+    content: str | Annotated[list[ClaudeTextBlock | ClaudeToolUseBlock | ClaudeToolResultBlock | ClaudeThinkingBlock], Field(min_length=1)]
 
 
 class ClaudeMessagesRequest(BaseModel):
@@ -98,6 +183,9 @@ class ClaudeMessagesRequest(BaseModel):
     temperature: Annotated[float, Field(ge=0, le=1)] | None = None
     top_p: Annotated[float, Field(gt=0, le=1)] | None = None
     top_k: int | None = None
+    stream: bool = False
+    tools: list[ClaudeToolDefinition] | None = None
+    tool_choice: ClaudeToolChoice | None = None
 
     @field_validator("model")
     @classmethod
@@ -126,20 +214,20 @@ def _parse(
         validation_failed = True
     if validation_failed:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
-    if allowed_models is not None and parsed.model not in allowed_models:
+    if not allowed_models or parsed.model not in allowed_models:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, f"model not in allowed models for {protocol}")
     return parsed
 
 
 def parse_deepseek_chat_completion(
     raw: str | bytes,
-    allowed_models: frozenset[str] | None = DEEPSEEK_MODEL_WHITELIST,
+    allowed_models: frozenset[str] | None = None,
 ) -> DeepSeekChatRequest:
     return _parse(DEEPSEEK_CHAT_PROTOCOL, DeepSeekChatRequest, raw, allowed_models=allowed_models)
 
 
 def parse_claude_messages(
     raw: str | bytes,
-    allowed_models: frozenset[str] | None = CLAUDE_MODEL_WHITELIST,
+    allowed_models: frozenset[str] | None = None,
 ) -> ClaudeMessagesRequest:
     return _parse(CLAUDE_MESSAGES_PROTOCOL, ClaudeMessagesRequest, raw, allowed_models=allowed_models)

@@ -24,6 +24,54 @@ class QueryToolArgs(BaseModel):
 
 
 class TestToolCallBuffer(unittest.TestCase):
+    def test_schema_after_restoration_and_total_restored_budget(self):
+        with MappingContext("corp.test", "v1", TEST_HMAC_KEY) as ctx:
+            token = ctx.token_for("ORG", "restored value")
+            buf = BoundedToolCallBuffer()
+            buf.register_tool("a", "search")
+            buf.feed_argument_delta("a", json.dumps({"query": token}))
+            with self.assertRaises(SafetyError):
+                buf.finalize_and_verify("a", ctx, {"search": {"type": "object", "properties": {"query": {"type": "string", "maxLength": 4}}}})
+            buf = BoundedToolCallBuffer(max_single_bytes=1000, max_total_bytes=1200)
+            token = ctx.token_for("ORG", "x" * 700)
+            for id in ("a", "b"):
+                buf.register_tool(id, "search")
+                buf.feed_argument_delta(id, json.dumps({"query": token}))
+            allowed = {"search": {"type": "object", "properties": {"query": {"type": "string"}}}}
+            buf.finalize_and_verify("a", ctx, allowed)
+            with self.assertRaises(SafetyError):
+                buf.finalize_and_verify("b", ctx, allowed)
+
+    def test_unbound_schema_external_reference_and_duplicate_invocation_rejected(self):
+        with MappingContext("corp.test", "v1", TEST_HMAC_KEY) as ctx:
+            buf = BoundedToolCallBuffer()
+            buf.register_tool("a", "search")
+            with self.assertRaises(SafetyError):
+                buf.register_tool("a", "another")
+            buf.feed_argument_delta("a", "{}")
+            for allowed in (None, {"search": {"$ref": "https://unbound.invalid/schema"}}):
+                with self.assertRaises(SafetyError):
+                    buf.finalize_and_verify("a", ctx, allowed)
+
+    def test_json_schema_type_unknown_and_max_length_rejected(self) -> None:
+        schema = {"type": "object", "properties": {"amount": {"type": "number"}, "query": {"type": "string", "maxLength": 3}}, "additionalProperties": False}
+        with MappingContext("corp.test", "v1", TEST_HMAC_KEY) as ctx:
+            for args in ({"amount": "WRONG"}, {"unexpected_admin": True}, {"query": "long"}):
+                buf = BoundedToolCallBuffer()
+                buf.register_tool("a", "transfer")
+                buf.feed_argument_delta("a", json.dumps(args))
+                with self.assertRaises(SafetyError):
+                    buf.finalize_and_verify("a", ctx, {"transfer": schema})
+
+    def test_restored_size_and_schema_budget_rejected(self) -> None:
+        with MappingContext("corp.test", "v1", TEST_HMAC_KEY) as ctx:
+            token = ctx.token_for("ORG", "a" * 70000)
+            buf = BoundedToolCallBuffer()
+            buf.register_tool("a", "transfer")
+            buf.feed_argument_delta("a", json.dumps({"query": token}))
+            with self.assertRaises(SafetyError):
+                buf.finalize_and_verify("a", ctx, {"transfer": {"type": "object", "properties": {"query": {"type": "string"}}}})
+
     def setUp(self) -> None:
         self.domain = "corp.test"
         self.buffer = BoundedToolCallBuffer()

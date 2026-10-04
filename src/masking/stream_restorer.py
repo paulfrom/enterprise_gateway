@@ -7,12 +7,9 @@ branch buffers, and fails closed on unknown or malformed tokens.
 
 from __future__ import annotations
 
-import re
-from typing import Mapping
-
 from infra.errors import SafetyCode, SafetyError
-from masking.mapping import MappingContext, _TOKEN as _TOKEN_RE
-_RESERVED_PREFIX = "<<"
+from masking.mapping import MappingContext, _TOKEN as _TOKEN_RE, check_text
+_RESERVED_PREFIX = "<<ENT"
 
 
 class BranchStreamingRestorer:
@@ -31,6 +28,7 @@ class BranchStreamingRestorer:
         Retains partial token prefixes in the buffer until complete or disproven.
         """
         self.context.require_active()
+        check_text(delta)
         if not delta:
             return ""
 
@@ -41,9 +39,14 @@ class BranchStreamingRestorer:
         while cursor < len(current):
             idx = current.find(_RESERVED_PREFIX, cursor)
             if idx == -1:
-                # No token prefix, all text from cursor onwards can be emitted
-                output_parts.append(current[cursor:])
-                current = ""
+                # Retain the longest suffix which may become the reserved prefix.
+                remaining = current[cursor:]
+                pending = 0
+                for size in range(1, len(_RESERVED_PREFIX)):
+                    if remaining.endswith(_RESERVED_PREFIX[:size]):
+                        pending = size
+                output_parts.append(remaining[:-pending] if pending else remaining)
+                current = remaining[-pending:] if pending else ""
                 break
 
             # Emit text preceding the token prefix
@@ -57,6 +60,8 @@ class BranchStreamingRestorer:
                 restored = self.context.restore(token)
                 output_parts.append(restored)
                 cursor = match.end()
+                if cursor == len(current):
+                    current = ""
                 continue
 
             # Incomplete prefix at the end of current?
@@ -64,10 +69,9 @@ class BranchStreamingRestorer:
             # If tail could still be the start of a token:
             # Token looks like <<ENT_v1_...>>
             if (
-                _RESERVED_PREFIX.startswith(tail)
-                or tail.startswith(_RESERVED_PREFIX)
+                tail.startswith(_RESERVED_PREFIX)
                 and ">>" not in tail
-                and len(tail) < 80
+                and len(tail) <= 72
             ):
                 # Buffer this tail for the next chunk
                 current = tail
@@ -92,7 +96,7 @@ class BranchStreamingRestorer:
             return ""
 
         # If tail starts with reserved prefix, stream was truncated mid-token!
-        if tail.startswith(_RESERVED_PREFIX):
+        if tail.startswith(_RESERVED_PREFIX) or tail in ("<<E", "<<EN"):
             raise SafetyError(SafetyCode.MALFORMED_TOKEN, "stream truncated mid-token")
 
         return tail

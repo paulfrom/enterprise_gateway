@@ -34,6 +34,7 @@ P0 秘密候选在合并时整请求阻断（``SECRET_DETECTED``）。
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
@@ -86,6 +87,13 @@ def _ner_worker(
         package.manifest.created_utc,
         package.manifest.files["model.onnx"].sha256,
     )
+
+
+def _ner_batch_worker(package_dir: str, texts: tuple[str, ...], window_length: int, stride: int):
+    package = load_model_package(package_dir)
+    merger = NerWindowMerger(package.tokenizer, package.session, package.id2label, window_length=window_length, stride=stride)
+    provenance = (package.manifest.artifact, package.manifest.created_utc, package.manifest.files['model.onnx'].sha256)
+    return tuple((merger.extract(text), provenance) for text in texts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +205,33 @@ class DetectionOrchestrator:
         self._stride = stride
 
     def detect(self, text: str) -> DetectionOutcome:
+        return self.detect_many((text,))[0]
+
+    def detect_many(self, texts: tuple[str, ...], *, deadline_at: float | None = None, cancel=None) -> tuple[DetectionOutcome, ...]:
+        if any(not isinstance(text,str) for text in texts):
+            raise SafetyError(SafetyCode.INVALID_TEXT)
+        if not self._recognizers: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'rule')
+        if self._dictionary is None: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'dictionary')
+        if self._ner_package_dir is None: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'ner')
+        timeout = self._ner_timeout if deadline_at is None else min(self._ner_timeout, deadline_at - time.monotonic())
+        if timeout <= 0 or (cancel is not None and cancel.is_set()):
+            raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+        try:
+            if self._ner_worker is _ner_worker:
+                ner_results = self._executor.submit(_ner_batch_worker, self._ner_package_dir, texts, self._window_length, self._stride, timeout=timeout, cancel=cancel)
+            else:
+                ner_results = []
+                for text in texts:
+                    timeout = self._ner_timeout if deadline_at is None else min(self._ner_timeout, deadline_at-time.monotonic())
+                    if timeout <= 0: raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+                    ner_results.append(self._executor.submit(self._ner_worker, self._ner_package_dir, text, self._window_length, self._stride, timeout=timeout, cancel=cancel))
+        except RuntimeError:
+            ner_results = None
+        if ner_results is None:
+            raise SafetyError(SafetyCode.DETECTION_FAILED,'ner') from None
+        return tuple(self._detect_with_ner(text, result) for text, result in zip(texts, ner_results, strict=True))
+
+    def _detect_with_ner(self, text: str, ner_result) -> DetectionOutcome:
         """执行三路必需检测并合并；任何一路失败 → 整请求 ``SafetyError``。
 
         执行顺序固定：规则 → 词典 → NER → 合并。错误优先级确定性：
@@ -236,24 +271,6 @@ class DetectionOrchestrator:
         if dict_failed:
             raise SafetyError(SafetyCode.DETECTION_FAILED, "dictionary") from None
         candidates.extend(candidate_from(span, source="dict") for span in detection.spans)
-        ner_failed = False
-        try:
-            ner_result = self._executor.submit(
-                self._ner_worker,
-                self._ner_package_dir,
-                text,
-                self._window_length,
-                self._stride,
-                timeout=self._ner_timeout,
-            )
-        except SafetyError:
-            # INFERENCE_TIMEOUT（进程已真实回收）/ NER_OFFSET_UNRECOVERABLE /
-            # NER_MODEL_INVALID 等按真实原因原样传播（执行器已断开链、丢弃 detail 外的正文）。
-            raise
-        except RuntimeError:
-            ner_failed = True
-        if ner_failed:
-            raise SafetyError(SafetyCode.DETECTION_FAILED, "ner") from None
         try:
             ner_spans, (artifact, created_utc, model_sha256) = ner_result
         except (TypeError, ValueError):

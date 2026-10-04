@@ -32,18 +32,18 @@ class MultiTurnConversationSession:
         user_message: str,
         category: str,
         turn_hmac_key: bytes,
-        model: str = "deepseek-flash",
+        model: str,
     ) -> str:
         """Execute one conversational turn through the protected pipeline.
 
         Appends the new user message, submits full history to the pipeline,
         restores upstream response, updates local history, and returns plaintext response.
         """
-        self.history.append({"role": "user", "content": user_message})
+        next_history = [*self.history, {"role": "user", "content": user_message}]
 
         raw_req = json.dumps({
             "model": model,
-            "messages": self.history,
+            "messages": next_history,
         })
 
         with MappingContext(self.pipeline.domain, "v1", turn_hmac_key) as ctx:
@@ -57,5 +57,5 @@ class MultiTurnConversationSession:
 
         # Extract assistant response text
         assistant_reply = result.response.choices[0].message.content
-        self.history.append({"role": "assistant", "content": assistant_reply})
+        self.history = [*next_history, {"role": "assistant", "content": assistant_reply}]
         return assistant_reply

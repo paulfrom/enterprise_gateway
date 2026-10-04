@@ -3,7 +3,7 @@
 import hashlib
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -33,6 +33,8 @@ def build(**overrides):
         "source_version": "v3",
         "source_kind": SourceKind.DOCUMENT,
         "evidence_digest": DIGEST,
+        "evidence_text": EXCERPT,
+        "retention_until": OBSERVED_AT + timedelta(days=30),
         "evidence_offset": 42,
         "observed_at": OBSERVED_AT,
         "purpose": "supplier-relationship-management",
@@ -65,12 +67,12 @@ class EventBuildTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             build(body=EXCERPT)  # type: ignore[call-arg]
 
-    def test_serialized_bytes_contain_no_source_text(self):
+    def test_evidence_is_in_memory_serialization_for_encrypted_spool(self):
         event = build()
         raw = serialize_event(event)
-        self.assertNotIn(CANARY_TEXT.encode("utf-8"), raw)
-        self.assertNotIn("合同草案".encode("utf-8"), raw)
-        self.assertNotIn(EXCERPT.encode("utf-8"), raw)
+        self.assertIn(CANARY_TEXT.encode("utf-8"), raw)
+        self.assertIn("合同草案".encode("utf-8"), raw)
+        self.assertEqual(EXCERPT, json.loads(raw)["evidence_text"])
         self.assertIn(DIGEST.encode("ascii"), raw)  # digest reference IS present
 
     def test_schema_has_no_content_field_and_forbids_extras(self):
@@ -116,9 +118,10 @@ class AuthorizationFailureTests(unittest.TestCase):
             domain="corp.test",
             request_id="req-12345",
             evidence_digest=DIGEST,
+            evidence_text=EXCERPT,
         )
         self.assertEqual(event.domain, "corp.test")
-        self.assertEqual(event.source_id, "req:req-12345")
+        self.assertTrue(event.source_id.startswith("unverified:user_assertion:"))
         self.assertEqual(event.acl, frozenset({"corp.test:restricted-candidate"}))
 
 

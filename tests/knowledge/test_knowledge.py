@@ -19,7 +19,7 @@ class KnowledgeTests(unittest.TestCase):
         self.acl = frozenset({"security", "business", "publisher", "reader", "steward"})
         self.source = Source("tenant-a", "procurement", "contract-1", "v1",
                              SourceKind.DOCUMENT, self.acl, "enterprise_knowledge",
-                             self.now, self.now + timedelta(days=30))
+                             self.now, self.now + timedelta(days=30), independence_verified=True)
         self.evidence = Evidence(self.source, sha256("合成供应关系".encode()).hexdigest(), 0, 6)
         self.supplier = Entity(UUID(int=1), "tenant-a", "procurement", "organization", "合成供应商甲")
         self.customer = Entity(UUID(int=2), "tenant-a", "procurement", "organization", "合成企业乙")

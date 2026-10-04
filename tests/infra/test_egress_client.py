@@ -460,6 +460,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
             port=self.server.port,
             path_prefix="/v1",
             credential="sk-ant-test-key-12345",
+            credential_header="x-api-key",
             timeout_seconds=5.0,
             allowed_addresses=frozenset([LOOPBACK]),
             package_version="1.2.3",

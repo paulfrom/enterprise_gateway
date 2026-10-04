@@ -80,15 +80,10 @@ class VersionManifestTests(unittest.TestCase):
         else:
             self.fail("SafetyError not raised")
 
-    def test_package_hash_distinguishes_ambiguous_component_names(self) -> None:
-        # Old delimiter-joined hashing made these two packages collide.
-        pkg_a, _ = build_manifest(
-            "pkg-x", "1.0.0", {"a": ("1.0", "b=c")}, created_at="2026-10-03T10:00:00Z"
-        )
-        pkg_b, _ = build_manifest(
-            "pkg-x", "1.0.0", {"a=b": ("1.0", "c")}, created_at="2026-10-03T10:00:00Z"
-        )
-        self.assertNotEqual(pkg_a.package_hash, pkg_b.package_hash)
+    def test_incomplete_component_set_is_rejected(self):
+        body=self.m1.model_dump()
+        del body['components']['route']
+        with self.assertRaises(SafetyError): load_manifest(body)
 
     def test_request_version_pinning_in_flight(self) -> None:
         # Step 1: Request 1 binds to V1
@@ -161,14 +156,14 @@ class VersionManifestTests(unittest.TestCase):
     def test_build_manifest_helper(self) -> None:
         manifest, payloads = build_manifest(
             "pkg-test", "0.9.0",
-            {"rule1": ("1.0", "content-1"), "rule2": ("1.1", "content-2")},
+            {name: ("1.0", "synthetic-"+name) for name in ("policy","rules","dictionary","ner","mapping","protocol","audit","route")},
             created_at="2026-10-03T10:00:00Z",
         )
         self.assertIsInstance(manifest, PackageManifest)
     def test_components_deep_immutability(self) -> None:
         manifest, payloads = build_manifest(
             "pkg-freeze", "1.0.0",
-            {"comp": ("1.0", "content")},
+            {name: ("1.0", "synthetic-"+name) for name in ("policy","rules","dictionary","ner","mapping","protocol","audit","route")},
             created_at="2026-10-04T00:00:00Z",
         )
         with self.assertRaises(TypeError):

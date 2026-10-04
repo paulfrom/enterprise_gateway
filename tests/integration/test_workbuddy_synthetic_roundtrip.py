@@ -1,4 +1,7 @@
-"""WorkBuddy Synthetic Dialogue & Automatic Knowledge Sedimentation Verification Suite.
+"""Synthetic client HTTP and real PostgreSQL knowledge lifecycle suite.
+
+Uses TestClient and a controlled upstream; this is not a WorkBuddy desktop or
+supplier integration result. NER, encrypted spool, worker and PostgreSQL are real.
 
 Validates the full front-gateway architecture:
 WorkBuddy/Agent -> Enterprise Authenticated Gateway -> Upstream Provider (New API / Direct Provider)
@@ -36,7 +39,11 @@ from gateway.pipeline import ProtectedPipeline
 from infra.egress_client import BoundEgressClient, BoundUpstream
 from infra.envelope_crypto import StaticTestKmsProvider
 from infra.spool import CollectionMode, SpoolWriter
-from knowledge.extractor import RelationExtractor
+from infra.envelope_crypto import parse_record, decrypt_record
+from infra.spool_relay import compute_dedup_key
+from knowledge.knowledge_events import ObservationEvent
+from knowledge.worker import KnowledgeWorker, PostgresKnowledgeSink, GovernedConsumer
+from tests.pg_support import get_test_dsn, prepare_test_database
 from knowledge.governance import KnowledgeGovernanceService
 from knowledge.knowledge import (
     CandidateState,
@@ -56,15 +63,14 @@ from protocol.admission import AdmissionLimiter
 from protocol.identity import TrustedIdentity
 from protocol.protocols import CLAUDE_MESSAGES_PROTOCOL, DEEPSEEK_CHAT_PROTOCOL
 
-MINI_PACKAGE = Path(__file__).resolve().parent.parent / "detection" / "fixtures" / "ner" / "mini-valid-package"
-LIVE_PG_URI = "postgresql://paul:lslin%4032@42.193.11.211:5432/enter_gateway"
+NER_PACKAGE = Path(__file__).resolve().parents[2] / "models" / "bert4ner-base-chinese-onnx"
 
 
 class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.storage = PostgresKnowledgeStorage(LIVE_PG_URI)
-        cls.storage.init_database(enable_rls=True)
+        prepare_test_database()
+        cls.storage = PostgresKnowledgeStorage(get_test_dsn())
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -107,7 +113,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
         self.detector = DetectionOrchestrator(
             recognizers=default_recognizers(),
             dictionary=self.compiled_dict,
-            ner_package_dir=MINI_PACKAGE,
+            ner_package_dir=NER_PACKAGE,
             executor=self.executor,
         )
 
@@ -130,7 +136,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
             domain=self.domain,
             roles=frozenset({"employee", "ai-assistant"}),
             purposes=frozenset({"model-query"}),
-            source_acl=frozenset({f"{self.domain}:general-staff"}),
+            source_acl=frozenset({'worker','security','business','publisher','reader','reader2','steward'}),
             auth_source="enterprise-iam",
             authenticated_at=now - timedelta(hours=1),
             expires_at=now + timedelta(hours=8),
@@ -232,6 +238,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
                 port=8080,
                 path_prefix="/v1",
                 credential="sk-ant-claude-upstream-secret",
+                credential_header="x-api-key",
                 timeout_seconds=5.0,
                 allowed_addresses=frozenset({"127.0.0.1"}),
             ),
@@ -244,6 +251,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
             domain=self.domain,
             protocol=DEEPSEEK_CHAT_PROTOCOL,
             package_version="pkg-wb-1.0",
+            allowed_models=frozenset({'deepseek-flash'}),
             path="/v1/chat/completions",
             policy=self.policy,
             detector=self.detector,
@@ -259,6 +267,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
             domain=self.domain,
             protocol=CLAUDE_MESSAGES_PROTOCOL,
             package_version="pkg-wb-1.0",
+            allowed_models=frozenset({'claude-sonnet-5-5'}),
             path="/v1/messages",
             policy=self.policy,
             detector=self.detector,
@@ -276,7 +285,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
         app = create_app(
             deepseek_pipeline=deepseek_pipeline,
             claude_pipeline=claude_pipeline,
-            trusted_identity=self.agent_identity,
+            enterprise_credentials={'agent-corp-token':self.agent_identity},
             hmac_key=hmac_key,
         )
         client = TestClient(app)
@@ -284,7 +293,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
         # ---------------------------------------------------------------------
         # 3. WorkBuddy Round 1: DeepSeek Chat Completion Call
         # ---------------------------------------------------------------------
-        prompt_1 = "请查询甲公司向乙公司采购五台智能质检设备的履约进度，并核对联系人张三的电话 13800138000。"
+        prompt_1 = "采购记录显示：甲公司向乙公司采购五台智能质检设备。请核对联系人张三的电话 13800138000。"
         resp1 = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer agent-corp-token"},
@@ -339,81 +348,56 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
         # Both requests automatically generated and persisted encrypted observations
         self.assertEqual(2, len(spool_files))
 
-        # ---------------------------------------------------------------------
-        # 6. Offline Worker Knowledge Sedimentation to PostgreSQL (M2B)
-        # ---------------------------------------------------------------------
-        governance = KnowledgeGovernanceService(self.domain)
-        extractor = RelationExtractor(self.domain)
-
-        # Worker connects to real PostgreSQL
+        # 6. Real worker input is the encrypted spool generated by HTTP.
         import psycopg
-        with psycopg.connect(LIVE_PG_URI) as db_conn:
-            self.storage.set_session_domain(db_conn, self.domain)
-
-            # Ingest Round 1 input
-            now = datetime.now(timezone.utc)
-            source_wb = Source(
-                tenant_id="tenant-corp",
-                domain=self.domain,
-                source_id="workbuddy-session-001",
-                version="v1",
-                source_kind=SourceKind.USER_ASSERTION,
-                acl=self.agent_identity.source_acl,
-                purpose="enterprise-knowledge",
-                observed_at=now,
-                retention_until=now + timedelta(days=90),
-            )
-            self.storage.save_source(db_conn, source_wb)
-
-            ent_jia = Entity(uuid4(), "tenant-corp", self.domain, "ORG", "甲公司")
-            ent_yi = Entity(uuid4(), "tenant-corp", self.domain, "ORG", "乙公司")
-            self.storage.save_entity(db_conn, ent_jia)
-            self.storage.save_entity(db_conn, ent_yi)
-
-            # Extract business relation: '甲公司向乙公司采购五台智能质检设备'
-            candidates = extractor.extract_from_text(
-                prompt_1, source_wb, [ent_jia, ent_yi], sha256(prompt_1.encode()).hexdigest()
-            )
-            self.assertEqual(1, len(candidates))
-            cand = candidates[0]
-            self.assertEqual("乙公司", cand.claim.subject.name)
-            self.assertEqual(Predicate.SUPPLIES, cand.claim.predicate)
-            self.assertEqual("甲公司", cand.claim.object.name)
-            self.assertEqual(Polarity.POSITIVE, cand.claim.polarity)
-            self.assertEqual(Modality.ASSERTED, cand.claim.modality)
-
-            eid = self.storage.save_evidence(db_conn, cand.evidence[0])
-            claim_id = self.storage.save_candidate(db_conn, cand, [eid])
-            db_conn.commit()
-
-            # Two-party review
-            sec_rev = TrustedActor("sec-wb-01", "tenant-corp", self.domain, frozenset({Role.SECURITY_REVIEWER}), frozenset({"gov"}))
-            biz_rev = TrustedActor("biz-wb-01", "tenant-corp", self.domain, frozenset({Role.BUSINESS_REVIEWER}), frozenset({"gov"}))
-            publisher = TrustedActor("pub-wb-01", "tenant-corp", self.domain, frozenset({Role.PUBLISHER}), frozenset({"pub"}))
-
-            c_sec = governance.approve_candidate(cand, sec_rev, Role.SECURITY_REVIEWER, "audit-sec", now)
-            self.storage.save_approval(db_conn, cand.candidate_id, c_sec.approvals[0])
-
-            c_biz = governance.approve_candidate(c_sec, biz_rev, Role.BUSINESS_REVIEWER, "audit-biz", now)
-            self.storage.save_approval(db_conn, cand.candidate_id, c_biz.approvals[1])
-
-            # Atomic publication & outbox
-            pub, _ = governance.publish_candidate(c_biz, publisher, now + timedelta(days=180), now)
-            self.storage.publish_transactional(db_conn, pub, claim_id)
-            db_conn.commit()
-
-            # Verify Outbox event
-            pending = self.storage.fetch_pending_outbox(db_conn)
-            self.assertTrue(any(p["aggregate_id"] == pub.publication_id for p in pending))
-
-            # Compile into dictionary package for next version
-            new_dict_payload = governance.compile_approved_dictionary_payload(
-                "dict-wb-sedimented", "v2.0", [pub]
-            )
-            new_compiled_dict = compile_dictionary(new_dict_payload)
-            self.assertEqual("dict-wb-sedimented", new_compiled_dict.dictionary_id)
-            det = analyze_dictionary("核对甲公司与乙公司合同", new_compiled_dict)
-            self.assertEqual(2, len(det.spans))
+        events = [ObservationEvent.model_validate_json(decrypt_record(self.kms,parse_record(p.read_bytes())))
+                  for p in spool_files]
+        event = next(e for e in events if e.evidence_text == prompt_1)
+        purpose = frozenset({event.purpose})
+        def actor(name,*roles):
+            return TrustedActor(name,'tenant-corp',self.domain,frozenset(roles),purpose)
+        worker = KnowledgeWorker(self.spool_dir,self.kms,PostgresKnowledgeSink(self.storage,actor('worker')))
+        self.assertEqual(2,worker.run_once().submitted)
+        self.assertEqual([],list(self.spool_dir.glob('*.env.json')))
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,actor('worker'))
+            ids = conn.execute('SELECT candidate_ids FROM knowledge_observations WHERE dedup_key=%s',
+                               (compute_dedup_key(event),)).fetchone()[0]
+            candidates = [self.storage.load_candidate(conn,cid) for cid in ids]
+        cand = next(c for c in candidates if c.claim.predicate == Predicate.SUPPLIES)
+        self.assertEqual('乙公司',cand.claim.subject.name)
+        self.assertEqual('甲公司',cand.claim.object.name)
+        self.assertEqual(0,cand.independent_source_count)
+        now = datetime.now(timezone.utc)
+        governance = KnowledgeGovernanceService(self.domain,self.storage)
+        cand = governance.approve_candidate(cand,actor('security',Role.SECURITY_REVIEWER),
+                                           Role.SECURITY_REVIEWER,'synthetic/security-review',now)
+        governance = KnowledgeGovernanceService(self.domain,self.storage)
+        cand = governance.approve_candidate(cand,actor('business',Role.BUSINESS_REVIEWER),
+                                           Role.BUSINESS_REVIEWER,'synthetic/business-review',now)
+        governance = KnowledgeGovernanceService(self.domain,self.storage)
+        pub,_ = governance.publish_candidate(cand,actor('publisher',Role.PUBLISHER),
+                                              now+timedelta(days=90),now)
+        dictionary = governance.compile_approved_dictionary_payload('dict-wb-sedimented','v2',[pub],
+                                                                    consumer=actor('reader'))
+        compiled = compile_dictionary(dictionary)
+        self.assertEqual(2,len(analyze_dictionary('核对甲公司与乙公司合同',compiled).spans))
+        consumers = [GovernedConsumer(self.storage,actor(name)) for name in ('reader','reader2')]
+        for consumer in consumers:
+            self.assertEqual(1,consumer.consume_once())
+            self.assertEqual((pub.publication_id,),consumer.active_publication_ids())
+        governance.withdraw_source(cand.evidence[0].source,actor('steward',Role.DATA_STEWARD),
+                                   'synthetic permissions withdrawal',datetime.now(timezone.utc))
+        restart = KnowledgeGovernanceService(self.domain,self.storage)
+        self.assertEqual('',restart.export_versioned_jsonl([pub],actor('reader'),'v3'))
+        self.assertEqual([],restart.compile_approved_dictionary_payload('dict-wb-sedimented','v3',[pub],
+                                                                       consumer=actor('reader'))['entries'])
+        for consumer in consumers:
+            self.assertEqual(1,consumer.consume_once())
+            self.assertEqual((),consumer.active_publication_ids())
+        client.close()
+        ds_client.close()
+        claude_client.close()
 
 
 if __name__ == "__main__":

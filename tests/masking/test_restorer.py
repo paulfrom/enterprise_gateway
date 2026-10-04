@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 import unittest
+from protocol.history_state import ReasoningStateValidator, ProviderStateVerifier
+from tests.protocol.provider_fixtures import verify_fixture_signature
 
 from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext
@@ -13,14 +15,39 @@ from protocol.protocols import (
 from masking.restorer import (
     ClaudeMessagesResponse,
     DeepSeekChatResponse,
-    restore_response,
+    restore_response as _restore_response,
 )
+
+def restore_response(*args, **kwargs):
+    kwargs.setdefault('allowed_models', frozenset({'deepseek-flash','deepseek-v4-pro','claude-sonnet-5-5','claude-fable-5-1','claude-opus-5-5'}))
+    return _restore_response(*args, **kwargs)
+
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "restorer"
 TEST_HMAC_KEY = b"0123456789abcdef0123456789abcdef"
 
 
 class ResponseRestorerTests(unittest.TestCase):
+    def test_native_reasoning_requires_supplier_proof_and_has_no_token_rewrite(self):
+        validator=ReasoningStateValidator(TEST_HMAC_KEY,scope='native-test',version='full-package',
+            provider_verifier=ProviderStateVerifier(verify_fixture_signature,b'fixture-signature'))
+        def response(thinking='public fixture',signature='fixture-signature',**extra):
+            return {'id':'native','type':'message','role':'assistant','model':'claude-sonnet-5-5',
+                'content':[{'type':'thinking','thinking':thinking,'signature':signature,**extra}],
+                'stop_reason':'end_turn','usage':{'input_tokens':1,'output_tokens':2}}
+        with MappingContext('native-test','v1',TEST_HMAC_KEY) as context:
+            valid=restore_response(CLAUDE_MESSAGES_PROTOCOL,response(),context,state_validator=validator)
+            self.assertEqual('public fixture',valid.content[0].thinking)
+            self.assertEqual('fixture-signature',valid.content[0].signature)
+            self.assertEqual('full-package',valid.content[0].metadata['version'])
+            token=context.token_for('ORG','PRIVATE_FIXTURE')
+            for body in (response(signature='bad'),response(signature=''),response(thinking=token),
+                         response(thinking='<<E'),response(metadata={'receipt':'forged'})):
+                with self.subTest(body=body):
+                    with self.assertRaises(SafetyError):
+                        restore_response(CLAUDE_MESSAGES_PROTOCOL,body,context,state_validator=validator)
+            with self.assertRaises(SafetyError):restore_response(CLAUDE_MESSAGES_PROTOCOL,response(),context)
+
     def setUp(self) -> None:
         self.context = MappingContext(
             scope="test-scope",
