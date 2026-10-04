@@ -97,7 +97,7 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 .\scripts\check.ps1
 
 # 或直接使用 uv 执行全量测试
-uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -v
+uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -t . -v
 ~~~
 
 ### 3. 本地启动网关服务
