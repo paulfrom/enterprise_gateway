@@ -19,3 +19,4 @@ models/
 evidence/
 reports/
 *.log
+.runtime_state/

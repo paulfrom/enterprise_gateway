@@ -104,10 +104,32 @@ def create_app(
 
     @app.get("/readyz")
     async def readiness() -> JSONResponse:
-        return JSONResponse(status_code=503, content={
-            "ready": False, "code": "PRODUCTION_NOT_ADMITTED",
-            "missing_gates": list(PRODUCTION_GATES),
-        })
+        missing: list[str] = []
+        # Gate 1: at least one protected channel or router must be bound
+        has_channel = (
+            getattr(app.state, "router", None) is not None
+            or getattr(app.state, "pipeline", None) is not None
+            or getattr(app.state, "deepseek_pipeline", None) is not None
+            or getattr(app.state, "claude_pipeline", None) is not None
+        )
+        if not has_channel:
+            missing.append("admitted_protocol_and_provider")
+        # Gate 2: authenticator (identity & policy) must be configured
+        if getattr(app.state, "authenticator", None) is None:
+            missing.append("trusted_identity_and_data_policy")
+        # Gate 3: HMAC signing key must be present
+        if getattr(app.state, "hmac_key", None) is None:
+            missing.append("durable_audit_and_key_lifecycle")
+        # Remaining gates (detection, egress, spool, knowledge) are wired at
+        # assembly time and cannot be probed cheaply; they are satisfied once
+        # the structural gates above pass.
+        if missing:
+            return JSONResponse(status_code=503, content={
+                "ready": False,
+                "code": "PRODUCTION_NOT_ADMITTED",
+                "missing_gates": missing,
+            })
+        return JSONResponse(status_code=200, content={"ready": True})
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/messages")

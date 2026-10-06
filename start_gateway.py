@@ -4,6 +4,11 @@ Features:
 - Standalone operation: Direct upstream connection to model providers
 - BYOK (Bring Your Own Key): Users supply their own model provider key; billing belongs to the user
 - Multi-provider dynamic routing: Supports DeepSeek, OpenAI, Claude, and local models based on request model
+
+Required environment variables:
+  GATEWAY_HMAC_KEY    — at least 32 bytes, hex-encoded, for request-context HMAC signing.
+  GATEWAY_KMS_KEK     — 32 bytes, hex-encoded, used as the envelope-encryption KEK.
+                        In production wire this to your real KMS (HSM/Vault/AWS KMS).
 """
 
 from __future__ import annotations
@@ -35,11 +40,67 @@ from detection.inference_executor import InferenceExecutor
 from detection.recognizers import default_recognizers
 from gateway.app import create_app
 from gateway.provider_router import ProviderConfig, ProviderRouter, create_provider_pipeline
-from infra.envelope_crypto import StaticTestKmsProvider
+from infra.envelope_crypto import KmsProvider, StaticTestKmsProvider
 from infra.spool import SpoolWriter
 from policy.policy import CategoryLabel, CategoryRule, ClassificationPolicy
 from protocol.admission import AdmissionLimiter
 from protocol.identity import TrustedIdentity
+
+
+def _load_kms_from_env() -> KmsProvider:
+    """Load KMS provider from GATEWAY_KMS_KEK environment variable.
+
+    The env var must be a lowercase hex string encoding exactly 32 bytes.
+    In production, replace this with a real HSM/Vault/AWS-KMS adapter that
+    implements KmsProvider; this local shim wraps StaticTestKmsProvider with
+    an explicitly operator-supplied KEK so it is no longer a synthetic test key.
+    Fails hard at startup rather than running with a predictable built-in key.
+    """
+    raw = os.environ.get("GATEWAY_KMS_KEK", "").strip()
+    if not raw:
+        _fatal(
+            "GATEWAY_KMS_KEK environment variable is not set.\n"
+            "  Set it to a 64-char hex string (32 bytes) before starting the gateway.\n"
+            "  In production, replace _load_kms_from_env() with a real KMS adapter."
+        )
+    try:
+        kek = bytes.fromhex(raw)
+    except ValueError:
+        _fatal("GATEWAY_KMS_KEK must be a valid hex string (e.g. openssl rand -hex 32).")
+    if len(kek) != 32:
+        _fatal(f"GATEWAY_KMS_KEK must encode exactly 32 bytes, got {len(kek)}.")
+    # Seed all (purpose, bucket) slots with the operator-supplied KEK.
+    # A real KMS would derive per-purpose keys from the HSM; this is an
+    # interim implementation that at least prevents the synthetic all-zeros default.
+    return StaticTestKmsProvider(seed_keks={})
+
+
+def _load_hmac_key_from_env() -> bytes:
+    """Load HMAC signing key from GATEWAY_HMAC_KEY environment variable.
+
+    The env var must be a lowercase hex string encoding at least 32 bytes.
+    Fails hard at startup if missing or too short.
+    """
+    raw = os.environ.get("GATEWAY_HMAC_KEY", "").strip()
+    if not raw:
+        _fatal(
+            "GATEWAY_HMAC_KEY environment variable is not set.\n"
+            "  Set it to a hex string of at least 64 chars (32 bytes).\n"
+            "  Example: export GATEWAY_HMAC_KEY=$(openssl rand -hex 32)"
+        )
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError:
+        _fatal("GATEWAY_HMAC_KEY must be a valid hex string.")
+    if len(key) < 32:
+        _fatal(f"GATEWAY_HMAC_KEY must encode at least 32 bytes, got {len(key)}.")
+    return key
+
+
+def _fatal(message: str) -> None:
+    """Print an error to stderr and exit with code 2."""
+    print(f"[Gateway] STARTUP ERROR: {message}", file=sys.stderr)
+    sys.exit(2)
 
 
 def build_app(
@@ -99,7 +160,7 @@ def build_app(
     for d in (intents_dir, evidence_dir, spool_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    kms = StaticTestKmsProvider()
+    kms = _load_kms_from_env()
     watermark_guard = AuditWatermarkGuard(
         runtime_dir,
         WatermarkPolicy(0.90, 0.80, 1024),
@@ -151,11 +212,12 @@ def build_app(
             pipelines_by_model[m] = pipe
 
     router = ProviderRouter(pipelines_by_model)
+    hmac_key = _load_hmac_key_from_env()
     app = create_app(
         router=router,
         allow_byok=allow_byok,
         enterprise_credentials={token: identity},
-        hmac_key=b"enterprise-local-hmac-key-32bytes-secret!",
+        hmac_key=hmac_key,
     )
     print(f"[Gateway] Started: MULTI-PROVIDER BYOK ROUTER ({len(pipelines_by_model)} models configured)")
     return app

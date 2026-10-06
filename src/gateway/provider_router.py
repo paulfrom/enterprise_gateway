@@ -60,6 +60,7 @@ def create_provider_pipeline(
     watermark_guard: Any,
     evidence_gate: Any,
     spool_writer: Any,
+    evidence_bucket: str | None = None,
     package_version: str = "runtime-v1",
 ) -> ProtectedPipeline:
     """Assemble a fail-closed pipeline bound to the specified provider configuration."""
@@ -104,4 +105,5 @@ def create_provider_pipeline(
         model_mapping=model_mapping,
         package_version=package_version,
         request_timeout=config.timeout_seconds,
+        evidence_bucket=evidence_bucket,
     )
