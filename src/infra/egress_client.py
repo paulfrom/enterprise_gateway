@@ -35,7 +35,7 @@ import ipaddress
 import math
 import socket
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NoReturn
 
 import httpx
@@ -115,7 +115,7 @@ class BoundUpstream:
     host: str
     port: int
     path_prefix: str
-    credential: str | None
+    credential: str | None = field(repr=False)
     timeout_seconds: float
     allowed_addresses: frozenset[str]
     max_redirects: int = 0
@@ -187,6 +187,7 @@ class BoundUpstream:
         timeout_seconds: float,
         resolver: Resolver | None = None,
         max_redirects: int = 0,
+        credential_header: str = 'authorization',
     ) -> BoundUpstream:
         """Construct a binding with the declared address set resolved from host.
 
@@ -204,6 +205,7 @@ class BoundUpstream:
             timeout_seconds=timeout_seconds,
             allowed_addresses=addresses,
             max_redirects=max_redirects,
+            credential_header=credential_header,
         )
 
     @property
@@ -224,10 +226,11 @@ class _BoundTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         url = request.url
+        effective_port = url.port if url.port is not None else (443 if url.scheme == "https" else 80)
         if (
             url.scheme != self._binding.scheme
             or url.host != self._binding.host
-            or url.port != self._binding.port
+            or effective_port != self._binding.port
         ):
             raise SafetyError(SafetyCode.UPSTREAM_BINDING_VIOLATION, "transport target")
         self._assert_resolution()
@@ -309,7 +312,7 @@ class BoundEgressClient:
         scheme = target.scheme or self._binding.scheme
         host = target.host or self._binding.host
         if target.host:
-            port = target.port or (443 if scheme == "https" else 80)
+            port = target.port if target.port is not None else (443 if scheme == "https" else 80)
         else:
             port = self._binding.port
         if (
@@ -328,13 +331,18 @@ class BoundEgressClient:
 
     def _filter_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         filtered: dict[str, str] = {}
+        caller_auth = None
+        caller_x_api_key = None
         if headers is not None:
             if not isinstance(headers, Mapping):
                 raise TypeError("headers must be a mapping")
             for name, value in headers.items():
                 lowered = name.lower() if isinstance(name, str) else ""
-                # Strip any caller authentication headers unconditionally
-                if lowered in ("authorization", "x-api-key"):
+                if lowered == "authorization":
+                    caller_auth = value
+                    continue
+                if lowered == "x-api-key":
+                    caller_x_api_key = value
                     continue
                 if lowered not in EGRESS_HEADER_WHITELIST:
                     continue
@@ -347,6 +355,17 @@ class BoundEgressClient:
                 filtered.setdefault("anthropic-version", "2023-06-01")
             else:
                 filtered["Authorization"] = cred
+        else:
+            # BYOK mode: dynamically apply caller-provided credential
+            if self._binding.credential_header == 'x-api-key':
+                raw_key = caller_x_api_key or (caller_auth[7:].strip() if caller_auth and caller_auth.startswith('Bearer ') else caller_auth)
+                if raw_key and raw_key.strip():
+                    filtered["x-api-key"] = raw_key.strip()
+                    filtered.setdefault("anthropic-version", "2023-06-01")
+            else:
+                auth_val = caller_auth or (f"Bearer {caller_x_api_key.strip()}" if caller_x_api_key and caller_x_api_key.strip() else None)
+                if auth_val and auth_val.strip():
+                    filtered["Authorization"] = auth_val.strip()
 
         if self._binding.package_version is not None:
             filtered["x-protection-package-version"] = self._binding.package_version

@@ -1,0 +1,42 @@
+{
+  "providers": [
+    {
+      "channel_id": "deepseek",
+      "protocol": "deepseek-chat-completions",
+      "url": "https://api.deepseek.com/v1/chat/completions",
+      "credential_header": "authorization",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-coder",
+        "deepseek-flash"
+      ]
+    },
+    {
+      "channel_id": "openai",
+      "protocol": "deepseek-chat-completions",
+      "url": "https://api.openai.com/v1/chat/completions",
+      "credential_header": "authorization",
+      "models": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "o1",
+        "o1-mini",
+        "o3-mini"
+      ]
+    },
+    {
+      "channel_id": "anthropic",
+      "protocol": "claude-messages",
+      "url": "https://api.anthropic.com/v1/messages",
+      "credential_header": "x-api-key",
+      "models": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229",
+        "claude-3-haiku-20240307"
+      ]
+    }
+  ]
+}

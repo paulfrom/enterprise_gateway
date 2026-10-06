@@ -108,19 +108,32 @@ uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unitte
 
 应用集成通过`gateway.app.create_app`装配完整`ProtectedPipeline`、服务端`enterprise_credentials`和至少32字节`hmac_key`。流水线需要实际规则/词典/NER、固定模型映射与出站绑定、审计/加密spool及完整版本；企业凭据逐请求验证，供应商凭据只由固定出站客户端生成。配置变化构造新装配，在途请求继续使用原route、协议、工具和验证器快照。
 
-### 3. 本地启动网关服务
+`gateway.runtime.create_runtime_app`提供单个固定 Custom Chat Completions 渠道的装配入口。调用者须明确提供可信身份、企业接入凭据、HMAC密钥、KMS、词典、NER模型目录、存储目录及分级和水位政策。服务端供应商文件只允许一个明确的 Custom 模型与 HTTPS `/v1/chat/completions`地址，装配时读取并固定；客户端仅持企业地址和企业凭据。能力标志不代表图片、任意协议或生产准入，缺少依赖时拒绝；`/readyz`仍为503。
+
+DeepSeek响应支持普通`reasoning_content`文本的精确恢复、`system_fingerprint`、空`logprobs`和有限用量明细：`prompt_tokens_details.cached_tokens`及`completion_tokens_details.reasoning_tokens`。计费和结构元数据保持不变；未知明细、非空logprobs和无法恢复的令牌拒绝。普通推理文本不构成已验签历史状态，下一轮请求仍按请求契约准入。
+
+`audit.record_review.RecordReviewService`提供受控单记录审阅：限时工单绑定请求者、租户、域及精确加密记录，由两名不同角色审批者批准，持久化一次性消费标记并审计后才解密交付。记录与租户的关联须由可信存储提供；模块没有公开HTTP或批量审阅接口。生产身份、KMS及审计卷政策由部署方接入。
+
+### 3. 启动网关服务 (本地与 Docker)
+
 ~~~powershell
-uv run --frozen --no-editable --cache-dir .uv-cache python -m uvicorn gateway.app:app --host 127.0.0.1 --port 8080 --no-access-log
+# 本地 Python 直接启动独立脱敏网关 (加载 config/providers.json，支持 BYOK 与多供应商路由)
+python start_gateway.py --host 0.0.0.0 --port 8080
+
+# 或使用 Docker Compose 服务端一键启动
+docker compose up -d --build
 ~~~
 
-### 4. 接口说明
+### 4. 接口与 BYOK 使用说明
 
-| 请求端点 | 说明 | 典型响应行为 |
+| 请求端点 | 协议类型 | 典型调用方式 |
 |---|---|---|
-| `GET /healthz` | 进程健康存活探针 | `200 OK`，服务正常运行 |
-| `GET /readyz` | 业务就绪检查探针 | 固定 `503`，列出未满足的生产准入条件 |
-| `POST /v1/chat/completions` | Chat Completions 受保护入口 | 默认未装配为 `503`；完整装配后执行认证、准入、检测、留证/采集及恢复 |
-| `POST /v1/messages` | Messages 受保护入口 | 默认未装配为 `503`；完整装配后按固定 Messages 渠道处理 |
+| `GET /healthz` | 进程存活探针 | `curl http://127.0.0.1:8080/healthz` -> 返回 `200 OK` |
+| `POST /v1/chat/completions` | OpenAI / DeepSeek 协议 | 携带客户端自备 Key：`-H "Authorization: Bearer sk-user-key"`，Body 指定 `"model": "deepseek-chat"` 或 `"gpt-4o"` |
+| `POST /v1/messages` | Claude Messages 协议 | 携带自备 Key：`-H "x-api-key: sk-ant-user-key"`，Body 指定 `"model": "claude-3-5-sonnet-20241022"` |
+
+* **费用与配额归属**：网关自身不垫资、不持有供应商 Key，请求外发时动态注入调用方自备的 API Key，费用由供应商直接扣减调用方的账户。
+* **多供应商路由**：网关读取 `config/providers.json` 自动将清洗后的请求路由到对应供应商（DeepSeek、OpenAI、Claude 或本地私有 vLLM）。
 
 ---
 

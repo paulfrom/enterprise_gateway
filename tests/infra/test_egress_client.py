@@ -136,6 +136,55 @@ class _CountingTransport(httpx.BaseTransport):
 
 
 class BoundUpstreamConfigTests(unittest.TestCase):
+    def test_redirect_with_explicit_zero_port_is_not_treated_as_default(self):
+        for scheme, port in (("https", 443), ("http", 80)):
+            with self.subTest(scheme=scheme):
+                seen = []
+                def respond(request):
+                    seen.append(request)
+                    return httpx.Response(302, headers={"location":
+                        f"{scheme}://supplier.example:0/v1/landing"})
+                binding = BoundUpstream(channel_id="redirect-port", scheme=scheme,
+                    host="supplier.example", port=port, path_prefix="/v1",
+                    credential=CREDENTIAL, timeout_seconds=5, max_redirects=1,
+                    allowed_addresses=frozenset({LOOPBACK}))
+                with BoundEgressClient(binding, transport=httpx.MockTransport(respond),
+                                       resolver=loopback_resolver) as client:
+                    with self.assertRaises(SafetyError):
+                        client.request("GET", "/v1/start")
+                    self.assertEqual(1, len(seen))
+
+    def test_default_ports_are_valid_origins_and_other_ports_are_blocked(self):
+        for scheme, port in (("https", 443), ("http", 80)):
+            with self.subTest(scheme=scheme):
+                seen = []
+                def respond(request):
+                    seen.append(request)
+                    return httpx.Response(200, content=b"protected-response")
+                binding = BoundUpstream(channel_id="default-port", scheme=scheme,
+                    host="supplier.example", port=port, path_prefix="/v1",
+                    credential=CREDENTIAL, timeout_seconds=5,
+                    allowed_addresses=frozenset({LOOPBACK}))
+                with BoundEgressClient(binding, transport=httpx.MockTransport(respond),
+                                       resolver=loopback_resolver) as client:
+                    self.assertEqual(200, client.request("POST", "/v1/chat/completions").status_code)
+                    response = client.open_stream("POST", "/v1/chat/completions")
+                    self.assertEqual(b"protected-response", response.read())
+                    response.close()
+                    self.assertEqual(2, len(seen))
+                    for wrong_port in (0, 8443):
+                        with self.assertRaises(SafetyError) as rejected:
+                            client._client.get(f"{scheme}://supplier.example:{wrong_port}/v1/chat/completions")
+                        self.assertEqual(SafetyCode.UPSTREAM_BINDING_VIOLATION, rejected.exception.code)
+                        self.assertEqual(2, len(seen))
+
+    def test_binding_diagnostic_repr_keeps_credential_private(self):
+        binding = make_binding(8443)
+        self.assertNotIn(CREDENTIAL, repr(binding))
+        self.assertNotIn(CREDENTIAL, str(binding))
+        self.assertIn(binding.channel_id, repr(binding))
+        self.assertEqual(binding.credential, CREDENTIAL)
+
     def test_valid_config_normalizes_and_exposes_base_url(self):
         binding = BoundUpstream(
             channel_id="ch-1",

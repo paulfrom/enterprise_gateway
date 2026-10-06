@@ -18,9 +18,12 @@ import math
 import time
 from typing import Any, AsyncIterable, AsyncIterator, Callable, Mapping
 
+from pydantic import ValidationError
+
 from infra.errors import SafetyCode, SafetyError
 from infra.strict_json import JsonRejectKind, parse_strict_json
 from masking.mapping import MappingContext
+from masking.restorer import DeepSeekUsage
 from masking.stream_restorer import BranchStreamingRestorer
 from protocol.history_state import ReasoningBlock, ReasoningStateValidator
 from protocol.protocols import CLAUDE_MESSAGES_PROTOCOL, DEEPSEEK_CHAT_PROTOCOL
@@ -67,9 +70,15 @@ def _structural(value: Any) -> None:
 
 
 def _usage(value: Any, claude: bool = False) -> None:
-    fields = {"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"} if claude else {
-        "prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"}
-    _object(value, fields)
+    if not claude:
+        if not isinstance(value, dict):
+            _reject()
+        try:
+            DeepSeekUsage.model_validate(value)
+        except ValidationError:
+            _reject("invalid Chat Completions token usage")
+        return
+    _object(value, {"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"})
     for count in value.values():
         _int(count)
 
@@ -219,7 +228,7 @@ class ProtectedStream:
             if choice.get("logprobs") is not None:
                 _reject("unsupported logprobs")
             delta = _object(choice["delta"], {"role", "content", "reasoning_content", "tool_calls"})
-            if "role" in delta and delta["role"] != "assistant":
+            if "role" in delta and delta["role"] not in ("assistant", None):
                 _reject()
             for field in ("content", "reasoning_content"):
                 if field in delta and delta[field] is not None:

@@ -4,10 +4,10 @@ Uses TestClient and a controlled upstream; this is not a WorkBuddy desktop or
 supplier integration result. NER, encrypted spool, worker and PostgreSQL are real.
 
 Validates the full front-gateway architecture:
-WorkBuddy/Agent -> Enterprise Authenticated Gateway -> Upstream Provider (New API / Direct Provider)
+WorkBuddy/Agent -> Enterprise Authenticated Gateway -> Upstream Direct Provider
 with:
-1. Agent only configured with Gateway address & enterprise credentials;
-   Upstream credentials injected server-side; caller credentials stripped.
+1. Agent configured with Gateway address & client API credentials (BYOK);
+   Credentials forwarded to upstream directly; internal caller context stripped.
 2. Dual-protocol support (/v1/chat/completions for DeepSeek, /v1/messages for Claude).
 3. Zero upstream leaks of sensitive entities (names, phone numbers, companies).
 4. Plaintext preserved and restored for the Agent upon response.

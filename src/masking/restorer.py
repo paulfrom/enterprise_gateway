@@ -5,7 +5,8 @@ non-streaming responses, preserving all protocol structure, metadata, and
 billing fields (such as usage) with exact equality.
 
 Editable positions:
-- DeepSeek Chat Completions: ``choices[i].message.content`` only.
+- DeepSeek Chat Completions: ``choices[i].message.content`` and plain
+  ``choices[i].message.reasoning_content``.
 - Claude Messages: ``content[j].text`` for text blocks only.
 
 Tokens in uneditable positions (such as model, id, role, or usage) fail closed
@@ -61,14 +62,36 @@ def _has_reserved_token(text: str) -> bool:
     return _RESERVED_PREFIX in text or text.endswith(("<<E", "<<EN"))
 
 
+class DeepSeekPromptTokensDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    cached_tokens: Annotated[int, Field(ge=0)]
+
+
+class DeepSeekCompletionTokensDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    reasoning_tokens: Annotated[int, Field(ge=0)]
+
+
 class DeepSeekUsage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     prompt_tokens: Annotated[int, Field(ge=0)]
     completion_tokens: Annotated[int, Field(ge=0)]
     total_tokens: Annotated[int, Field(ge=0)]
-    prompt_cache_hit_tokens: int | None = None
-    prompt_cache_miss_tokens: int | None = None
+    prompt_cache_hit_tokens: Annotated[int, Field(ge=0)] | None = None
+    prompt_cache_miss_tokens: Annotated[int, Field(ge=0)] | None = None
+    prompt_tokens_details: DeepSeekPromptTokensDetails | None = None
+    completion_tokens_details: DeepSeekCompletionTokensDetails | None = None
+
+    @field_validator("prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+                     "prompt_tokens_details", "completion_tokens_details", mode="before")
+    @classmethod
+    def _present_details_are_objects(cls, value):
+        if value is None:
+            raise ValueError("token usage fields require their typed values when present")
+        return value
 
 
 class DeepSeekResponseMessage(BaseModel):
@@ -76,6 +99,7 @@ class DeepSeekResponseMessage(BaseModel):
 
     role: Literal["assistant"]
     content: str | None = None
+    reasoning_content: str | None = None
     tool_calls: list[DeepSeekToolCall] | None = None
 
 
@@ -85,6 +109,7 @@ class DeepSeekChoice(BaseModel):
     index: int
     message: DeepSeekResponseMessage
     finish_reason: Literal["stop", "length", "content_filter", 'tool_calls'] | None = None
+    logprobs: None = None
 
 
 class DeepSeekChatResponse(BaseModel):
@@ -98,6 +123,7 @@ class DeepSeekChatResponse(BaseModel):
     model: str
     choices: Annotated[list[DeepSeekChoice], Field(min_length=1)]
     usage: DeepSeekUsage | None = None
+    system_fingerprint: str | None = None
 
     @field_validator("model")
     @classmethod
@@ -165,6 +191,7 @@ def _assert_no_tokens_in_uneditable(protocol: str, parsed: DeepSeekChatResponse 
             parsed.id,
             parsed.object,
             parsed.model,
+            parsed.system_fingerprint,
         ]
         for c in parsed.choices:
             uneditable_strings.append(c.message.role)
@@ -201,7 +228,7 @@ def restore_response(
     """Restore mapped tokens in editable positions of an upstream non-streaming response.
 
     Only editable positions are modified:
-    - DeepSeek: ``choices[i].message.content``
+    - DeepSeek: ``choices[i].message.content`` and plain ``reasoning_content``
     - Claude: ``content[j].text``
 
     All other fields, especially ``usage``, are checked for exact value equality.
@@ -228,7 +255,9 @@ def restore_response(
     elif isinstance(raw_response, dict):
         payload = raw_response
     elif isinstance(raw_response, model_cls):
-        payload = raw_response.model_dump()
+        # Preserve wire field presence: absent optional details are not supplied
+        # as explicit nulls to a contract that requires typed values when present.
+        payload = raw_response.model_dump(exclude_unset=True, warnings=False)
     else:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
 
@@ -253,8 +282,10 @@ def restore_response(
 
     if isinstance(parsed_input, DeepSeekChatResponse):
         for idx, choice in enumerate(parsed_input.choices):
-            if choice.message.content is not None:
-                restored_payload["choices"][idx]["message"]["content"] = context.restore(choice.message.content)
+            for field in ("content", "reasoning_content"):
+                value = getattr(choice.message, field)
+                if value is not None:
+                    restored_payload["choices"][idx]["message"][field] = context.restore(value)
             buffer = BoundedToolCallBuffer()
             for j, call in enumerate(choice.message.tool_calls or []):
                 if _has_reserved_token(call.id) or _has_reserved_token(call.function.name):
@@ -302,6 +333,7 @@ def restore_response(
             or parsed_input.object != restored_result.object
             or parsed_input.created != restored_result.created
             or parsed_input.model != restored_result.model
+            or parsed_input.system_fingerprint != restored_result.system_fingerprint
             or len(parsed_input.choices) != len(restored_result.choices)
         ):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "metadata mutated")
@@ -310,6 +342,7 @@ def restore_response(
                 orig_c.index != rest_c.index
                 or orig_c.finish_reason != rest_c.finish_reason
                 or orig_c.message.role != rest_c.message.role
+                or orig_c.logprobs != rest_c.logprobs
             ):
                 raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "choice metadata mutated")
     elif isinstance(parsed_input, ClaudeMessagesResponse) and isinstance(restored_result, ClaudeMessagesResponse):

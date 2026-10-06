@@ -79,7 +79,9 @@ def create_app(
     deepseek_pipeline: object = None,
     claude_pipeline: object = None,
     pipeline: object = None,
+    router: object = None,
     enterprise_credentials: dict[str, TrustedIdentity] | None = None,
+    allow_byok: bool = False,
     hmac_key: bytes | None = None,
 ) -> FastAPI:
     settings = settings or ReviewSettings()
@@ -89,7 +91,11 @@ def create_app(
     app.state.deepseek_pipeline = deepseek_pipeline
     app.state.claude_pipeline = claude_pipeline
     app.state.pipeline = pipeline
-    app.state.authenticator = EnterpriseAuthenticator(enterprise_credentials) if enterprise_credentials else None
+    app.state.router = router
+    if enterprise_credentials or allow_byok:
+        app.state.authenticator = EnterpriseAuthenticator(enterprise_credentials, allow_byok=allow_byok)
+    else:
+        app.state.authenticator = None
     app.state.hmac_key = hmac_key
 
     @app.get("/healthz")
@@ -106,17 +112,20 @@ def create_app(
     @app.post("/v1/chat/completions")
     @app.post("/v1/messages")
     async def model_call(request: Request) -> JSONResponse:
-        p = (
-            app.state.deepseek_pipeline
-            if request.url.path == "/v1/chat/completions"
-            else app.state.claude_pipeline
-        ) or app.state.pipeline
+        has_router = getattr(app.state, "router", None) is not None
+        p = None
+        if not has_router:
+            p = (
+                app.state.deepseek_pipeline
+                if request.url.path == "/v1/chat/completions"
+                else app.state.claude_pipeline
+            ) or app.state.pipeline
 
-        if p is None:
-            return JSONResponse(status_code=503, content={"error": {
-                "code": "CHANNEL_NOT_ADMITTED",
-                "message": "受保护渠道尚未通过准入验证，请求未外发。",
-            }})
+            if p is None:
+                return JSONResponse(status_code=503, content={"error": {
+                    "code": "CHANNEL_NOT_ADMITTED",
+                    "message": "受保护渠道尚未通过准入验证，请求未外发。",
+                }})
 
         headers = dict(request.headers)
         if app.state.authenticator is None:
@@ -129,25 +138,40 @@ def create_app(
         cancel = threading.Event()
         context = None
         try:
-            deadline_at = time.monotonic()+p.request_timeout
+            req_timeout = p.request_timeout if p is not None else 180.0
+            deadline_at = time.monotonic() + req_timeout
             identity = app.state.authenticator.authenticate(headers)
-            if p.path != request.url.path:
-                raise SafetyError(SafetyCode.UNSUPPORTED_PROTOCOL,'endpoint binding')
-            if sum(name.lower()==b'authorization' for name,_ in request.scope['headers']) != 1:
-                raise SafetyError(SafetyCode.INVALID_IDENTITY,'ambiguous credential')
+            auth_count = sum(name.lower() == b'authorization' for name, _ in request.scope['headers'])
+            x_api_count = sum(name.lower() == b'x-api-key' for name, _ in request.scope['headers'])
+            if auth_count + x_api_count != 1:
+                raise SafetyError(SafetyCode.INVALID_IDENTITY, 'ambiguous credential')
             if key is None:
                 raise SafetyError(SafetyCode.INVALID_HMAC_KEY)
+            
+            body_limit = p.body_limit if p is not None else 10485760 # 10MB default
             raw = bytearray()
             incoming = request.stream().__aiter__()
             while True:
-                remaining=deadline_at-time.monotonic()
+                remaining = deadline_at - time.monotonic()
                 if remaining <= 0: raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
-                try: chunk=await asyncio.wait_for(anext(incoming),timeout=remaining)
+                try: chunk = await asyncio.wait_for(anext(incoming), timeout=remaining)
                 except StopAsyncIteration: break
                 except TimeoutError: raise SafetyError(SafetyCode.INFERENCE_TIMEOUT) from None
-                if len(raw)+len(chunk)>p.body_limit: raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED,'body')
+                if len(raw) + len(chunk) > body_limit: raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED, 'body')
                 raw.extend(chunk)
-            raw_body=bytes(raw)
+            raw_body = bytes(raw)
+
+            if has_router:
+                import json
+                try:
+                    payload = json.loads(raw_body.decode('utf-8'))
+                    model_id = payload.get('model', '')
+                except Exception:
+                    raise SafetyError(SafetyCode.MALFORMED_JSON, 'model extraction')
+                p = app.state.router.get_pipeline(model_id)
+
+            if p.path != request.url.path:
+                raise SafetyError(SafetyCode.UNSUPPORTED_PROTOCOL, 'endpoint binding')
             context = MappingContext(p.domain, 'v1', key)
             context.__enter__()
             work = asyncio.create_task(asyncio.to_thread(p.process_request,

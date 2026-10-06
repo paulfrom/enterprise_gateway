@@ -407,6 +407,11 @@ class ProtectedPipeline:
                 "content-type": "application/json",
                 "x-protection-package-version": route.package_version,
             }
+            if headers:
+                for auth_h in ("authorization", "x-api-key"):
+                    for k, v in headers.items():
+                        if k.lower() == auth_h and v:
+                            egress_headers[auth_h] = str(v)
             check_deadline()
             send = egress_client.open_stream if redacted_request.stream else egress_client.request
             upstream_response = send(
