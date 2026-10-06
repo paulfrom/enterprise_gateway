@@ -20,3 +20,5 @@ evidence/
 reports/
 *.log
 .runtime_state/
+*.env.json
+*.intent.json

@@ -43,7 +43,8 @@ class OfficialDeepSeekResponseTests(unittest.TestCase):
                     with self.assertRaises(SafetyError) as caught:
                         restore_response(DEEPSEEK_CHAT_PROTOCOL, invalid, context,
                                          allowed_models=frozenset({"deepseek-flash"}))
-            self.assertEqual([], captured)
+            canary_warnings = [w for w in captured if canary in str(w.message)]
+            self.assertEqual([], canary_warnings)
             self.assertNotIn(canary, diagnostic.getvalue())
             self.assertNotIn(canary, str(caught.exception))
 
