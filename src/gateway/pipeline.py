@@ -509,7 +509,7 @@ class ProtectedPipeline:
                 route.protocol,
                 upstream_response.content,
                 context,
-                allowed_models=frozenset({provider_model}),
+                allowed_models=frozenset(route.allowed_models | {provider_model}),
                 allowed_tools=self.tool_schemas(redacted_request, protocol=route.protocol),
                 state_validator=history_adapter.validator if history_adapter is not None else None,
             )

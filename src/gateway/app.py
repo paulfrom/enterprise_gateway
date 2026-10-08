@@ -281,7 +281,7 @@ def create_app(
             if res.upstream_stream is not None:
                 from gateway.streaming import ProtectedStream, iter_protected_stream
                 client_model=res.client_model
-                stream = ProtectedStream(protocol=res.protocol,expected_model=res.redacted_request.model,client_model=client_model,context=context,allowed_tools=res.allowed_tools,deadline_at=deadline_at,state_validator=res.state_validator,state_version=res.state_version)
+                stream = ProtectedStream(protocol=res.protocol,expected_model=res.redacted_request.model,client_model=client_model,context=context,allowed_tools=res.allowed_tools,deadline_at=deadline_at,state_validator=res.state_validator,state_version=res.state_version,allowed_models=(frozenset(p.allowed_models) | {res.redacted_request.model}) if p is not None else None)
                 upstream = res.upstream_stream
                 iterator = upstream.iter_bytes()
                 marker = object()

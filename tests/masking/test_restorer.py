@@ -41,12 +41,20 @@ class ResponseRestorerTests(unittest.TestCase):
             self.assertEqual('fixture-signature',valid.content[0].signature)
             self.assertEqual('full-package',valid.content[0].metadata['version'])
             token=context.token_for('ORG','PRIVATE_FIXTURE')
-            for body in (response(signature='bad'),response(signature=''),response(thinking=token),
+            for body in (response(signature='bad'),response(thinking=token),
                          response(thinking='<<E'),response(metadata={'receipt':'forged'})):
                 with self.subTest(body=body):
                     with self.assertRaises(SafetyError):
                         restore_response(CLAUDE_MESSAGES_PROTOCOL,body,context,state_validator=validator)
-            with self.assertRaises(SafetyError):restore_response(CLAUDE_MESSAGES_PROTOCOL,response(),context)
+            # Unsigned aggregator reasoning is admitted as editable text (no proof, no receipt).
+            unsigned=restore_response(CLAUDE_MESSAGES_PROTOCOL,response(signature='',thinking=token),context,state_validator=validator)
+            self.assertEqual('PRIVATE_FIXTURE',unsigned.content[0].thinking)
+            self.assertEqual('',unsigned.content[0].signature)
+            self.assertEqual({},unsigned.content[0].metadata)
+            unverified=restore_response(CLAUDE_MESSAGES_PROTOCOL,response(signature='provider-signature',thinking=token),context)
+            self.assertEqual('PRIVATE_FIXTURE',unverified.content[0].thinking)
+            self.assertEqual('provider-signature',unverified.content[0].signature)
+            self.assertEqual({},unverified.content[0].metadata)
 
     def setUp(self) -> None:
         self.context = MappingContext(

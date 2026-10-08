@@ -16,7 +16,7 @@ with ``CONTRACT_VIOLATION``. Unknown or malformed tokens fail closed with
 
 from __future__ import annotations
 
-from typing import Annotated, Callable, ClassVar, Literal, NoReturn, TypeVar
+from typing import Annotated, Any, Callable, ClassVar, Literal, NoReturn, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -65,13 +65,44 @@ def _has_reserved_token(text: str) -> bool:
 class DeepSeekPromptTokensDetails(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    cached_tokens: Annotated[int, Field(ge=0)]
+    cached_tokens: Annotated[int, Field(ge=0)] | None = None
+    text_tokens: Annotated[int, Field(ge=0)] | None = None
+    audio_tokens: Annotated[int, Field(ge=0)] | None = None
+    image_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_write_tokens: Annotated[int, Field(ge=0)] | None = None
 
 
 class DeepSeekCompletionTokensDetails(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    reasoning_tokens: Annotated[int, Field(ge=0)]
+    reasoning_tokens: Annotated[int, Field(ge=0)] | None = None
+    text_tokens: Annotated[int, Field(ge=0)] | None = None
+    audio_tokens: Annotated[int, Field(ge=0)] | None = None
+    image_tokens: Annotated[int, Field(ge=0)] | None = None
+
+
+class DeepSeekBillingClaudeUsage(BaseModel):
+    """Aggregator-specific Claude billing block nested inside a usage object."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    cache_creation_input_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_read_input_tokens: Annotated[int, Field(ge=0)] | None = None
+    claude_cache_creation_1_h_tokens: Annotated[int, Field(ge=0)] | None = None
+    claude_cache_creation_5_m_tokens: Annotated[int, Field(ge=0)] | None = None
+    input_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens: Annotated[int, Field(ge=0)] | None = None
+    server_tool_use: dict[str, Any] | None = None
+
+
+class DeepSeekBillingUsage(BaseModel):
+    """Aggregator billing envelope (e.g. New API usage_source / semantic)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source: str | None = None
+    semantic: str | None = None
+    claude_usage: DeepSeekBillingClaudeUsage | None = None
 
 
 class DeepSeekUsage(BaseModel):
@@ -84,6 +115,15 @@ class DeepSeekUsage(BaseModel):
     prompt_cache_miss_tokens: Annotated[int, Field(ge=0)] | None = None
     prompt_tokens_details: DeepSeekPromptTokensDetails | None = None
     completion_tokens_details: DeepSeekCompletionTokensDetails | None = None
+    total_characters: Annotated[int, Field(ge=0)] | None = None
+    input_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens: Annotated[int, Field(ge=0)] | None = None
+    input_tokens_details: dict[str, Any] | None = None
+    usage_semantic: str | None = None
+    usage_source: str | None = None
+    billing_usage: DeepSeekBillingUsage | None = None
+    claude_cache_creation_1_h_tokens: Annotated[int, Field(ge=0)] | None = None
+    claude_cache_creation_5_m_tokens: Annotated[int, Field(ge=0)] | None = None
 
     @field_validator("prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
                      "prompt_tokens_details", "completion_tokens_details", mode="before")
@@ -94,6 +134,18 @@ class DeepSeekUsage(BaseModel):
         return value
 
 
+class DeepSeekReasoningDetail(BaseModel):
+    """Structured reasoning fragment emitted by some suppliers (e.g. MiniMax)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    type: str
+    id: str | None = None
+    format: str | None = None
+    index: Annotated[int, Field(ge=0)] | None = None
+    text: str | None = None
+
+
 class DeepSeekResponseMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -101,6 +153,9 @@ class DeepSeekResponseMessage(BaseModel):
     content: str | None = None
     reasoning_content: str | None = None
     tool_calls: list[DeepSeekToolCall] | None = None
+    name: str | None = None
+    audio_content: str | None = None
+    reasoning_details: list[DeepSeekReasoningDetail] | None = None
 
 
 class DeepSeekChoice(BaseModel):
@@ -110,6 +165,15 @@ class DeepSeekChoice(BaseModel):
     message: DeepSeekResponseMessage
     finish_reason: Literal["stop", "length", "content_filter", 'tool_calls'] | None = None
     logprobs: None = None
+
+
+class DeepSeekBaseResp(BaseModel):
+    """Aggregator status envelope (e.g. MiniMax) carried beside the reply."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status_code: int | None = None
+    status_msg: str | None = None
 
 
 class DeepSeekChatResponse(BaseModel):
@@ -124,6 +188,13 @@ class DeepSeekChatResponse(BaseModel):
     choices: Annotated[list[DeepSeekChoice], Field(min_length=1)]
     usage: DeepSeekUsage | None = None
     system_fingerprint: str | None = None
+    base_resp: DeepSeekBaseResp | None = None
+    input_sensitive: bool | None = None
+    output_sensitive: bool | None = None
+    input_sensitive_type: Annotated[int, Field(ge=0)] | None = None
+    output_sensitive_type: Annotated[int, Field(ge=0)] | None = None
+    output_sensitive_int: Annotated[int, Field(ge=0)] | None = None
+    service_tier: str | None = None
 
     @field_validator("model")
     @classmethod
@@ -133,11 +204,34 @@ class DeepSeekChatResponse(BaseModel):
         return value
 
 
+class ClaudeOutputTokensDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    thinking_tokens: Annotated[int, Field(ge=0)] | None = None
+
+
+class ClaudeCacheCreation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    ephemeral_5m_input_tokens: Annotated[int, Field(ge=0)] | None = None
+    ephemeral_1h_input_tokens: Annotated[int, Field(ge=0)] | None = None
+
+
 class ClaudeUsage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     input_tokens: Annotated[int, Field(ge=0)]
     output_tokens: Annotated[int, Field(ge=0)]
+    cache_creation_input_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_read_input_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_creation: ClaudeCacheCreation | None = None
+    service_tier: str | None = None
+    inference_geo: str | None = None
+    prompt_tokens: Annotated[int, Field(ge=0)] | None = None
+    cached_tokens: Annotated[int, Field(ge=0)] | None = None
+    completion_tokens: Annotated[int, Field(ge=0)] | None = None
+    total_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens_details: ClaudeOutputTokensDetails | None = None
 
 
 class ClaudeTextBlockResponse(BaseModel):
@@ -160,6 +254,8 @@ class ClaudeMessagesResponse(BaseModel):
     stop_reason: Literal["end_turn", "max_tokens", "stop_sequence", 'tool_use'] | None = None
     stop_sequence: str | None = None
     usage: ClaudeUsage | None = None
+    base_resp: DeepSeekBaseResp | None = None
+    service_tier: str | None = None
 
     @field_validator("model")
     @classmethod
@@ -170,11 +266,11 @@ class ClaudeMessagesResponse(BaseModel):
 
 
 class ClaudeUpstreamThinkingBlock(BaseModel):
-    """Supplier wire state has a supplier signature and no gateway receipt."""
+    """Supplier wire state; signature is absent for aggregator (unsigned) reasoning."""
     model_config = ConfigDict(extra='forbid',frozen=True,strict=True)
     type: Literal['thinking']
     thinking: str
-    signature: str = Field(min_length=1)
+    signature: str = ""
 
 
 class ClaudeUpstreamMessagesResponse(ClaudeMessagesResponse):
@@ -184,7 +280,8 @@ class ClaudeUpstreamMessagesResponse(ClaudeMessagesResponse):
 _ResponseModelT = TypeVar("_ResponseModelT", bound=BaseModel)
 
 
-def _assert_no_tokens_in_uneditable(protocol: str, parsed: DeepSeekChatResponse | ClaudeMessagesResponse) -> None:
+def _assert_no_tokens_in_uneditable(protocol: str, parsed: DeepSeekChatResponse | ClaudeMessagesResponse,
+                                    verify_reasoning: bool = False) -> None:
     """Fail closed if token literals appear anywhere outside editable text fields."""
     if isinstance(parsed, DeepSeekChatResponse):
         uneditable_strings: list[str | None] = [
@@ -196,6 +293,21 @@ def _assert_no_tokens_in_uneditable(protocol: str, parsed: DeepSeekChatResponse 
         for c in parsed.choices:
             uneditable_strings.append(c.message.role)
             uneditable_strings.append(c.finish_reason)
+            uneditable_strings.append(c.message.name)
+            uneditable_strings.append(c.message.audio_content)
+            for detail in c.message.reasoning_details or []:
+                uneditable_strings.append(detail.type)
+                uneditable_strings.append(detail.id)
+                uneditable_strings.append(detail.format)
+        if parsed.base_resp is not None:
+            uneditable_strings.append(parsed.base_resp.status_msg)
+        uneditable_strings.append(parsed.service_tier)
+        if parsed.usage is not None:
+            uneditable_strings.append(parsed.usage.usage_semantic)
+            uneditable_strings.append(parsed.usage.usage_source)
+            if parsed.usage.billing_usage is not None:
+                uneditable_strings.append(parsed.usage.billing_usage.source)
+                uneditable_strings.append(parsed.usage.billing_usage.semantic)
     elif isinstance(parsed, ClaudeMessagesResponse):
         uneditable_strings = [
             parsed.id,
@@ -208,7 +320,20 @@ def _assert_no_tokens_in_uneditable(protocol: str, parsed: DeepSeekChatResponse 
         for block in parsed.content:
             uneditable_strings.append(block.type)
             if isinstance(block,ClaudeUpstreamThinkingBlock):
-                uneditable_strings.extend((block.thinking,block.signature))
+                uneditable_strings.append(block.signature)
+                if verify_reasoning and block.signature:
+                    # Native (verifier-backed) reasoning is proof-bearing: never rewritten.
+                    uneditable_strings.append(block.thinking)
+        uneditable_strings.append(parsed.base_resp.status_msg if parsed.base_resp is not None else None)
+        uneditable_strings.append(parsed.service_tier)
+        if parsed.usage is not None:
+            uneditable_strings.append(parsed.usage.service_tier)
+            uneditable_strings.append(parsed.usage.inference_geo)
+        uneditable_strings.append(parsed.base_resp.status_msg if parsed.base_resp is not None else None)
+        uneditable_strings.append(parsed.service_tier)
+        if parsed.usage is not None:
+            uneditable_strings.append(parsed.usage.service_tier)
+            uneditable_strings.append(parsed.usage.inference_geo)
     else:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
 
@@ -275,7 +400,7 @@ def restore_response(
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "model not allowed")
 
     # 3. Guard: fail closed if any token appears in uneditable fields
-    _assert_no_tokens_in_uneditable(protocol, parsed_input)
+    _assert_no_tokens_in_uneditable(protocol, parsed_input, verify_reasoning=state_validator is not None)
 
     # 4. Perform in-memory exact restoration on editable positions
     restored_payload = parsed_input.model_dump(exclude_unset=True)
@@ -286,6 +411,9 @@ def restore_response(
                 value = getattr(choice.message, field)
                 if value is not None:
                     restored_payload["choices"][idx]["message"][field] = context.restore(value)
+            for detail_index, detail in enumerate(choice.message.reasoning_details or []):
+                if detail.text is not None:
+                    restored_payload["choices"][idx]["message"]["reasoning_details"][detail_index]["text"] = context.restore(detail.text)
             buffer = BoundedToolCallBuffer()
             for j, call in enumerate(choice.message.tool_calls or []):
                 if _has_reserved_token(call.id) or _has_reserved_token(call.function.name):
@@ -307,10 +435,18 @@ def restore_response(
                 buffer.feed_argument_delta(block.id,json.dumps(block.input,ensure_ascii=False))
                 restored_payload['content'][idx]['input'] = buffer.finalize_and_verify(block.id,context,allowed_tools=allowed_tools or {})
             else:
-                if state_validator is None: raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'unverified reasoning state')
-                from protocol.history_state import ReasoningBlock
-                verified = state_validator.admit_upstream_block(ReasoningBlock('thinking',block.thinking,block.signature,{}))
-                restored_payload['content'][idx]['metadata'] = dict(verified.metadata)
+                if state_validator is not None and block.signature:
+                    from protocol.history_state import ReasoningBlock
+                    verified = state_validator.admit_upstream_block(ReasoningBlock('thinking',block.thinking,block.signature,{}))
+                    restored_payload['content'][idx]['metadata'] = dict(verified.metadata)
+                else:
+                    # No configured provider verifier (or unsigned): editable reasoning text.
+                    restored_payload['content'][idx] = {
+                        'type': 'thinking',
+                        'thinking': context.restore(block.thinking),
+                        'signature': block.signature,
+                        'metadata': {},
+                    }
 
     # 5. Validate restored result against protocol contract
     try:

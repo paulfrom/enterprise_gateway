@@ -78,9 +78,24 @@ def _usage(value: Any, claude: bool = False) -> None:
         except ValidationError:
             _reject("invalid Chat Completions token usage")
         return
-    _object(value, {"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"})
-    for count in value.values():
-        _int(count)
+    if not isinstance(value, dict):
+        _reject()
+    _object(value, {"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+                    "cache_creation", "service_tier", "inference_geo", "prompt_tokens", "cached_tokens",
+                    "completion_tokens", "total_tokens", "output_tokens_details"})
+    for key, item in value.items():
+        if key in ("service_tier", "inference_geo"):
+            _string(item)
+        elif key in ("output_tokens_details", "cache_creation"):
+            if not isinstance(item, dict):
+                _reject()
+            allowed = ({"thinking_tokens"} if key == "output_tokens_details"
+                       else {"ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"})
+            _object(item, allowed)
+            for count in item.values():
+                _int(count)
+        else:
+            _int(item)
 
 
 def _frame(payload: dict, event: str | None = None) -> bytes:
@@ -92,12 +107,16 @@ class ProtectedStream:
     def __init__(self, protocol: str, expected_model: str, context: MappingContext,
                  allowed_tools: Mapping[str, dict | type] | None = None, deadline_at: float | None = None,
                  state_validator: ReasoningStateValidator | None = None, state_version: str | None = None,
-                 max_stream_bytes: int = 8 * 1024 * 1024, client_model: str | None = None) -> None:
+                 max_stream_bytes: int = 8 * 1024 * 1024, client_model: str | None = None,
+                 allowed_models: frozenset[str] | None = None) -> None:
         if protocol not in (DEEPSEEK_CHAT_PROTOCOL, CLAUDE_MESSAGES_PROTOCOL) or not isinstance(expected_model, str) or not expected_model or type(max_stream_bytes) is not int or max_stream_bytes <= 0:
             _reject()
         if client_model is not None and (not isinstance(client_model, str) or not client_model):
             _reject()
-        _structural([expected_model, client_model])
+        admitted = frozenset({expected_model}) if allowed_models is None else frozenset(allowed_models) | {expected_model}
+        if not admitted or any(not isinstance(model, str) or not model for model in admitted):
+            _reject()
+        _structural(sorted(admitted) + [client_model])
         if deadline_at is not None and (not isinstance(deadline_at, (float, int)) or not math.isfinite(deadline_at)):
             _reject("invalid stream deadline")
         context.require_active()
@@ -105,6 +124,7 @@ class ProtectedStream:
             _reject("state validator binding mismatch")
         self.protocol = protocol
         self.expected_model = expected_model
+        self.allowed_models = admitted
         self.client_model = client_model or expected_model
         self.context = context
         self.allowed_tools = dict(allowed_tools or {})
@@ -122,6 +142,7 @@ class ProtectedStream:
         self._identity: tuple | None = None
         self._choices: dict[int, bool] = {}
         self._tool_calls: dict[tuple[int, int], dict] = {}
+        self._reasoning_detail_keys: set[tuple[int, int]] = set()
         self._message_started = False
         self._message_delta = False
         self._blocks: dict[int, dict] = {}
@@ -196,13 +217,15 @@ class ProtectedStream:
         return self._claude(payload, event.event)
 
     def _chat(self, value: Any) -> list[bytes]:
-        data = deepcopy(_object(value, {"id", "object", "created", "model", "choices", "usage", "system_fingerprint"},
+        data = deepcopy(_object(value, {"id", "object", "created", "model", "choices", "usage", "system_fingerprint",
+                                        "base_resp", "input_sensitive", "output_sensitive", "input_sensitive_type",
+                                        "output_sensitive_type", "output_sensitive_int", "service_tier"},
                                 {"id", "object", "created", "model", "choices"}))
-        if data["object"] != "chat.completion.chunk" or data["model"] != self.expected_model:
+        if data["object"] != "chat.completion.chunk" or data["model"] not in self.allowed_models:
             _reject("unexpected stream model or object")
         _string(data["id"])
         _int(data["created"])
-        identity = (data["id"], data["created"], data["model"])
+        identity = (data["id"], data["model"])
         if self._identity is not None and identity != self._identity:
             _reject("stream identity changed")
         self._identity = identity
@@ -218,7 +241,9 @@ class ProtectedStream:
             _reject("premature usage chunk")
         seen = set()
         for choice in data["choices"]:
-            _object(choice, {"index", "delta", "finish_reason", "logprobs"}, {"index", "delta", "finish_reason"})
+            _object(choice, {"index", "delta", "finish_reason", "logprobs", "usage"}, {"index", "delta", "finish_reason"})
+            if choice.get("usage") is not None:
+                _usage(choice["usage"])
             index = choice["index"]
             _int(index)
             if index > 127 or index in seen or self._choices.get(index) is True:
@@ -227,9 +252,31 @@ class ProtectedStream:
             self._choices.setdefault(index, False)
             if choice.get("logprobs") is not None:
                 _reject("unsupported logprobs")
-            delta = _object(choice["delta"], {"role", "content", "reasoning_content", "tool_calls"})
+            delta = _object(choice["delta"], {"role", "content", "reasoning_content", "tool_calls",
+                                              "name", "audio_content", "reasoning_details"})
             if "role" in delta and delta["role"] not in ("assistant", None):
                 _reject()
+            for extra in ("name", "audio_content"):
+                if extra in delta and delta[extra] is not None:
+                    _string(delta[extra])
+            details = delta.get("reasoning_details")
+            if details is not None:
+                if not isinstance(details, list) or len(details) > 128:
+                    _reject()
+                for detail_index, detail in enumerate(details):
+                    entry = _object(detail, {"type", "id", "format", "index", "text"}, {"type"})
+                    if not isinstance(entry["type"], str):
+                        _reject()
+                    for key in ("id", "format"):
+                        if key in entry and entry[key] is not None:
+                            _string(entry[key])
+                    if entry.get("index") is not None:
+                        _int(entry["index"])
+                    if entry.get("text") is not None:
+                        _string(entry["text"])
+                        entry["text"] = self.restorer.feed(
+                            f"chat:{index}:reasoning_details:{detail_index}:text", entry["text"])
+                        self._reasoning_detail_keys.add((index, detail_index))
             for field in ("content", "reasoning_content"):
                 if field in delta and delta[field] is not None:
                     _string(delta[field])
@@ -270,6 +317,17 @@ class ProtectedStream:
                     tail = self.restorer.finalize(f"chat:{index}:{field}")
                     if tail:
                         delta[field] = (delta.get(field) or "") + tail
+                for (branch_index, detail_index) in sorted(k for k in self._reasoning_detail_keys if k[0] == index):
+                    tail = self.restorer.finalize(f"chat:{index}:reasoning_details:{detail_index}:text")
+                    if tail:
+                        details_now = delta.get("reasoning_details")
+                        if (isinstance(details_now, list) and detail_index < len(details_now)
+                                and isinstance(details_now[detail_index], dict)
+                                and details_now[detail_index].get("text") is not None):
+                            details_now[detail_index]["text"] = details_now[detail_index]["text"] + tail
+                        else:
+                            _reject("unplaceable reasoning detail tail")
+                    self._reasoning_detail_keys.discard((branch_index, detail_index))
                 branch_tools = [tool for (branch, _), tool in self._tool_calls.items() if branch == index]
                 if branch_tools and finish != "tool_calls" or finish == "tool_calls" and not branch_tools:
                     _reject("tool terminal mismatch")
@@ -298,10 +356,10 @@ class ProtectedStream:
             _object(data, {"type", "message"}, {"type", "message"})
             if self._message_started:
                 _reject()
-            message = _object(data["message"], {"id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"},
+            message = _object(data["message"], {"id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage", "service_tier"},
                               {"id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"})
             _string(message["id"])
-            if message["type"] != "message" or message["role"] != "assistant" or message["model"] != self.expected_model or message["content"] != [] or message["stop_reason"] is not None or message["stop_sequence"] is not None:
+            if message["type"] != "message" or message["role"] != "assistant" or message["model"] not in self.allowed_models or message["content"] != [] or message["stop_reason"] is not None or message["stop_sequence"] is not None:
                 _reject("invalid message start")
             _usage(message["usage"], True)
             _structural(message)
@@ -331,8 +389,6 @@ class ProtectedStream:
                 self._had_tools = True
             elif block_kind == "thinking":
                 _object(block, {"type", "thinking", "signature"}, {"type", "thinking"})
-                if self.state_validator is None:
-                    _reject("provider state verifier unavailable")
                 _string(block["thinking"])
                 if block.get("signature") is not None:
                     _string(block["signature"])
@@ -385,10 +441,18 @@ class ProtectedStream:
                 output.append(_frame(state["start"], "content_block_start"))
                 output.append(_frame({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": json.dumps(restored, ensure_ascii=False, separators=(",", ":"))}}, "content_block_delta"))
             else:
-                _structural(state["thinking"])
-                receipt = self.state_validator.admit_upstream_block(ReasoningBlock("thinking", state["thinking"], state["signature"], {}))
-                self.state_receipts[index] = receipt
-                state['start']['content_block']['metadata']=dict(receipt.metadata)
+                if self.state_validator is not None and state["signature"]:
+                    _structural(state["thinking"])
+                    receipt = self.state_validator.admit_upstream_block(ReasoningBlock("thinking", state["thinking"], state["signature"], {}))
+                    self.state_receipts[index] = receipt
+                    state['start']['content_block']['metadata']=dict(receipt.metadata)
+                else:
+                    # No configured verifier (or unsigned): editable reasoning text.
+                    restored = self.context.restore(state["thinking"])
+                    state['start']['content_block']['thinking'] = ""
+                    state['start']['content_block']['metadata'] = {}
+                    state['events'] = [{"type": "content_block_delta", "index": index,
+                                        "delta": {"type": "thinking_delta", "thinking": restored}}] if restored else []
                 output.append(_frame(state["start"], "content_block_start"))
                 output.extend(_frame(item, "content_block_delta") for item in state["events"])
             del self._blocks[index]
@@ -396,15 +460,16 @@ class ProtectedStream:
             output.append(_frame(data, kind))
             return output
         if kind == "message_delta":
-            _object(data, {"type", "delta", "usage"}, {"type", "delta", "usage"})
-            delta = _object(data["delta"], {"stop_reason", "stop_sequence"}, {"stop_reason", "stop_sequence"})
+            _object(data, {"type", "delta", "usage"}, {"type", "delta"})
+            delta = _object(data["delta"], {"stop_reason", "stop_sequence"}, {"stop_reason"})
             if self._blocks or self._message_delta or not self._closed_blocks or delta["stop_reason"] not in ("end_turn", "max_tokens", "stop_sequence", "tool_use"):
                 _reject("invalid message termination")
             if self._had_tools != (delta["stop_reason"] == "tool_use"):
                 _reject("tool terminal mismatch")
-            if delta["stop_sequence"] is not None:
+            if delta.get("stop_sequence") is not None:
                 _string(delta["stop_sequence"])
-            _usage(data["usage"], True)
+            if data.get("usage") is not None:
+                _usage(data["usage"], True)
             _structural(data)
             self._message_delta = True
             return [_frame(data, kind)]

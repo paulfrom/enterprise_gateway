@@ -68,6 +68,67 @@ class OfficialDeepSeekStreamTests(unittest.TestCase):
                 stream.feed(wire(frame({"reasoning_content": "<<ENT_unknown>>"}, "stop")))
             self.assertEqual([], stream._pending_frames)
 
+    def test_terminal_choice_may_carry_nested_usage(self):
+        with MappingContext("corp.synthetic", "v1", KEY) as context:
+            stream = ProtectedStream(DEEPSEEK_CHAT_PROTOCOL, "deepseek-flash", context)
+            first = frame({"role": "assistant", "content": "public"})
+            terminal = frame({}, "stop")
+            # Some aggregators nest the terminal usage inside the choice object.
+            terminal["choices"][0]["usage"] = usage()
+            for chunk in (first, terminal):
+                self.assertEqual([], stream.feed(wire(chunk)))
+            stream.feed(b"data: [DONE]\n\n")
+            decoded = decode_frames(stream.finalize())
+            self.assertEqual(usage(), decoded[-1]["choices"][0]["usage"])
+
+    def test_terminal_usage_chunk_may_carry_a_refreshed_created_timestamp(self):
+        with MappingContext("corp.synthetic", "v1", KEY) as context:
+            stream = ProtectedStream(DEEPSEEK_CHAT_PROTOCOL, "deepseek-flash", context)
+            first = frame({"role": "assistant", "content": "public"}, "stop")
+            usage_chunk = frame({}, None, usage())
+            # Aggregator refreshes `created` on the trailing usage-only chunk.
+            usage_chunk["created"] = first["created"] + 5
+            usage_chunk["choices"] = []
+            for chunk in (first, usage_chunk):
+                self.assertEqual([], stream.feed(wire(chunk)))
+            stream.feed(b"data: [DONE]\n\n")
+            decoded = decode_frames(stream.finalize())
+            self.assertEqual(usage(), decoded[-1]["usage"])
+
+    def test_vendor_metadata_delta_and_usage_admitted_and_details_restored(self):
+        def vendor(chunk):
+            chunk.update({"base_resp": {"status_code": 0, "status_msg": ""},
+                          "service_tier": "standard", "input_sensitive": False,
+                          "output_sensitive": False, "input_sensitive_type": 0,
+                          "output_sensitive_type": 0, "output_sensitive_int": 0})
+            return chunk
+
+        with MappingContext("corp.synthetic", "v1", KEY) as context:
+            token = context.token_for("ORG", "合成甲公司")
+            counts = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
+                      "total_characters": 0, "prompt_tokens_details": {"cached_tokens": 0},
+                      "completion_tokens_details": {"reasoning_tokens": 1}}
+            source = [
+                vendor(frame({"role": "assistant", "name": "MiniMax AI", "audio_content": "",
+                              "reasoning_content": token,
+                              "reasoning_details": [{"type": "reasoning.text", "id": "r1",
+                                                     "format": "MiniMax-response-v1", "index": 0,
+                                                     "text": token}]})),
+                vendor(frame({"content": token}, "stop", counts)),
+            ]
+            stream = ProtectedStream(DEEPSEEK_CHAT_PROTOCOL, "deepseek-flash", context)
+            for byte in b"".join(wire(chunk) for chunk in source) + b"data: [DONE]\n\n":
+                self.assertEqual([], stream.feed(bytes([byte])))
+            decoded = decode_frames(stream.finalize())
+            reasoning = "".join(v["choices"][0]["delta"].get("reasoning_content", "") for v in decoded)
+            details = "".join(d.get("text", "") for v in decoded
+                              for d in (v["choices"][0]["delta"].get("reasoning_details") or []))
+            self.assertEqual("合成甲公司", reasoning)
+            self.assertEqual("合成甲公司", details)
+            self.assertEqual("合成甲公司", decoded[-1]["choices"][0]["delta"]["content"])
+            self.assertEqual(counts, decoded[-1]["usage"])
+            self.assertTrue(all(v["service_tier"] == "standard" for v in decoded))
+
 
 if __name__ == "__main__":
     unittest.main()

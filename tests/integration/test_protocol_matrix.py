@@ -188,6 +188,35 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('provider-model',response.text)
             self.assertEqual(json.loads(spy.calls[0].content)['model'],'provider-model')
 
+    async def test_response_model_rewritten_to_sibling_admitted_model_is_accepted(self):
+        allowed=frozenset({'deepseek-flash','deepseek-reasoner'})
+        for stream in (False,True):
+            body=self.request(DEEPSEEK_CHAT_PROTOCOL,stream)
+            body['model']='deepseek-reasoner'
+            def handler(req,stream=stream):
+                res=self.response(req,DEEPSEEK_CHAT_PROTOCOL,stream,False)
+                if stream:
+                    rewritten=res.content.decode().replace('"model": "deepseek-reasoner"','"model": "deepseek-flash"')
+                    return httpx.Response(200,headers={'content-type':'text/event-stream'},content=rewritten.encode())
+                payload=json.loads(res.content)
+                payload['model']='deepseek-flash'
+                return httpx.Response(200,json=payload)
+            response,spy=await self.call(DEEPSEEK_CHAT_PROTOCOL,body,handler,allowed_models=allowed)
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertIn('deepseek-reasoner',response.text)
+            self.assertNotIn('deepseek-flash',response.text)
+            self.assertEqual(len(spy.calls),1)
+
+    async def test_response_model_outside_admitted_channel_is_rejected(self):
+        body=self.request(DEEPSEEK_CHAT_PROTOCOL)
+        def handler(req):
+            payload=json.loads(self.response(req,DEEPSEEK_CHAT_PROTOCOL,False,False).content)
+            payload['model']='unadmitted-model'
+            return httpx.Response(200,json=payload)
+        response,spy=await self.call(DEEPSEEK_CHAT_PROTOCOL,body,handler)
+        self.assertEqual(response.status_code,400,response.text)
+        self.assertEqual(len(spy.calls),1)
+
     async def test_tampered_package_and_missing_required_spool_have_zero_egress(self):
         for failure in ('route','spool'):
             spy=UpstreamSpyTransport(lambda _:self.fail('preflight failure may not leave'))

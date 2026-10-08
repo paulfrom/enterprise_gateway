@@ -169,13 +169,47 @@ class StreamEventsTests(unittest.TestCase):
             self.assertEqual([{"query": "公司甲"}], [json.loads(value) for value in args])
             self.assertEqual({"output_tokens": 7}, decoded[-2]["usage"])
 
-    def test_claude_state_without_provider_proof_and_invalid_sequence(self):
-        for frame in (claude("message_stop"), claude("content_block_start", index=0, content_block={"type": "thinking", "thinking": "", "signature": "made-up"}), claude("content_block_delta", index=0, delta={"type": "text_delta", "text": "x"})):
+    def test_claude_invalid_sequence_rejects(self):
+        for frame in (claude("message_stop"), claude("content_block_delta", index=0, delta={"type": "text_delta", "text": "x"})):
             with MappingContext("corp.test", "v1", KEY) as ctx:
                 stream = ProtectedStream(CLAUDE, "synthetic-model", ctx)
                 stream.feed(message_start())
                 with self.assertRaises(SafetyError):
                     stream.feed(frame)
+
+    def test_claude_provider_state_without_verifier_is_editable(self):
+        with MappingContext("corp.test", "v1", KEY) as ctx:
+            token = ctx.token_for("ORG", "合成甲公司")
+            stream = ProtectedStream(CLAUDE, "synthetic-model", ctx)
+            stream.feed(message_start())
+            stream.feed(claude("content_block_start", index=0, content_block={"type": "thinking", "thinking": "", "signature": "made-up"}))
+            stream.feed(claude("content_block_delta", index=0, delta={"type": "thinking_delta", "thinking": token}))
+            frames = stream.feed(claude("content_block_stop", index=0))
+            frames += stream.feed(claude("message_delta", delta={"stop_reason": "end_turn"}, usage={"input_tokens": 11, "output_tokens": 2}))
+            frames += stream.feed(claude("message_stop"))
+            frames += stream.finalize()
+            decoded = decode_frames(frames)
+            thinking = "".join(i.get("delta", {}).get("thinking", "") for i in decoded if i.get("type") == "content_block_delta")
+            self.assertEqual("合成甲公司", thinking)
+
+    def test_unsigned_aggregator_thinking_is_restored_and_released(self):
+        with MappingContext("corp.test", "v1", KEY) as ctx:
+            token = ctx.token_for("ORG", "合成甲公司")
+            stream = ProtectedStream(CLAUDE, "synthetic-model", ctx)
+            stream.feed(message_start())
+            stream.feed(claude("content_block_start", index=0,
+                               content_block={"type": "thinking", "thinking": "", "signature": ""}))
+            stream.feed(claude("content_block_delta", index=0,
+                               delta={"type": "thinking_delta", "thinking": token}))
+            frames = stream.feed(claude("content_block_stop", index=0))
+            frames += stream.feed(claude("message_delta", delta={"stop_reason": "end_turn"},
+                                         usage={"input_tokens": 11, "output_tokens": 2}))
+            frames += stream.feed(claude("message_stop"))
+            frames += stream.finalize()
+            decoded = decode_frames(frames)
+            thinking = "".join(item.get("delta", {}).get("thinking", "")
+                               for item in decoded if item.get("type") == "content_block_delta")
+            self.assertEqual("合成甲公司", thinking)
 
     def test_truncated_token_missing_done_and_event_after_done(self):
         with MappingContext("corp.test", "v1", KEY) as ctx:
