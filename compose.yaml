@@ -3,25 +3,80 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: enterprise-privacy-gateway:latest
-    container_name: enterprise-privacy-gateway
+    image: enterprise-privacy-gateway:local
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PUBLISHED_PORT:-8080}:8080"
     environment:
-      - GATEWAY_HOST=0.0.0.0
-      - GATEWAY_PORT=8080
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "8080"
+      PYTHONPATH: /app/src:/app/operator
+      GATEWAY_CLASSIFIER: ${GATEWAY_CLASSIFIER:-}
+      GATEWAY_SSL_CERTFILE: ${GATEWAY_SSL_CERTFILE:-}
+      GATEWAY_SSL_KEYFILE: ${GATEWAY_SSL_KEYFILE:-}
+      GATEWAY_STATE_DIR: /app/state
+      GATEWAY_PROCESSING_DOMAIN: ${GATEWAY_PROCESSING_DOMAIN:?required processing domain}
+      GATEWAY_PROCESSING_TENANT: ${GATEWAY_PROCESSING_TENANT:?required processing tenant}
+      GATEWAY_EVIDENCE_BUCKET: ${GATEWAY_EVIDENCE_BUCKET:?required evidence retention bucket}
+      GATEWAY_HMAC_KEY_FILE: /run/secrets/hmac_key
+      GATEWAY_SOURCE_CORRELATION_KEY_FILE: /run/secrets/source_correlation_key
+      GATEWAY_KMS_MASTER_KEY_FILE: /run/secrets/kms_master_key
+      GATEWAY_DICTIONARY_FILE: /app/operator/dictionary.json
+      GATEWAY_POLICY_FILE: /app/operator/policy.json
+      GATEWAY_NER_PACKAGE_DIR: /app/models/bert4ner-base-chinese-onnx
+    secrets:
+      - hmac_key
+      - source_correlation_key
+      - kms_master_key
     volumes:
-      # 持久化审计证据与加密 Spool
-      - ./runtime_state:/app/.runtime_state
-      # 可选：直接挂载自定义的多供应商配置文件
+      - gateway-state:/app/state
       - ./config/providers.json:/app/config/providers.json:ro
+      - ${GATEWAY_OPERATOR_DIR:?required trusted operator assets directory}:/app/operator:ro
     security_opt:
       - no-new-privileges:true
     pids_limit: 128
     mem_limit: 4096m
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      test: ["CMD", "python", "scripts/check_gateway_health.py"]
       interval: 10s
       timeout: 3s
       retries: 3
+
+  knowledge-worker:
+    image: enterprise-privacy-gateway:local
+    command: ["python", "start_knowledge_worker.py"]
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+    environment:
+      GATEWAY_STATE_DIR: /app/state
+      GATEWAY_PROCESSING_DOMAIN: ${GATEWAY_PROCESSING_DOMAIN:?required processing domain}
+      GATEWAY_PROCESSING_TENANT: ${GATEWAY_PROCESSING_TENANT:?required processing tenant}
+      GATEWAY_KMS_MASTER_KEY_FILE: /run/secrets/kms_master_key
+      GATEWAY_KNOWLEDGE_PG_DSN_FILE: /run/secrets/knowledge_pg_dsn
+      GATEWAY_KNOWLEDGE_WORKER_SUBJECT: ${GATEWAY_KNOWLEDGE_WORKER_SUBJECT:?required controlled worker subject}
+    secrets:
+      - kms_master_key
+      - knowledge_pg_dsn
+    volumes:
+      - gateway-state:/app/state
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1024m
+    healthcheck:
+      disable: true
+
+volumes:
+  gateway-state:
+
+secrets:
+  hmac_key:
+    file: ${GATEWAY_HMAC_KEY_FILE:?required HMAC secret file}
+  source_correlation_key:
+    file: ${GATEWAY_SOURCE_CORRELATION_KEY_FILE:?required correlation secret file}
+  kms_master_key:
+    file: ${GATEWAY_KMS_MASTER_KEY_FILE:?required persistent master secret file}
+  knowledge_pg_dsn:
+    file: ${GATEWAY_KNOWLEDGE_PG_DSN_FILE:?required restricted PG connection file}

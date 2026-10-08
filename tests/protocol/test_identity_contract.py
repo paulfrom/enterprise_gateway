@@ -9,6 +9,7 @@ import unittest
 from infra.errors import SafetyCode, SafetyError
 from protocol.identity import (
     FORBIDDEN_CLIENT_IDENTITY_HEADERS,
+    EnterpriseAuthenticator,
     TrustedIdentity,
     assert_no_client_header_spoofing,
     authorize_purpose,
@@ -52,6 +53,15 @@ class IdentityContractTests(unittest.TestCase):
             self.valid_identity, clean_headers, now=self.now
         )
         self.assertIs(resolved, self.valid_identity)
+
+    def test_internal_authenticator_only_accepts_server_bound_credentials(self) -> None:
+        authenticator = EnterpriseAuthenticator({"synthetic-review-token": self.valid_identity})
+        self.assertIs(self.valid_identity, authenticator.authenticate(
+            {"authorization": "Bearer synthetic-review-token"}))
+        with self.assertRaises(SafetyError):
+            authenticator.authenticate({"authorization": "Bearer supplier-key"})
+        with self.assertRaises(SafetyError):
+            EnterpriseAuthenticator(None)
 
     def test_missing_identity_context_fails_closed(self) -> None:
         with self.assertRaises(SafetyError) as ctx:

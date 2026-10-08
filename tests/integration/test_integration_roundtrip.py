@@ -40,9 +40,9 @@ from detection.dictionary import (
     compute_dictionary_hash,
 )
 from infra.egress_client import BoundEgressClient, BoundUpstream
-from infra.envelope_crypto import StaticTestKmsProvider
+from infra.envelope_crypto import StaticTestKmsProvider, parse_record, decrypt_record
 from infra.errors import SafetyCode, SafetyError
-from audit.evidence_gate import EvidenceGate, EvidenceSpec
+from audit.evidence_gate import EvidenceGate
 from protocol.identity import TrustedIdentity
 from detection.inference_executor import InferenceExecutor
 from knowledge.knowledge_events import ObservationEvent
@@ -187,7 +187,8 @@ class IntegrationRoundtripTests(unittest.TestCase):
             host="127.0.0.1",
             port=8080,
             path_prefix="/v1",
-            credential="Bearer test-token-123",
+
+            credential_header="x-api-key" if protocol == CLAUDE_MESSAGES_PROTOCOL else "authorization",
             timeout_seconds=5.0,
             allowed_addresses=frozenset({"127.0.0.1"}),
         )
@@ -210,6 +211,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             evidence_gate=self.evidence_gate,
             egress_client=egress_client,
             spool_writer=self.spool_writer,
+            evidence_bucket=options.pop("evidence_bucket", "synthetic-retention"),
             **options,
         )
 
@@ -263,13 +265,6 @@ class IntegrationRoundtripTests(unittest.TestCase):
             ]
         })
 
-        evidence_spec = EvidenceSpec(
-            plaintext=b"CANARY_RAW_EVIDENCE_SPEC_P18",
-            bucket="retention-30d",
-            record_id="rec-p18-01",
-            purpose="model-query",
-        )
-
         with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             result = pipeline.process_request(
                 raw_body=raw_req,
@@ -277,15 +272,14 @@ class IntegrationRoundtripTests(unittest.TestCase):
                 identity=self.identity,
                 category="STANDARD",
                 context=ctx,
-                evidence_spec=evidence_spec,
             )
 
         # 1. Spy saw exactly 1 call
         self.assertEqual(1, len(spy.calls))
 
-        # 2. Outgoing headers dropped client auth and applied bound upstream credential
+        # 2. The current client BYOK is the only supplier credential
         sent_req = spy.calls[0]
-        self.assertEqual("Bearer test-token-123", sent_req.headers["authorization"])
+        self.assertEqual("Bearer internal-gw", sent_req.headers["authorization"])
 
         # 3. Pipeline result has restored plaintext in response!
         self.assertIn("阿尔法科技", result.response.choices[0].message.content)
@@ -300,6 +294,8 @@ class IntegrationRoundtripTests(unittest.TestCase):
         self.assertTrue(result.evidence_permit.intent_path.exists())
         self.assertIsNotNone(result.evidence_permit.evidence)
         self.assertTrue(Path(result.evidence_permit.evidence.path).exists())
+        record = parse_record(Path(result.evidence_permit.evidence.path).read_bytes())
+        self.assertEqual(decrypt_record(self.kms, record), raw_req.encode("utf-8"))
 
     def test_claude_protected_roundtrip_positive(self) -> None:
         """Claude end-to-end positive flow: entities redacted to tokens, upstream receives
@@ -340,7 +336,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             result = pipeline.process_request(
                 raw_body=raw_req,
-                headers={},
+                headers={"Authorization": "Bearer synthetic-client-key"},
                 identity=self.identity,
                 category="STANDARD",
                 context=ctx,
@@ -367,7 +363,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={"X-User-Id": "attacker-spoofed-id"},
+                    headers={"Authorization": "Bearer synthetic-client-key", "X-User-Id": "attacker-spoofed-id"},
                     identity=self.identity,
                     category="STANDARD",
                     context=ctx,
@@ -403,7 +399,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=wrong_domain_identity,
                     category="STANDARD",
                     context=ctx,
@@ -425,7 +421,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=self.identity,
                     category="FORBIDDEN",
                     context=ctx,
@@ -449,7 +445,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=self.identity,
                     category="STANDARD",
                     context=ctx,
@@ -474,7 +470,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=secret_body,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=self.identity,
                     category="STANDARD",
                     context=ctx,
@@ -503,7 +499,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=self.identity,
                     category="STANDARD",
                     context=ctx,
@@ -529,7 +525,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=self.identity,
                     category="STANDARD",
                     context=ctx,
@@ -552,7 +548,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             with self.assertRaises(UpstreamFailure) as exc_info:
                 pipeline.process_request(
                     raw_body=raw_req,
-                    headers={},
+                    headers={"Authorization": "Bearer synthetic-client-key"},
                     identity=self.identity,
                     category="STANDARD",
                     context=ctx,

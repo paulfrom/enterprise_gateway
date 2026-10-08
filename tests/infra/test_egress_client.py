@@ -53,7 +53,7 @@ def make_binding(port: int, **overrides) -> BoundUpstream:
     return BoundUpstream(
         host=LOOPBACK,
         port=port,
-        credential=CREDENTIAL,
+
         allowed_addresses=frozenset({LOOPBACK}),
         **fields,
     )
@@ -135,46 +135,229 @@ class _CountingTransport(httpx.BaseTransport):
         return httpx.Response(200, json={"ok": True}, request=request)
 
 
+class ByokCredentialGuardTests(unittest.TestCase):
+    def test_ipv6_literal_remains_bound_across_relative_redirect(self):
+        seen = []
+        binding = BoundUpstream(channel_id="ipv6", scheme="http", host="::1",
+            port=8080, path_prefix="/v1", timeout_seconds=5,
+            max_redirects=1, allowed_addresses=frozenset({"::1"}))
+        def respond(request):
+            seen.append(str(request.url))
+            if request.url.path == "/v1/start":
+                return httpx.Response(307, headers={"location": "/v1/final"})
+            return httpx.Response(200)
+        with BoundEgressClient(binding, transport=httpx.MockTransport(respond), resolver=lambda _: ("::1",)) as client:
+            response = client.request("POST", "/v1/start", headers={"Authorization": CREDENTIAL})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen, ["http://[::1]:8080/v1/start", "http://[::1]:8080/v1/final"])
+
+    def test_conversion_is_per_request_and_version_header_has_one_case(self):
+        for credential_header in ("authorization", "x-api-key"):
+            seen = []
+            binding = BoundUpstream(channel_id="byok", scheme="https", host="supplier.example",
+                port=443, path_prefix="/v1", timeout_seconds=5,
+                credential_header=credential_header, allowed_addresses=frozenset({LOOPBACK}))
+            def respond(request):
+                seen.append(request)
+                return httpx.Response(200, content=b"ok")
+            with BoundEgressClient(binding, transport=httpx.MockTransport(respond), resolver=loopback_resolver) as client:
+                client.request("POST", "/v1/chat/completions", headers={"Authorization": "Bearer synthetic-one"})
+                stream = client.open_stream("POST", "/v1/chat/completions",
+                    headers={"x-api-key": "synthetic-two", "Anthropic-Version": "2023-06-01"})
+                stream.read()
+                stream.close()
+            for index, key in enumerate(("synthetic-one", "synthetic-two")):
+                headers = seen[index].headers
+                expected = key if credential_header == "x-api-key" else f"Bearer {key}"
+                self.assertEqual(headers[credential_header], expected)
+                other = "authorization" if credential_header == "x-api-key" else "x-api-key"
+                self.assertNotIn(other, headers)
+                if credential_header == "x-api-key":
+                    versions = [value for name, value in headers.multi_items() if name == "anthropic-version"]
+                    self.assertEqual(versions, ["2023-06-01"])
+
+    def test_invalid_byok_never_calls_transport(self):
+        transport = _CountingTransport()
+        binding = BoundUpstream(channel_id="byok", scheme="https", host="supplier.example",
+            port=443, path_prefix="/v1", timeout_seconds=5,
+            allowed_addresses=frozenset({LOOPBACK}))
+        with BoundEgressClient(binding, transport=transport, resolver=loopback_resolver) as client:
+            bad = [None, {}, {"authorization": ""}, {"x-api-key": ""},
+                   {"authorization": "Basic synthetic-key"}, {"authorization": "Bearer "},
+                   {"authorization": "Bearer key with space"}, {"x-api-key": "key\r\nsecret"},
+                   {"authorization": "Bearer key", "x-api-key": "other"},
+                   {"authorization": "Bearer key", "Authorization": "Bearer key"}]
+            for headers in bad:
+                for send in (client.request, client.open_stream):
+                    with self.subTest(headers=headers, send=send.__name__):
+                        with self.assertRaises(SafetyError):
+                            send("POST", "/v1/chat/completions", headers=headers, content=b"{}")
+            self.assertEqual(transport.calls, 0)
+
+
 class BoundUpstreamConfigTests(unittest.TestCase):
+    def test_https_rejects_untrusted_or_wrong_host_certificate_without_http_retry(self):
+        import ssl
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        with tempfile.TemporaryDirectory() as directory:
+            certfile, keyfile = Path(directory) / "cert.pem", Path(directory) / "key.pem"
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+            now = datetime.now(timezone.utc)
+            cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                    .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                    .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+                    .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+                    .sign(key, hashes.SHA256()))
+            certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            keyfile.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                  serialization.NoEncryption()))
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile, keyfile)
+            server = _SpyServer({"/v1/chat/completions": (200, {}, b"ok")})
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            server.start()
+            try:
+                binding = BoundUpstream(channel_id="tls", scheme="https", host=LOOPBACK,
+                    port=server.port, path_prefix="/v1", timeout_seconds=5,
+                    allowed_addresses=frozenset({LOOPBACK}))
+                # Default httpx trust rejects an untrusted issuer; explicit trust still
+                # rejects the certificate's localhost SAN for a 127.0.0.1 target.
+                for transport in (None, httpx.HTTPTransport(verify=ssl.create_default_context(cafile=certfile))):
+                    with BoundEgressClient(binding, transport=transport, resolver=loopback_resolver) as client:
+                        for send in (client.request, client.open_stream):
+                            with self.assertRaises(SafetyError) as rejected:
+                                send("POST", "/v1/chat/completions",
+                                     headers={"Authorization": CREDENTIAL}, content=BODY_CANARY.encode())
+                            self.assertEqual(SafetyCode.INVALID_UPSTREAM, rejected.exception.code)
+                            self.assertNotIn(CREDENTIAL, str(rejected.exception))
+                            self.assertEqual("https", client.binding.scheme)
+                self.assertEqual([], server.recorded)
+            finally:
+                server.stop()
+
+    def test_nonloopback_http_binding_constructs_and_sends_with_byok(self):
+        for host, addresses in (("supplier.example", frozenset({"203.0.113.1"})),
+                                ("supplier.example", frozenset({LOOPBACK})),
+                                ("203.0.113.1", frozenset({"203.0.113.1"})),
+                                ("10.0.0.1", frozenset({"10.0.0.1"})),
+                                ("192.168.1.1", frozenset({"192.168.1.1"})),
+                                ("fd00::1", frozenset({"fd00::1"})),
+                                ("localhost", frozenset({LOOPBACK, "10.0.0.1"})),
+                                (LOOPBACK, frozenset({"10.0.0.1"}))):
+            for header, path in (("authorization", "/v1/chat/completions"),
+                                 ("x-api-key", "/v1/messages")):
+                with self.subTest(host=host, addresses=addresses, header=header):
+                    seen = []
+                    def respond(request):
+                        seen.append(request)
+                        return httpx.Response(200, content=b"protected-response")
+                    binding = BoundUpstream(channel_id="plaintext", scheme="http", host=host, port=80,
+                        path_prefix="/v1", timeout_seconds=5, allowed_addresses=addresses,
+                        credential_header=header)
+                    with BoundEgressClient(binding, transport=httpx.MockTransport(respond),
+                                           resolver=lambda _: addresses) as client:
+                        response = client.request("POST", path,
+                            headers={"Authorization": CREDENTIAL}, content=b"protected-body")
+                        self.assertEqual(200, response.status_code)
+                        stream = client.open_stream("POST", path,
+                            headers={"x-api-key": "CNRY-stream-key"}, content=b"protected-stream-body")
+                        self.assertEqual(b"protected-response", stream.read())
+                        stream.close()
+                    self.assertEqual(2, len(seen))
+                    for request, key, body in zip(seen, (CREDENTIAL[7:], "CNRY-stream-key"),
+                                                 (b"protected-body", b"protected-stream-body")):
+                        self.assertEqual("http", request.url.scheme)
+                        self.assertEqual(host, request.url.host)
+                        self.assertEqual(path, request.url.path)
+                        self.assertEqual(80, request.url.port or 80)
+                        self.assertEqual(body, request.content)
+                        self.assertEqual(key if header == "x-api-key" else f"Bearer {key}",
+                                         request.headers[header])
+                        other = "authorization" if header == "x-api-key" else "x-api-key"
+                        self.assertNotIn(other, request.headers)
+
+    def test_http_resolve_binds_all_declared_addresses(self):
+        for addresses in (("127.0.0.1", "::1"), ("127.0.0.1", "10.0.0.1")):
+            binding = BoundUpstream.resolve(channel_id="local", scheme="http", host="localhost",
+                port=1234, path_prefix="/v1", timeout_seconds=5,
+                resolver=lambda _: addresses)
+            self.assertEqual(binding.scheme, "http")
+            self.assertEqual(frozenset(addresses), binding.allowed_addresses)
+
+    def test_nonloopback_http_does_not_bypass_dns_or_scheme_binding(self):
+        for scheme, port in (("http", 80), ("https", 443)):
+            for mismatch in ("dns", "scheme"):
+                with self.subTest(scheme=scheme, mismatch=mismatch):
+                    seen = []
+                    def respond(request):
+                        seen.append(request)
+                        target_scheme = "https" if scheme == "http" else "http"
+                        return httpx.Response(307, headers={"location":
+                            f"{target_scheme}://supplier.example:{port}/v1/landing"})
+                    binding = BoundUpstream(channel_id="fixed", scheme=scheme,
+                        host="supplier.example", port=port, path_prefix="/v1",
+                        timeout_seconds=5, max_redirects=1,
+                        allowed_addresses=frozenset({"10.0.0.1"}))
+                    addresses = ("10.0.0.2",) if mismatch == "dns" else ("10.0.0.1",)
+                    with BoundEgressClient(binding, transport=httpx.MockTransport(respond),
+                                           resolver=lambda _: addresses) as client:
+                        for send in (client.request, client.open_stream) if mismatch == "dns" else (client.request,):
+                            with self.assertRaises(SafetyError) as rejected:
+                                send("POST", "/v1/start", headers={"Authorization": CREDENTIAL})
+                            expected = SafetyCode.INVALID_UPSTREAM if mismatch == "dns" else SafetyCode.UPSTREAM_BINDING_VIOLATION
+                            self.assertEqual(expected, rejected.exception.code)
+                    self.assertEqual(0 if mismatch == "dns" else 1, len(seen))
+
     def test_redirect_with_explicit_zero_port_is_not_treated_as_default(self):
         for scheme, port in (("https", 443), ("http", 80)):
             with self.subTest(scheme=scheme):
+                host = LOOPBACK if scheme == "http" else "supplier.example"
                 seen = []
                 def respond(request):
                     seen.append(request)
                     return httpx.Response(302, headers={"location":
-                        f"{scheme}://supplier.example:0/v1/landing"})
+                        f"{scheme}://{host}:0/v1/landing"})
                 binding = BoundUpstream(channel_id="redirect-port", scheme=scheme,
-                    host="supplier.example", port=port, path_prefix="/v1",
-                    credential=CREDENTIAL, timeout_seconds=5, max_redirects=1,
+                    host=host, port=port, path_prefix="/v1",
+                    timeout_seconds=5, max_redirects=1,
+
                     allowed_addresses=frozenset({LOOPBACK}))
                 with BoundEgressClient(binding, transport=httpx.MockTransport(respond),
                                        resolver=loopback_resolver) as client:
                     with self.assertRaises(SafetyError):
-                        client.request("GET", "/v1/start")
+                        client.request("GET", "/v1/start", headers={"Authorization": CREDENTIAL})
                     self.assertEqual(1, len(seen))
 
     def test_default_ports_are_valid_origins_and_other_ports_are_blocked(self):
         for scheme, port in (("https", 443), ("http", 80)):
             with self.subTest(scheme=scheme):
+                host = LOOPBACK if scheme == "http" else "supplier.example"
                 seen = []
                 def respond(request):
                     seen.append(request)
                     return httpx.Response(200, content=b"protected-response")
                 binding = BoundUpstream(channel_id="default-port", scheme=scheme,
-                    host="supplier.example", port=port, path_prefix="/v1",
-                    credential=CREDENTIAL, timeout_seconds=5,
+                    host=host, port=port, path_prefix="/v1",
+                    timeout_seconds=5,
+
                     allowed_addresses=frozenset({LOOPBACK}))
                 with BoundEgressClient(binding, transport=httpx.MockTransport(respond),
                                        resolver=loopback_resolver) as client:
-                    self.assertEqual(200, client.request("POST", "/v1/chat/completions").status_code)
-                    response = client.open_stream("POST", "/v1/chat/completions")
+                    self.assertEqual(200, client.request("POST", "/v1/chat/completions", headers={"Authorization": CREDENTIAL}).status_code)
+                    response = client.open_stream("POST", "/v1/chat/completions", headers={"Authorization": CREDENTIAL})
                     self.assertEqual(b"protected-response", response.read())
                     response.close()
                     self.assertEqual(2, len(seen))
                     for wrong_port in (0, 8443):
                         with self.assertRaises(SafetyError) as rejected:
-                            client._client.get(f"{scheme}://supplier.example:{wrong_port}/v1/chat/completions")
+                            client._client.get(f"{scheme}://{host}:{wrong_port}/v1/chat/completions")
                         self.assertEqual(SafetyCode.UPSTREAM_BINDING_VIOLATION, rejected.exception.code)
                         self.assertEqual(2, len(seen))
 
@@ -183,22 +366,22 @@ class BoundUpstreamConfigTests(unittest.TestCase):
         self.assertNotIn(CREDENTIAL, repr(binding))
         self.assertNotIn(CREDENTIAL, str(binding))
         self.assertIn(binding.channel_id, repr(binding))
-        self.assertEqual(binding.credential, CREDENTIAL)
+        self.assertFalse(hasattr(binding, "credential"))
 
     def test_valid_config_normalizes_and_exposes_base_url(self):
         binding = BoundUpstream(
             channel_id="ch-1",
-            scheme="HTTP",
+            scheme="HTTPS",
             host="Example.LOCAL",
             port=8443,
             path_prefix="/v1",
-            credential=CREDENTIAL,
+
             timeout_seconds=5,
             allowed_addresses=frozenset({"127.0.0.1", "::1"}),
         )
-        self.assertEqual(binding.scheme, "http")
+        self.assertEqual(binding.scheme, "https")
         self.assertEqual(binding.host, "example.local")
-        self.assertEqual(binding.base_url, "http://example.local:8443")
+        self.assertEqual(binding.base_url, "https://example.local:8443")
         self.assertEqual(binding.timeout_seconds, 5.0)
 
     def test_invalid_config_fields_fail_closed(self):
@@ -208,7 +391,7 @@ class BoundUpstreamConfigTests(unittest.TestCase):
             host=LOOPBACK,
             port=8000,
             path_prefix="/v1",
-            credential=CREDENTIAL,
+
             timeout_seconds=5.0,
             allowed_addresses=frozenset({LOOPBACK}),
         )
@@ -227,8 +410,6 @@ class BoundUpstreamConfigTests(unittest.TestCase):
             ("path_prefix", "v1"),
             ("path_prefix", "/v1/../v2"),
             ("path_prefix", "http://x/v1"),
-            ("credential", ""),
-            ("credential", 123),
             ("timeout_seconds", 0),
             ("timeout_seconds", -1.5),
             ("timeout_seconds", float("inf")),
@@ -252,11 +433,11 @@ class BoundUpstreamConfigTests(unittest.TestCase):
     def test_resolve_declares_bound_addresses(self):
         binding = BoundUpstream.resolve(
             channel_id="ch-1",
-            scheme="http",
+            scheme="https",
             host="supplier.local",
             port=8000,
             path_prefix="/v1",
-            credential=None,
+
             timeout_seconds=5.0,
             resolver=lambda host: ("10.1.2.3", "10.1.2.4"),
         )
@@ -271,11 +452,11 @@ class BoundUpstreamConfigTests(unittest.TestCase):
                 with self.assertRaises(SafetyError) as ctx:
                     BoundUpstream.resolve(
                         channel_id="ch-1",
-                        scheme="http",
+                        scheme="https",
                         host="supplier.local",
                         port=8000,
                         path_prefix="/v1",
-                        credential=None,
+
                         timeout_seconds=5.0,
                         resolver=resolver,
                     )
@@ -286,11 +467,11 @@ class BoundUpstreamConfigTests(unittest.TestCase):
         with patch("socket.getaddrinfo", return_value=addrinfo):
             binding = BoundUpstream.resolve(
                 channel_id="ch-1",
-                scheme="http",
+                scheme="https",
                 host="supplier.local",
                 port=8000,
                 path_prefix="/v1",
-                credential=None,
+
                 timeout_seconds=5.0,
             )
         self.assertEqual(binding.allowed_addresses, frozenset({"10.9.9.9"}))
@@ -342,7 +523,7 @@ class BoundEgressClientPositiveTests(unittest.TestCase):
         response = self.client.request(
             "POST",
             "/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers={"Authorization": CREDENTIAL, "Content-Type": "application/json", "Accept": "application/json"},
             content=request_body(),
         )
         self.assertEqual(response.status_code, 200)
@@ -372,7 +553,7 @@ class BoundEgressClientPositiveTests(unittest.TestCase):
             make_binding(self.server.port), transport=transport, resolver=loopback_resolver
         )
         try:
-            response = client.request("POST", "/v1/chat/completions", content=b"{}")
+            response = client.request("POST", "/v1/chat/completions", content=b"{}", headers={"Authorization": CREDENTIAL})
         finally:
             client.close()
         self.assertEqual(response.status_code, 200)
@@ -382,8 +563,8 @@ class BoundEgressClientPositiveTests(unittest.TestCase):
         self.assertEqual(len(self.server.recorded), 0)
 
     def test_prefix_boundary_paths_are_admitted(self):
-        root = self.client.request("POST", "/v1", content=b"{}")
-        nested = self.client.request("POST", "/v1/chat/completions", content=b"{}")
+        root = self.client.request("POST", "/v1", content=b"{}", headers={"Authorization": CREDENTIAL})
+        nested = self.client.request("POST", "/v1/chat/completions", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assertEqual(root.status_code, 404)  # reached the spy; route simply missing
         self.assertEqual(nested.status_code, 200)
         self.assertEqual(
@@ -393,14 +574,14 @@ class BoundEgressClientPositiveTests(unittest.TestCase):
     def test_relative_redirect_within_binding_is_followed(self):
         response = self.follow_client.request(
             "POST", "/v1/start", content=BODY_CANARY.encode()
-        )
+        , headers={"Authorization": CREDENTIAL})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.content), {"done": True})
         self.assertEqual([r["path"] for r in self.server.recorded], ["/v1/start", "/v1/final"])
         self.assertEqual(self.server.recorded[1]["body"], BODY_CANARY.encode())
 
     def test_absolute_redirect_within_binding_is_followed(self):
-        response = self.follow_client.request("POST", "/v1/abs", content=b"{}")
+        response = self.follow_client.request("POST", "/v1/abs", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [r["path"] for r in self.server.recorded],
@@ -408,7 +589,7 @@ class BoundEgressClientPositiveTests(unittest.TestCase):
         )
 
     def test_credential_travels_with_every_same_binding_hop(self):
-        self.follow_client.request("POST", "/v1/hop-a", content=b"{}")
+        self.follow_client.request("POST", "/v1/hop-a", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assertEqual(len(self.server.recorded), 2)
         for seen in self.server.recorded:
             self.assertEqual(seen["path"] in ("/v1/hop-a", "/v1/hop-b"), True)
@@ -452,13 +633,13 @@ class BoundEgressClientGuardTests(unittest.TestCase):
 
     def test_absolute_url_is_rejected_before_any_connection(self):
         with self.assertRaises(SafetyError) as ctx:
-            self.client.request("POST", "http://evil.example/v1/chat/completions", content=b"{}")
+            self.client.request("POST", "http://evil.example/v1/chat/completions", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assert_violation(ctx)
         self.assertEqual(self.server.recorded, [])
 
     def test_scheme_relative_smuggling_is_rejected(self):
         with self.assertRaises(SafetyError) as ctx:
-            self.client.request("POST", "//evil.example/v1", content=b"{}")
+            self.client.request("POST", "//evil.example/v1", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assert_violation(ctx)
         self.assertEqual(self.server.recorded, [])
 
@@ -466,7 +647,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         for path in ("/v2/x", "/v10/x", "/v1/../v2", "/public"):
             with self.subTest(path=path):
                 with self.assertRaises(SafetyError) as ctx:
-                    self.client.request("POST", path, content=b"{}")
+                    self.client.request("POST", path, content=b"{}", headers={"Authorization": CREDENTIAL})
                 self.assert_violation(ctx)
         self.assertEqual(self.server.recorded, [])
 
@@ -474,6 +655,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         internal = {name: f"CNRY-{name}" for name in sorted(FORBIDDEN_CLIENT_IDENTITY_HEADERS)}
         headers = {
             **internal,
+            "Authorization": CREDENTIAL,
             "X-Debug-Internal": "CNRY-debug",
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -490,7 +672,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
     def test_whitelist_covers_all_internal_header_names(self):
         self.assertTrue(FORBIDDEN_CLIENT_IDENTITY_HEADERS.isdisjoint(EGRESS_HEADER_WHITELIST))
 
-    def test_caller_authorization_is_replaced_by_injected_credential(self):
+    def test_each_request_uses_its_own_byok(self):
         self.client.request(
             "POST",
             "/v1/chat/completions",
@@ -498,17 +680,16 @@ class BoundEgressClientGuardTests(unittest.TestCase):
             content=b"{}",
         )
         sent = self.server.recorded[0]["headers"]
-        self.assertEqual(sent["authorization"], CREDENTIAL)
-        self.assertNotIn("CNRY-caller-rogue-1", json.dumps(sent))
+        self.assertEqual(sent["authorization"], "Bearer CNRY-caller-rogue-1")
 
-    def test_caller_x_api_key_is_stripped_and_anthropic_injected(self):
+    def test_claude_uses_caller_byok_and_one_version_header(self):
         anthropic_binding = BoundUpstream(
             channel_id="anthropic-channel",
             scheme="http",
             host=LOOPBACK,
             port=self.server.port,
             path_prefix="/v1",
-            credential="sk-ant-test-key-12345",
+
             credential_header="x-api-key",
             timeout_seconds=5.0,
             allowed_addresses=frozenset([LOOPBACK]),
@@ -521,16 +702,16 @@ class BoundEgressClientGuardTests(unittest.TestCase):
                 "/v1/messages",
                 headers={
                     "x-api-key": "caller-secret-key-rogue",
-                    "Authorization": "Bearer caller-auth",
+                    "Anthropic-Version": "2023-06-01",
                 },
                 content=b"{}",
             )
             sent = self.server.recorded[-1]["headers"]
-            self.assertEqual(sent["x-api-key"], "sk-ant-test-key-12345")
+            self.assertEqual(sent["x-api-key"], "caller-secret-key-rogue")
             self.assertEqual(sent["anthropic-version"], "2023-06-01")
             self.assertEqual(sent["x-protection-package-version"], "1.2.3")
             self.assertNotIn("authorization", sent)
-            self.assertNotIn("caller-secret-key-rogue", json.dumps(sent))
+            self.assertEqual(len([name for name in sent if name.lower() == "anthropic-version"]), 1)
         finally:
             client.close()
 
@@ -543,15 +724,15 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         # The contract admits no caller-supplied URL/host/metadata channel at
         # all: such keyword arguments do not exist in the signature.
         with self.assertRaises(TypeError):
-            self.client.request("POST", "/v1/chat/completions", url="http://evil.example/")
+            self.client.request("POST", "/v1/chat/completions", url="http://evil.example/", headers={"Authorization": CREDENTIAL})
         with self.assertRaises(TypeError):
-            self.client.request("POST", "/v1/chat/completions", metadata={"trace_id": "x"})
+            self.client.request("POST", "/v1/chat/completions", metadata={"trace_id": "x"}, headers={"Authorization": CREDENTIAL})
         self.assertEqual(self.server.recorded, [])
 
     def test_redirect_preserves_query_string(self):
         self.server.routes["/v1/qstart"] = (302, {"Location": "/v1/landing?tok=abc"}, b"")
         self.server.routes["/v1/landing?tok=abc"] = (200, {}, b"q-ok")
-        response = self.follow_client.request("GET", "/v1/qstart")
+        response = self.follow_client.request("GET", "/v1/qstart", headers={"Authorization": CREDENTIAL})
         self.assertEqual(response.content, b"q-ok")
         self.assertEqual(
             [r["path"] for r in self.server.recorded], ["/v1/qstart", "/v1/landing?tok=abc"]
@@ -560,7 +741,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
     def test_303_redirect_converts_post_to_get_and_drops_body(self):
         self.server.routes["/v1/s303"] = (303, {"Location": "/v1/after303"}, b"")
         self.server.routes["/v1/after303"] = (200, {}, b"after")
-        response = self.follow_client.request("POST", "/v1/s303", content=b"payload")
+        response = self.follow_client.request("POST", "/v1/s303", content=b"payload", headers={"Authorization": CREDENTIAL})
         self.assertEqual(response.content, b"after")
         hops = self.server.recorded
         self.assertEqual([r["method"] for r in hops], ["POST", "GET"])
@@ -570,7 +751,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         self.client.request(
             "POST",
             "/v1/chat/completions",
-            headers={"Host": "spoofed.internal"},
+            headers={"Authorization": CREDENTIAL, "Host": "spoofed.internal"},
             content=b"{}",
         )
         seen = self.server.recorded[0]["headers"]
@@ -578,13 +759,13 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         self.assertEqual(seen["host"], f"{LOOPBACK}:{self.server.port}")
 
     def test_default_policy_does_not_follow_redirects(self):
-        response = self.client.request("POST", "/v1/escape", content=b"{}")
+        response = self.client.request("POST", "/v1/escape", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assertEqual(response.status_code, 302)
         self.assertEqual([r["path"] for r in self.server.recorded], ["/v1/escape"])
 
     def test_redirect_outside_prefix_is_refused(self):
         with self.assertRaises(SafetyError) as ctx:
-            self.follow_client.request("POST", "/v1/escape", content=b"{}")
+            self.follow_client.request("POST", "/v1/escape", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assert_violation(ctx)
         self.assertEqual([r["path"] for r in self.server.recorded], ["/v1/escape"])
 
@@ -597,7 +778,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
                 b"",
             )
             with self.assertRaises(SafetyError) as ctx:
-                self.follow_client.request("POST", "/v1/offport", content=BODY_CANARY.encode())
+                self.follow_client.request("POST", "/v1/offport", content=BODY_CANARY.encode(), headers={"Authorization": CREDENTIAL})
             self.assert_violation(ctx)
             self.assertEqual(foreign.recorded, [])
             self.assertEqual([r["path"] for r in self.server.recorded], ["/v1/offport"])
@@ -607,19 +788,19 @@ class BoundEgressClientGuardTests(unittest.TestCase):
 
     def test_redirect_to_other_hostname_is_refused(self):
         with self.assertRaises(SafetyError) as ctx:
-            self.follow_client.request("POST", "/v1/offhost", content=b"{}")
+            self.follow_client.request("POST", "/v1/offhost", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assert_violation(ctx)
         self.assertEqual([r["path"] for r in self.server.recorded], ["/v1/offhost"])
 
     def test_redirect_with_userinfo_is_refused(self):
         with self.assertRaises(SafetyError) as ctx:
-            self.follow_client.request("POST", "/v1/userinfo", content=b"{}")
+            self.follow_client.request("POST", "/v1/userinfo", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assert_violation(ctx)
         self.assertEqual([r["path"] for r in self.server.recorded], ["/v1/userinfo"])
 
     def test_redirect_loop_exhausts_budget_with_controlled_failure(self):
         with self.assertRaises(SafetyError) as ctx:
-            self.follow_client.request("POST", "/v1/loop-a", content=BODY_CANARY.encode())
+            self.follow_client.request("POST", "/v1/loop-a", content=BODY_CANARY.encode(), headers={"Authorization": CREDENTIAL})
         self.assert_violation(ctx)
         self.assertEqual(len(self.server.recorded), 4)  # initial + 3 followed hops
         self.assertNotIn(CREDENTIAL, str(ctx.exception))
@@ -635,7 +816,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
             "all_proxy": dead_proxy,
         }
         with patch.dict(os.environ, env):
-            response = self.client.request("POST", "/v1/chat/completions", content=b"{}")
+            response = self.client.request("POST", "/v1/chat/completions", content=b"{}", headers={"Authorization": CREDENTIAL})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.server.recorded), 1)
         self.assertEqual(self.server.recorded[0]["headers"].get("authorization"), CREDENTIAL)
@@ -651,7 +832,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         )
         try:
             with self.assertRaises(SafetyError) as ctx:
-                client.request("POST", "/v1/chat/completions", content=BODY_CANARY.encode())
+                client.request("POST", "/v1/chat/completions", content=BODY_CANARY.encode(), headers={"Authorization": CREDENTIAL})
         finally:
             client.close()
         self.assert_violation(ctx, SafetyCode.INVALID_UPSTREAM)
@@ -669,7 +850,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         )
         try:
             with self.assertRaises(SafetyError) as ctx:
-                client.request("POST", "/v1/chat/completions", content=b"{}")
+                client.request("POST", "/v1/chat/completions", content=b"{}", headers={"Authorization": CREDENTIAL})
         finally:
             client.close()
         self.assert_violation(ctx, SafetyCode.INVALID_UPSTREAM)
@@ -687,7 +868,7 @@ class BoundEgressClientGuardTests(unittest.TestCase):
         )
         try:
             with self.assertRaises(SafetyError) as ctx:
-                client.request("POST", "/v1/chat/completions", content=b"{}")
+                client.request("POST", "/v1/chat/completions", content=b"{}", headers={"Authorization": CREDENTIAL})
         finally:
             client.close()
         self.assert_violation(ctx, SafetyCode.INVALID_UPSTREAM)

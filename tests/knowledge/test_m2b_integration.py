@@ -41,7 +41,7 @@ class TestM2BKnowledgeIntegration(unittest.TestCase):
         self.acl=frozenset({'worker','security','business','publisher','reader','reader2','steward'})
         self.temp=tempfile.TemporaryDirectory();self.spool=Path(self.temp.name)
         self.kms=StaticTestKmsProvider();self.writer=SpoolWriter(self.spool,self.kms)
-        self.worker=KnowledgeWorker(self.spool,self.kms,PostgresKnowledgeSink(self.storage,self.actor('worker')))
+        self.worker=KnowledgeWorker(self.spool,self.kms,PostgresKnowledgeSink(self.storage,self.actor('worker'),self.kms))
 
     def tearDown(self):self.temp.cleanup()
 
@@ -178,7 +178,7 @@ class TestM2BKnowledgeIntegration(unittest.TestCase):
         restricted=f'{self.domain}:restricted-candidate'
         event=self.observe().model_copy(update={'acl':frozenset({restricted})})
         writer=SpoolWriter(self.spool,self.kms);writer.collect(event,mode=CollectionMode.REQUIRED)
-        worker=KnowledgeWorker(self.spool,self.kms,PostgresKnowledgeSink(self.storage,self.actor('worker',Role.KNOWLEDGE_PROCESSOR),processing_acl=(restricted,)))
+        worker=KnowledgeWorker(self.spool,self.kms,PostgresKnowledgeSink(self.storage,self.actor('worker',Role.KNOWLEDGE_PROCESSOR),self.kms,processing_acl=(restricted,)))
         self.assertEqual(1,worker.run_once().submitted)
         for actor in (self.actor('reader'),self.actor('security',Role.SECURITY_REVIEWER)):
             with psycopg.connect(get_test_dsn()) as conn:

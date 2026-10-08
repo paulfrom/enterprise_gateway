@@ -13,11 +13,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
 
-from infra.envelope_crypto import KmsProvider
+from infra.envelope_crypto import KmsProvider, encrypt_record, serialize_record
 from infra.spool_relay import LedgerSink, SpoolRelay
 from knowledge.extractor import RelationExtractor
 from knowledge.knowledge import Entity, KnowledgeError, Source, TrustedActor
-from knowledge.knowledge_events import ObservationEvent
+from knowledge.knowledge_events import ObservationEvent, serialize_event
 from knowledge.storage import PostgresKnowledgeStorage
 
 
@@ -48,9 +48,12 @@ def extract_event_candidates(event: ObservationEvent):
 
 
 class PostgresKnowledgeSink(LedgerSink):
-    def __init__(self, storage: PostgresKnowledgeStorage, actor: TrustedActor,
+    def __init__(self, storage: PostgresKnowledgeStorage, actor: TrustedActor, kms: KmsProvider,
                  *, processing_acl: tuple[str, ...] = ()):
+        if not isinstance(kms, KmsProvider):
+            raise TypeError('kms must be a KmsProvider')
         self.storage, self.actor, self.processing_acl = storage, actor, processing_acl
+        self.kms = kms
 
     def _scope(self, conn):
         self.storage.set_session_identity(conn, self.actor, processing_acl=self.processing_acl)
@@ -68,14 +71,20 @@ class PostgresKnowledgeSink(LedgerSink):
         if event.retention_until <= datetime.now(timezone.utc):
             raise KnowledgeError('worker source expired')
         source, candidates = extract_event_candidates(event)
+        # Preserve the minimal source fragment after confirmed spool deletion.
+        # Reuse its governed key selector, with a fresh DEK and observation-bound AAD.
+        encrypted_observation = serialize_record(encrypt_record(
+            self.kms, serialize_event(event), domain=event.domain,
+            bucket=event.retention_policy, purpose=event.purpose + ':knowledge-spool',
+            record_id='obs-' + dedup_key))
         with psycopg.connect(self.storage.connection_uri) as conn:
             self._scope(conn)
             self.storage.save_source(conn, source)
             inserted = conn.execute('''INSERT INTO knowledge_observations
-                (dedup_key,tenant_id,domain,acl,purpose,source_id,source_version,candidate_ids)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(dedup_key) DO NOTHING RETURNING dedup_key''',
+                (dedup_key,tenant_id,domain,acl,purpose,source_id,source_version,candidate_ids,encrypted_observation)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(dedup_key) DO NOTHING RETURNING dedup_key''',
                 (dedup_key,event.tenant,event.domain,list(event.acl),event.purpose,event.source_id,event.source_version,
-                 [c.candidate_id for c in candidates])).fetchone()
+                 [c.candidate_id for c in candidates],encrypted_observation)).fetchone()
             if inserted is None:
                 return
             for candidate in candidates:

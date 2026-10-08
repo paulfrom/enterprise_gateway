@@ -68,10 +68,12 @@ class IngressValidator:
         exemption_registry: StaticExemptionRegistry | None = None,
         allowed_models: frozenset[str] | None = None,
         history_adapter: HistoricalStateAdapter | None = None,
+        local_collection_only: bool = False,
     ) -> ValidatedIngressRequest:
         # 1. Enforce egress classification policy (C-01)
         try:
-            resolve_egress_policy(policy, category)
+            if not local_collection_only:
+                resolve_egress_policy(policy, category)
         except SafetyError as exc:
             raise SafetyError(SafetyCode.POLICY_REJECTED, exc.code.value) from None
 

@@ -11,12 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer, field_validator, model_validator
 
 from infra.errors import SafetyCode, SafetyError
 from knowledge.knowledge import SourceKind
+from protocol.identity import UnverifiedSourceContext, validate_request_authorization
 
 __all__ = [
     "EvidenceRef",
@@ -72,6 +73,10 @@ class ObservationEvent(BaseModel):
     extraction_version: str
     evidence_text: str = Field(min_length=1, max_length=65536, repr=False)
     source_independence_verified: bool = False
+    # Current ingress has no original-source proof or ownership decision.
+    # Fixed literals prevent request metadata from manufacturing either claim.
+    source_provenance: Literal["unverified"] = "unverified"
+    ownership_status: Literal["unassigned"] = "unassigned"
     retention_until: datetime
     mentions: tuple[ObservationMention,...] = ()
 
@@ -224,6 +229,7 @@ def build_gateway_observation(
     retention_until: datetime | None = None,
     source_version: str | None = None,
     mentions: tuple[ObservationMention,...] = (),
+    source_context: UnverifiedSourceContext | None = None,
 ) -> ObservationEvent:
     """Auto-generate an observation event from an incoming gateway request context.
 
@@ -234,6 +240,19 @@ def build_gateway_observation(
     from datetime import timezone
     if observed_at is None:
         observed_at = datetime.now(timezone.utc)
+    if source_context is not None:
+        if not isinstance(source_context, UnverifiedSourceContext):
+            raise SafetyError(SafetyCode.EVENT_INVALID)
+        validate_request_authorization(source_context, now=observed_at)
+        if (tenant, domain) != (source_context.tenant_id, source_context.domain):
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH)
+        if source_independence_verified:
+            raise SafetyError(SafetyCode.EVENT_INVALID)
+        if source_acl is not None and (
+                not isinstance(source_acl, (frozenset, set, tuple, list))
+                or frozenset(source_acl) != source_context.source_acl):
+            raise SafetyError(SafetyCode.ACCESS_DENIED)
+        source_acl = source_context.source_acl
     event = build_observation_event(
         tenant=tenant,
         domain=domain,
@@ -257,6 +276,7 @@ def build_gateway_observation(
     # Equal content in different trusted access scopes is not the same source.
     # Replays within a scope remain stable and never establish independence.
     scope_material=json.dumps([event.tenant,event.domain,event.source_kind.value,event.evidence_ref.digest,
+                               source_context.source_id if source_context is not None else None,
                                event.purpose,event.retention_policy,sorted(event.acl)],
                               ensure_ascii=False,separators=(',',':')).encode('utf-8')
     return event.model_copy(update={'source_id':f'unverified:{source_kind.value}:'+hashlib.sha256(scope_material).hexdigest()})

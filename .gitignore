@@ -9,6 +9,8 @@ build/
 .env.test
 *.key
 *.pem
+*.hex
+secrets/
 *.enc
 .codebase-memory/
 
@@ -20,5 +22,7 @@ evidence/
 reports/
 *.log
 .runtime_state/
+runtime_state/
 *.env.json
 *.intent.json
+*.key.json

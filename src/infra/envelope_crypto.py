@@ -6,9 +6,11 @@ AES-256-GCM with 96-bit random nonces, AAD bound to domain/record/purpose/
 format version, and DEK wrapping behind an abstract :class:`KmsProvider`.
 Enterprise KMS integration, production storage semantics, and full-copy
 destruction belong to R-05/A-05; this module performs no real KMS calls and
-offers no configuration switching layer. The only concrete provider is
-:class:`StaticTestKmsProvider`, which holds explicitly synthetic KEKs for
-local tests and must never back a production code path.
+offers no configuration switching layer. :class:`StaticTestKmsProvider`
+holds explicitly synthetic KEKs for local tests and must never back a
+production code path. The controlled local file backend is implemented in
+``infra.file_kms``; its durability does not prove enterprise KMS integration
+or deletion of filesystem backups.
 
 Serialized record format (canonical JSON object, unique keys, UTF-8)::
 
@@ -88,8 +90,8 @@ def _reject_json(_kind: JsonRejectKind) -> NoReturn:
 class KmsProvider(ABC):
     """Abstract KEK wrapping service keyed by (purpose, retention bucket).
 
-    Real KMS adapters (R-05) implement this interface; this batch ships only
-    the synthetic local test provider below.
+    KMS adapters and the controlled local file backend implement this interface.
+    The provider below is exclusively synthetic and in-memory for tests.
     """
 
     @abstractmethod

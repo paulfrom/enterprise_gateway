@@ -112,6 +112,7 @@ CREATE TABLE knowledge_consumer_assets (
 CREATE TABLE knowledge_observations (
  dedup_key TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,domain TEXT NOT NULL,acl TEXT[] NOT NULL,purpose TEXT NOT NULL,
  source_id TEXT NOT NULL,source_version TEXT NOT NULL,candidate_ids UUID[] NOT NULL,
+ encrypted_observation BYTEA NOT NULL,
  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(tenant_id,domain,source_id,source_version) REFERENCES knowledge_sources(tenant_id,domain,source_id,version));
 

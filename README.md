@@ -5,9 +5,9 @@
 1. **外发分级与精确隐私脱敏**：
    * **分级拦截**：高敏与禁止外发数据强阻断在企业本地网络；获准内容经过多引擎检测与脱敏后安全外发。
    * **请求级精确伪名替换**：基于 HMAC 机制在请求内存中建立临时原值映射，在受支持文本字段内精确恢复已知令牌；不保证检测零漏检或模型语义正确。
-   * **全链路安全防护**：涵盖上游错误正文丢弃、异常断链防泄露、AES-GCM 信封加密落盘重放（Spool）、以及 KEK 密钥轮转与销毁。
+   * **全链路安全防护**：涵盖上游错误正文丢弃、异常断链防泄露、AES-GCM 信封加密落盘重放（Spool）、以及持久密钥认证包封与明确销毁边界。
 2. **企业受控知识资产沉淀**：
-   * 输入默认可进入知识采集与分析；来源、知识访问权限、用途与有效期分别治理。代码包含有向关系抽取、审批、事务 Outbox、PostgreSQL 持久化与 RLS 组件，自动候选须验证后发布。
+   * 当前完成来源可追溯的受限观察与候选沉淀，知识归属保持待定；员工 SSO、所有者分配与发布审批不作为沉淀前置。已有可信 ACL 保留，未知权限限制到服务端处理域。代码包含本地关系抽取、PostgreSQL/RLS、审批、Outbox、授权消费与撤回组件，后续发布仍须验证。
 
 已支持严格 Chat Completions 与 Messages 子集的受保护 HTTP 非流式、SSE、工具与多轮往返，以及加密采集产物到独立 worker、PostgreSQL、审批、授权消费、词典和撤回/到期的本地闭环。技术验证使用合成上游与业务身份，不能代表实际客户端、供应商或生产基础设施准入；未装配默认服务保持503。
 
@@ -36,7 +36,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 ┌─────────────────────────────────────────────────────────────────┐
 │ 1. 协议准入与免检 (protocol)                                     │
 │    ├── 逐字段严格解析 (OpenAI / Claude)                         │
-│    ├── 受信身份与保护域绑定 (identity / admission)               │
+│    ├── BYOK 来源关联与服务端处理域 (identity / admission)       │
 │    └── 静态审批模板精确免检 (static_exemption)                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ 2. 分级政策匹配 (policy)                                         │
@@ -106,9 +106,13 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -t . -v
 ~~~
 
-应用集成通过`gateway.app.create_app`装配完整`ProtectedPipeline`、服务端`enterprise_credentials`和至少32字节`hmac_key`。流水线需要实际规则/词典/NER、固定模型映射与出站绑定、审计/加密spool及完整版本；企业凭据逐请求验证，供应商凭据只由固定出站客户端生成。配置变化构造新装配，在途请求继续使用原route、协议、工具和验证器快照。
+应用集成通过`gateway.app.create_app`装配完整`ProviderRouter`、`ByokAuthenticator`、至少32字节`hmac_key`和服务端可信分类函数`classifier(raw_body: bytes) -> str`。分类必须来自受信业务系统或获准分类器，客户端自报头或正文不提供授权依据。流水线使用实际规则/词典/NER、固定供应商映射、真实磁盘水位、持久审计和加密 spool；缺可信分类时就绪与模型接口返回503。配置变化构造新装配，在途请求继续使用原路由快照。
 
-`gateway.runtime.create_runtime_app`提供单个固定 Custom Chat Completions 渠道的装配入口。调用者须明确提供可信身份、企业接入凭据、HMAC密钥、KMS、词典、NER模型目录、存储目录及分级和水位政策。服务端供应商文件只允许一个明确的 Custom 模型与 HTTPS `/v1/chat/completions`地址，装配时读取并固定；客户端仅持企业地址和企业凭据。能力标志不代表图片、任意协议或生产准入，缺少依赖时拒绝；`/readyz`仍为503。
+`gateway.runtime.create_runtime_app`是独立多供应商 BYOK 的唯一装配工厂。调用者提供处理租户/域、独立来源关联与映射 HMAC 密钥、KMS、词典、NER目录、状态目录、受信政策、水位政策及证据留存桶。`config/providers.json`仅包含服务端固定 URL、协议、模型白名单与超时，不接受供应商 Key、重复渠道/模型、未知字段或客户端选址。默认配置仅是可修改的路由样例，不证明对应模型仍供应或已经准入；Claude 已停用模型已移出默认配置，Messages 协议须使用另行核验的供应商配置。
+
+网关入口和供应商上游均支持 HTTP/HTTPS，HTTPS 为可选配置。上游 URL 可使用域名、私网或公网 HTTP 地址，例如 `http://10.0.0.8:8000/v1/chat/completions`；仍须匹配配置的协议路径和模型白名单。两种传输都执行 BYOK、分类、检测、留证、固定出口和 DNS 地址集校验。选择 HTTPS 时验证证书链与主机名，失败即拒绝，不自动降级；HTTP 不提供传输加密。
+
+客户端每次只携带一个规范 `Authorization: Bearer ...` 或 `x-api-key` 凭据。网关转发当次客户端 Key，账单归供应商账户；不持有付费供应商 Key、不提供模型推理算力、不垫资、不换 Key/供应商重试。Key 的带密钥关联标识只标记未验证来源，不授予企业员工角色、知识所有权或阅读权限。内部 `TrustedIdentity` 和 `EnterpriseAuthenticator` 仅保留给受信审阅组件，不能作为 BYOK 入口的默认身份。
 
 DeepSeek响应支持普通`reasoning_content`文本的精确恢复、`system_fingerprint`、空`logprobs`和有限用量明细：`prompt_tokens_details.cached_tokens`及`completion_tokens_details.reasoning_tokens`。计费和结构元数据保持不变；未知明细、非空logprobs和无法恢复的令牌拒绝。普通推理文本不构成已验签历史状态，下一轮请求仍按请求契约准入。
 
@@ -116,21 +120,69 @@ DeepSeek响应支持普通`reasoning_content`文本的精确恢复、`system_fin
 
 ### 3. 启动网关服务 (本地与 Docker)
 
+启动前由部署方准备受控文件与以下显式设置。密钥为小写十六进制；每项密钥只允许环境值或对应 `_FILE` 文件二选一，文件可含末尾换行。密钥文件置于受限目录并排除版本控制；整个运行期保持主密钥与持久状态卷一致。
+
+| 设置 | 用途 |
+|---|---|
+| `GATEWAY_PROCESSING_DOMAIN` / `GATEWAY_PROCESSING_TENANT` | 服务端受限处理范围，不能从供应商 Key 推导 |
+| `GATEWAY_STATE_DIR` | 持久目录，包含 `keys/`、`intents/`、`evidence/`、`spool/` |
+| `GATEWAY_KMS_MASTER_KEY` 或 `_FILE` | 恰好32字节，包封本地持久独立 KEK |
+| `GATEWAY_HMAC_KEY` 或 `_FILE` | 至少32字节，请求映射/完整性用途 |
+| `GATEWAY_SOURCE_CORRELATION_KEY` 或 `_FILE` | 至少32字节，仅未验证来源关联 |
+| `GATEWAY_DICTIONARY_FILE` | 符合现有词典 schema 和内容哈希的受控 JSON |
+| `GATEWAY_POLICY_FILE` | 符合 `ClassificationPolicy` schema 的受信政策 JSON |
+| `GATEWAY_NER_PACKAGE_DIR` | 已核验完整本地 ONNX 模型包 |
+| `GATEWAY_EVIDENCE_BUCKET` | 受控原始请求证据留存桶 |
+| `PROVIDERS_CONFIG` 或 `--config` | 路由文件，默认 `config/providers.json` |
+| `GATEWAY_CLASSIFIER` 或 `--classifier` | 运维批准的同步 Python `module:callable`，接收请求 bytes 并返回政策分类；未配置保持拒绝 |
+| `GATEWAY_SSL_CERTFILE` / `GATEWAY_SSL_KEYFILE` | 可选的原生 HTTPS PEM 证书与私钥；启用时必须成对提供，也可用同名命令行参数；未配置时使用 HTTP |
+
+Compose 使用一个受控只读 `GATEWAY_OPERATOR_DIR`，其中放置 `dictionary.json`、`policy.json`、受信分类器模块和可选 TLS 文件。该目录加入容器 Python 模块路径；例如 `deployment_classifier.py` 的 `classify` 函数对应 `GATEWAY_CLASSIFIER=deployment_classifier:classify`。这是部署方受信代码，会执行 Python 导入；不得挂载用户上传文件或把合成测试分类器用于真实业务。密钥仍使用独立 Docker secrets。端口默认只绑定 `127.0.0.1:8080`；对外监听须显式设置 `GATEWAY_BIND_ADDRESS` 与 `GATEWAY_PUBLISHED_PORT`，并配置入口访问控制。入口允许 HTTP；需要原生 HTTPS 时再配置证书对。
+
+本机启动时，受信分类器须安装到运行环境，或将其受控目录加入 `PYTHONPATH`；仅设置模块名称不会创建分类逻辑。路径和证书使用本机实际文件，容器内使用 `/app/operator/...`。
+
+`FileKmsProvider`是受控本地文件后端，使用随机独立 KEK、进程锁、认证包封和持久销毁墓碑；不等同企业 KMS，也不证明备份/快照已删除。首次使用必须显式初始化密钥，常规启动绝不补建丢失的密钥。有任何历史意图/证据/spool记录时，初始化命令仅验证既有键，缺键拒绝。应备份受控密钥状态与主密钥；不能通过重新初始化恢复丢键后的密文。
+
 ~~~powershell
-# 本地 Python 直接启动独立脱敏网关 (加载 config/providers.json，支持 BYOK 与多供应商路由)
+# 已设置上表所需环境后，首次显式初始化
+python start_gateway.py --provision-keys
+
+# 常规启动；缺可信服务端分类时健康200、就绪/模型接口503
 python start_gateway.py --host 0.0.0.0 --port 8080
 
-# 或使用 Docker Compose 服务端一键启动
-docker compose up -d --build
+# 配齐受信模块及正式证书后，原生 HTTPS 示例
+python start_gateway.py --host 127.0.0.1 --port 8443 --classifier deployment_classifier:classify --ssl-certfile <certificate.pem> --ssl-keyfile <private-key.pem>
+
+# Compose 使用必填 _FILE 密钥路径与 GATEWAY_OPERATOR_DIR，另准备受限 PG 连接
+docker compose build gateway
+docker compose run --rm --no-deps gateway python start_gateway.py --provision-keys
+docker compose up -d
 ~~~
+
+启动器调用同一工厂；不创建示例词典、默认获准分类或长期企业身份。受信 Python 集成可调用 `start_gateway.build_app(classifier=approved_classifier)`，CLI/镜像可通过上述运维模块引用装配同一分类器。配置模块引用只解决装配，不提供业务外发批准；无分类器保持503，错误引用、异步/错误签名函数或无效 TLS 证书对安全退出。有效 BYOK、合法协议与可信分类结果已到达时，高敏/禁止外发或未知分类输入可先形成受限加密观察，再拒绝外发；秘密检测/协议/存储失败仍拒绝采集。就绪会检查路由完整版本、分类接入、存储/密钥和真实水位；通过技术就绪仍不代表生产准入。容器探针适配 HTTP/HTTPS，仅表示本机存活；选择 HTTPS 时客户端须校验证书链与服务域名。
+
+独立 `start_knowledge_worker.py`读取相同状态卷、主密钥、处理域和租户，将受限 spool 幂等提交到现有 PostgreSQL 表。另外显式配置 `GATEWAY_KNOWLEDGE_PG_DSN` 或 `_FILE`，以及服务端 `GATEWAY_KNOWLEDGE_WORKER_SUBJECT`；连接角色须非表 owner、非超级用户、无 BYPASSRLS，现有 schema/RLS 必须先部署。worker 不初始化数据库、不创建密钥、不批准或发布知识；可用 `--once` 执行单次重放。Compose 的 worker 连接部署方既有 PG，镜像不内置生产数据库。当前观察沿用30天技术留存和 `standard-retention` 桶，具体真实留存政策仍需业务核准。
+
+数据库初始化与 worker 启动共享最小权限检查：应用角色不能具有创建数据库/角色、复制能力、切换到特权角色或直接/间接成为 PostgreSQL `pg_*` 全局预定义角色的成员。登录用户、会话用户与当前 SQL 用户须一致，不接受管理连接降级成应用角色。worker 对当前定义的全部13张资产表检查 forced RLS，且应用角色不能拥有表或成为表 owner 的成员。单次执行 `--once` 在提交失败或隔离异常时返回非零；成功提交或幂等跳过返回0，失败记录仍保留以便重放。
+
+首次部署 PostgreSQL 时，管理方使用受控 JSON 文件（`schema`、`application_role`、`admin_dsn`、`app_dsn` 四个字段）显式初始化一个尚不存在的 schema：
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/prepare_knowledge_database.py --config <private-input.json> --output-config <new-private-bound-config.json>
+~~~
+
+工具复用当前数据库定义，在一个管理事务中建立表、受限授权与 forced RLS；拒绝已有 schema、特权应用角色和可切换到管理角色的账号，不修改既有数据或提供迁移。输出文件包含连接秘密，必须置于受限、Git 忽略的目录；取其 `app_dsn` 写入 worker 的 DSN 秘密文件，不能把 `admin_dsn`交给 worker。真实远端部署必须启用并验证数据库 TLS（如 `sslmode=verify-full` 与受信 CA）；仅完成连接或建表不能证明传输安全。
+
+本地合成部署验证入口为 `scripts/verify_local_deployment.py`，参数通过 `--help` 查看。它使用实际网关、检测、加密与独立 worker，本机合成上游只模拟供应商协议；结果写入调用方指定目录。合成分类与上游不构成真实供应商或业务准入。
 
 ### 4. 接口与 BYOK 使用说明
 
 | 请求端点 | 协议类型 | 典型调用方式 |
 |---|---|---|
 | `GET /healthz` | 进程存活探针 | `curl http://127.0.0.1:8080/healthz` -> 返回 `200 OK` |
+| `GET /readyz` | 实际装配就绪探针 | 缺分类/密钥/存储或水位不足返回503 |
 | `POST /v1/chat/completions` | OpenAI / DeepSeek 协议 | 携带客户端自备 Key：`-H "Authorization: Bearer sk-user-key"`，Body 指定 `"model": "deepseek-chat"` 或 `"gpt-4o"` |
-| `POST /v1/messages` | Claude Messages 协议 | 携带自备 Key：`-H "x-api-key: sk-ant-user-key"`，Body 指定 `"model": "claude-3-5-sonnet-20241022"` |
+| `POST /v1/messages` | Claude Messages 协议 | 携带自备 Key：`-H "x-api-key: sk-ant-user-key"`，Body 指定部署方已经核验并配置的模型 |
 
 * **费用与配额归属**：网关自身不垫资、不持有供应商 Key，请求外发时动态注入调用方自备的 API Key，费用由供应商直接扣减调用方的账户。
 * **多供应商路由**：网关读取 `config/providers.json` 自动将清洗后的请求路由到对应供应商（DeepSeek、OpenAI、Claude 或本地私有 vLLM）。
@@ -139,7 +191,7 @@ docker compose up -d --build
 
 ## 生产部署与安全边界声明
 
-1. **不可绕过性**：网关必须部署为客户端到大模型上游的唯一出口，且上游服务必须配置仅接受来自网关 IP/证书的请求。
+1. **不可绕过性**：完整覆盖必须由企业网络/客户端管理约束模型出口，并在供应商支持时实施来源限制；客户端持有供应商 Key，单纯配置 Base URL 无法阻止其绕过网关直连。
 2. **内存物理擦除限制**：原值映射在请求结束时由 Python 垃圾回收机制释放对象引用，在解释器层面不保证物理 RAM 位的硬件擦除。
 3. **推断风险防范**：文本实体替换能够消除直接标识符泄露，但不能完全阻止模型基于上下文语境产生的反向间接推断，高敏绝密数据应直接配置为 `LOCAL_ONLY` 强阻断。
 4. **知识数据库权限**：候选读取核验自身和全部来源权限，拒绝状态持久化。归一描述表不并集ACL；固定search_path、撤销PUBLIC执行权的受限管理函数需要专用管理owner，应用角色不得继承其BYPASSRLS权限。读取与来源撤回/到期通过行锁明确事务顺序。

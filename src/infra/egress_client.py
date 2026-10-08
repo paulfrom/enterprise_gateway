@@ -1,7 +1,7 @@
 """Channel-bound outbound client: the URL is always the binding's, never the caller's.
 
 Capability boundary: this module proves the egress-side binding contract for a
-single admitted channel — fixed scheme/host/port/path prefix, injected vendor
+single admitted channel — fixed scheme/host/port/path prefix, caller BYOK
 credential, timeout budget, no caller-selectable URL (there is no ``url``
 parameter anywhere on the API), no proxy environment influence
 (``trust_env=False``), same-binding-only redirect policy, an egress header
@@ -35,7 +35,7 @@ import ipaddress
 import math
 import socket
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import NoReturn
 
 import httpx
@@ -48,8 +48,7 @@ _MAX_REDIRECTS = 8
 
 # Outbound headers the protocols need. Everything else — including every name
 # in identity.FORBIDDEN_CLIENT_IDENTITY_HEADERS — is dropped before sending.
-# A caller-supplied Authorization is dropped whenever a binding credential
-# exists; the injected credential is the only Authorization ever sent.
+# One caller-supplied credential is transformed to the bound protocol header.
 # Host is not caller-settable: it is derived from the bound URL by httpx.
 EGRESS_HEADER_WHITELIST: frozenset[str] = frozenset(
     {
@@ -105,9 +104,8 @@ def _normalize_addresses(raw: object) -> frozenset[str]:
 class BoundUpstream:
     """Immutable binding of one channel to one fixed supplier origin.
 
-    ``credential`` is the exact Authorization header value, injected at
-    construction; it is never persisted, logged, or serialized. Validation
-    failures raise ``SafetyError(INVALID_UPSTREAM)`` with static detail only.
+    No supplier credential is stored on a binding. Every send requires the
+    current caller's BYOK. Validation failures contain static detail only.
     """
 
     channel_id: str
@@ -115,7 +113,6 @@ class BoundUpstream:
     host: str
     port: int
     path_prefix: str
-    credential: str | None = field(repr=False)
     timeout_seconds: float
     allowed_addresses: frozenset[str]
     max_redirects: int = 0
@@ -147,10 +144,6 @@ class BoundUpstream:
             or ".." in self.path_prefix
         ):
             raise SafetyError(SafetyCode.INVALID_UPSTREAM, "path_prefix")
-        if self.credential is not None and (
-            not isinstance(self.credential, str) or not self.credential.strip()
-        ):
-            raise SafetyError(SafetyCode.INVALID_UPSTREAM, "credential")
         if (
             not isinstance(self.timeout_seconds, (int, float))
             or isinstance(self.timeout_seconds, bool)
@@ -183,7 +176,6 @@ class BoundUpstream:
         host: str,
         port: int,
         path_prefix: str,
-        credential: str | None,
         timeout_seconds: float,
         resolver: Resolver | None = None,
         max_redirects: int = 0,
@@ -201,7 +193,6 @@ class BoundUpstream:
             host=host,
             port=port,
             path_prefix=path_prefix,
-            credential=credential,
             timeout_seconds=timeout_seconds,
             allowed_addresses=addresses,
             max_redirects=max_redirects,
@@ -210,7 +201,8 @@ class BoundUpstream:
 
     @property
     def base_url(self) -> str:
-        return f"{self.scheme}://{self.host}:{self.port}"
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"{self.scheme}://{host}:{self.port}"
 
 
 class _BoundTransport(httpx.BaseTransport):
@@ -324,48 +316,46 @@ class BoundEgressClient:
         path = target.path or "/"
         if not _within_prefix(self._binding.path_prefix, path):
             raise SafetyError(SafetyCode.UPSTREAM_BINDING_VIOLATION, "redirect")
-        url = f"{scheme}://{host}:{port}{path}"
+        url = f"{self._binding.base_url}{path}"
         if target.query:
             url = f"{url}?{target.query.decode('utf-8')}"
         return url
 
     def _filter_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         filtered: dict[str, str] = {}
-        caller_auth = None
-        caller_x_api_key = None
+        credentials = []
         if headers is not None:
             if not isinstance(headers, Mapping):
                 raise TypeError("headers must be a mapping")
             for name, value in headers.items():
                 lowered = name.lower() if isinstance(name, str) else ""
-                if lowered == "authorization":
-                    caller_auth = value
-                    continue
-                if lowered == "x-api-key":
-                    caller_x_api_key = value
+                if lowered in ("authorization", "x-api-key"):
+                    credentials.append((lowered, value))
                     continue
                 if lowered not in EGRESS_HEADER_WHITELIST:
                     continue
-                filtered[name] = value
+                if lowered in filtered:
+                    raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "duplicate outbound header")
+                filtered[lowered] = value
 
-        if self._binding.credential is not None:
-            cred = self._binding.credential.strip()
-            if self._binding.credential_header == 'x-api-key':
-                filtered["x-api-key"] = cred
-                filtered.setdefault("anthropic-version", "2023-06-01")
-            else:
-                filtered["Authorization"] = cred
+        if len(credentials) != 1:
+            raise SafetyError(SafetyCode.INVALID_IDENTITY, "one BYOK required")
+        name, raw = credentials[0]
+        if type(raw) is not str:
+            raise SafetyError(SafetyCode.INVALID_IDENTITY, "invalid BYOK")
+        if name == "authorization":
+            if not raw.startswith("Bearer "):
+                raise SafetyError(SafetyCode.INVALID_IDENTITY, "invalid BYOK")
+            key = raw[7:]
         else:
-            # BYOK mode: dynamically apply caller-provided credential
-            if self._binding.credential_header == 'x-api-key':
-                raw_key = caller_x_api_key or (caller_auth[7:].strip() if caller_auth and caller_auth.startswith('Bearer ') else caller_auth)
-                if raw_key and raw_key.strip():
-                    filtered["x-api-key"] = raw_key.strip()
-                    filtered.setdefault("anthropic-version", "2023-06-01")
-            else:
-                auth_val = caller_auth or (f"Bearer {caller_x_api_key.strip()}" if caller_x_api_key and caller_x_api_key.strip() else None)
-                if auth_val and auth_val.strip():
-                    filtered["Authorization"] = auth_val.strip()
+            key = raw
+        if not key or any(ord(char) < 33 or ord(char) > 126 for char in key):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY, "invalid BYOK")
+        if self._binding.credential_header == "x-api-key":
+            filtered["x-api-key"] = key
+            filtered.setdefault("anthropic-version", "2023-06-01")
+        else:
+            filtered["authorization"] = f"Bearer {key}"
 
         if self._binding.package_version is not None:
             filtered["x-protection-package-version"] = self._binding.package_version

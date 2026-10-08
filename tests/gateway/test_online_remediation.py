@@ -7,7 +7,8 @@ import json
 from httpx import ASGITransport, AsyncClient
 from gateway.app import create_app, _render_safety_error
 from infra.errors import SafetyCode, SafetyError
-from protocol.identity import TrustedIdentity
+from protocol.identity import TrustedIdentity, ByokAuthenticator
+from gateway.provider_router import ProviderRouter
 from protocol.history_state import HistoricalStateAdapter, ReasoningStateValidator, ReasoningBlock, ProviderStateVerifier
 from tests.integration import test_integration_roundtrip as fixture_module
 from tests.integration.test_integration_roundtrip import UpstreamSpyTransport
@@ -102,7 +103,7 @@ class OnlineRegressionTests(unittest.IsolatedAsyncioTestCase):
                 with MappingContext(fixture.domain, 'v1', TEST_HMAC_KEY) as context:
                     pipeline.process_request(raw_body=json.dumps({'model': 'deepseek-flash',
                         'messages': [{'role': 'user', 'content': '请查询阿尔法科技的张三。'}]}),
-                        headers={}, identity=fixture.identity, category='STANDARD', context=context)
+                        headers={'authorization':'Bearer synthetic-client-key'}, identity=fixture.identity, category='STANDARD', context=context)
             self.assertEqual(1, len(spy.calls))
             self.assertEqual('deepseek-flash', json.loads(spy.calls[0].content)['model'])
             with MappingContext(fixture.domain, 'v1', TEST_HMAC_KEY) as context:
@@ -138,15 +139,13 @@ class OnlineRegressionTests(unittest.IsolatedAsyncioTestCase):
     def test_protocol_error_is_controlled(self):
         self.assertEqual(_render_safety_error(SafetyError(SafetyCode.PROTOCOL_VIOLATION)).status_code, 400)
 
-    async def test_fixed_identity_does_not_authenticate_missing_or_wrong_token(self):
-        now = datetime.now(timezone.utc)
-        identity = TrustedIdentity('u','t','corp.test',frozenset({'employee'}),frozenset({'model-query'}),auth_source='token',authenticated_at=now-timedelta(minutes=1),expires_at=now+timedelta(hours=1))
+    async def test_byok_missing_and_malformed_credential_never_processes(self):
         pipeline = MagicMock()
-        pipeline.domain = 'corp.test'
-        pipeline.process_request.return_value.response.model_dump.return_value = {'ok': True}
-        app = create_app(pipeline=pipeline, enterprise_credentials={"valid-token":identity}, hmac_key=b"0123456789abcdef0123456789abcdef")
+        app = create_app(router=ProviderRouter({'synthetic':pipeline}),
+            authenticator=ByokAuthenticator(domain='corp.test',tenant_id='test',correlation_key=b'c'*32),
+            classifier=lambda _: 'STANDARD',hmac_key=b'h'*32)
         async with AsyncClient(transport=ASGITransport(app=app),base_url='http://test') as client:
-            for headers in ({},{'authorization':'Bearer wrong'}):
+            for headers in ({},{'authorization':'invalid-scheme'}):
                 response = await client.post('/v1/chat/completions',json={'model':'synthetic','messages':[{'role':'user','content':'hi'}]},headers=headers)
                 self.assertEqual(response.status_code,401)
         pipeline.process_request.assert_not_called()

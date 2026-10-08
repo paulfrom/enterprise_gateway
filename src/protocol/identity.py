@@ -1,18 +1,23 @@
-"""Trusted identity and protection-domain/ACL binding contract.
+"""Trusted identity and unverified BYOK source contracts.
 
 Identity and authorization contexts must originate from trusted transport
 or internal authentication providers (e.g. mTLS or internal token verifiers).
 Client HTTP headers, user payloads, and self-asserted identity claims are
 untrusted and strictly forbidden from creating, altering, or overriding
 the protection domain or source ACL.
+
+Supplier credential possession produces a restricted processing source context;
+it never creates an enterprise identity or knowledge ownership.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 import hmac
+import hashlib
+import re
 
 from infra.errors import SafetyCode, SafetyError
 
@@ -122,17 +127,59 @@ class TrustedIdentity:
         return self.authenticated_at <= now < self.expires_at
 
 
+@dataclass(frozen=True, slots=True)
+class UnverifiedSourceContext:
+    """Server-scoped BYOK request source; not an authenticated enterprise member.
+
+    Correlation identifies credential reuse only. Neither the correlation ID nor
+    the processing tenant asserts ownership or grants knowledge-reading rights.
+    """
+
+    source_id: str
+    tenant_id: str
+    domain: str
+    received_at: datetime
+    expires_at: datetime
+    purposes: frozenset[str]
+    source_acl: frozenset[str]
+    source_provenance: str = "unverified-byok"
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.source_id, str)
+                or re.fullmatch(r"byok:[0-9a-f]{64}", self.source_id) is None):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.tenant_id, self.domain)):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        if (self.source_provenance != "unverified-byok"
+                or self.purposes != frozenset({"model-query"})
+                or not isinstance(self.purposes, frozenset)
+                or self.source_acl != frozenset({f"{self.domain}:restricted-candidate"})
+                or not isinstance(self.source_acl, frozenset)):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        _require_tz(self.received_at, "received_at")
+        _require_tz(self.expires_at, "expires_at")
+        if not timedelta(0) < self.expires_at - self.received_at <= timedelta(minutes=5):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+
+    def is_valid_at(self, now: datetime) -> bool:
+        _require_tz(now, "now")
+        return self.received_at <= now < self.expires_at
+
+
 def validate_request_authorization(
-    identity: TrustedIdentity,
+    identity: TrustedIdentity | UnverifiedSourceContext,
     *,
     now: datetime,
     required_purpose: str = "model-query",
 ) -> None:
-    """Validate identity validity period and required request intent/purpose."""
-    if not isinstance(identity, TrustedIdentity):
+    """Validate request validity and purpose without promoting BYOK to identity."""
+    if not isinstance(identity, (TrustedIdentity, UnverifiedSourceContext)):
         raise SafetyError(SafetyCode.INVALID_IDENTITY)
     _require_tz(now, "now")
-    if identity.authenticated_at > now:
+    issued_at = (identity.authenticated_at if isinstance(identity, TrustedIdentity)
+                 else identity.received_at)
+    if issued_at > now:
         raise SafetyError(SafetyCode.FUTURE_DATED_AUTH, "identity is future-dated")
     if identity.expires_at <= now:
         raise SafetyError(SafetyCode.AUTH_EXPIRED, "identity has expired")
@@ -216,37 +263,20 @@ def authorize_role(identity: TrustedIdentity, required_role: str) -> None:
 
 
 class EnterpriseAuthenticator:
-    """Server-owned credential bindings; the HTTP request proves possession."""
+    """Trusted internal credentials for enterprise audit review, not BYOK ingress."""
 
     def __init__(
         self,
-        credentials: Mapping[str, TrustedIdentity] | None = None,
-        *,
-        allow_byok: bool = False,
-        default_domain: str = "corp-prod",
+        credentials: Mapping[str, TrustedIdentity],
     ) -> None:
-        if credentials:
-            if any(not isinstance(k, str) or not k or not isinstance(v, TrustedIdentity) for k, v in credentials.items()):
-                raise SafetyError(SafetyCode.INVALID_IDENTITY)
-            self._credentials = tuple(credentials.items())
-        else:
-            self._credentials = ()
-        self._allow_byok = allow_byok
-        self._default_domain = default_domain
+        if not isinstance(credentials, Mapping) or any(
+                not isinstance(key, str) or not key or not isinstance(value, TrustedIdentity)
+                for key, value in credentials.items()):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        self._credentials = tuple(credentials.items())
 
     def authenticate(self, headers: Mapping[str, str]) -> TrustedIdentity:
-        assert_no_client_header_spoofing(headers)
-        auth_header = ""
-        for k, v in headers.items():
-            if k.lower() == "authorization":
-                auth_header = v
-                break
-            if k.lower() == "x-api-key" and not auth_header:
-                auth_header = f"Bearer {v}"
-
-        if not auth_header.startswith('Bearer ') or not auth_header[7:].strip():
-            raise SafetyError(SafetyCode.MISSING_IDENTITY)
-        token = auth_header[7:].strip()
+        token = _request_credential(headers)
         identity = None
         for credential, candidate in self._credentials:
             if hmac.compare_digest(token.encode('utf-8'), credential.encode('utf-8')):
@@ -254,21 +284,55 @@ class EnterpriseAuthenticator:
                 break
 
         if identity is None:
-            if self._allow_byok:
-                import hashlib
-                from datetime import timedelta, timezone
-                now = datetime.now(timezone.utc)
-                sub_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()[:12]
-                return TrustedIdentity(
-                    subject_id=f"byok-{sub_hash}",
-                    tenant_id=f"tenant-{sub_hash}",
-                    domain=self._default_domain,
-                    roles=frozenset({"employee", "ai-assistant"}),
-                    purposes=frozenset({"model-query"}),
-                    source_acl=frozenset({"worker", "security", "business", "publisher", "reader", "steward"}),
-                    auth_source="byok-token",
-                    authenticated_at=now - timedelta(minutes=1),
-                    expires_at=now + timedelta(days=365),
-                )
             raise SafetyError(SafetyCode.INVALID_IDENTITY)
         return identity
+
+
+def _request_credential(headers: Mapping[str, str]) -> str:
+    """Select exactly one canonical request credential; never echo secret data."""
+    assert_no_client_header_spoofing(headers)
+    credentials = [(name.lower(), value) for name, value in headers.items()
+                   if isinstance(name, str) and name.lower() in {"authorization", "x-api-key"}]
+    if not credentials:
+        raise SafetyError(SafetyCode.MISSING_IDENTITY)
+    if len(credentials) != 1:
+        raise SafetyError(SafetyCode.INVALID_IDENTITY)
+    name, value = credentials[0]
+    if not isinstance(value, str):
+        raise SafetyError(SafetyCode.INVALID_IDENTITY)
+    token = value
+    if name == "authorization":
+        if not value.startswith("Bearer "):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        token = value[7:]
+    if not token:
+        raise SafetyError(SafetyCode.MISSING_IDENTITY)
+    if any(ord(char) < 33 or ord(char) > 126 for char in token):
+        raise SafetyError(SafetyCode.INVALID_IDENTITY)
+    return token
+
+
+class ByokAuthenticator:
+    """Create restricted processing context from client supplier credentials."""
+
+    def __init__(self, *, domain: str, tenant_id: str, correlation_key: bytes) -> None:
+        if any(not isinstance(value, str) or not value.strip() for value in (domain, tenant_id)):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        if not isinstance(correlation_key, bytes) or len(correlation_key) < 32:
+            raise SafetyError(SafetyCode.INVALID_HMAC_KEY)
+        self._domain = domain
+        self._tenant_id = tenant_id
+        self._correlation_key = correlation_key
+
+    def authenticate(self, headers: Mapping[str, str]) -> UnverifiedSourceContext:
+        token = _request_credential(headers)
+        # Purpose separation prevents this HMAC from being confused with masking.
+        correlation = hmac.new(self._correlation_key, b"byok-source\0" + token.encode("ascii"),
+                               hashlib.sha256).hexdigest()
+        now = datetime.now(timezone.utc)
+        return UnverifiedSourceContext(
+            source_id=f"byok:{correlation}", tenant_id=self._tenant_id, domain=self._domain,
+            received_at=now, expires_at=now + timedelta(minutes=5),
+            purposes=frozenset({"model-query"}),
+            source_acl=frozenset({f"{self._domain}:restricted-candidate"}),
+        )

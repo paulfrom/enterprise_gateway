@@ -1,4 +1,4 @@
-"""Local review service: health plus explicit refusal; no upstream client exists."""
+"""BYOK HTTP ingress with explicit trusted classification and protected routing."""
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -13,7 +13,11 @@ import time
 from infra.config import ReviewSettings
 from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext
-from protocol.identity import TrustedIdentity, EnterpriseAuthenticator
+from protocol.identity import ByokAuthenticator
+from gateway.provider_router import ProviderRouter
+from gateway.pipeline import ProtectedPipeline
+from infra.strict_json import parse_strict_json, JsonRejectKind
+from typing import Callable
 
 
 PRODUCTION_GATES = (
@@ -42,6 +46,9 @@ def _render_safety_error(exc: SafetyError) -> JSONResponse:
         SafetyCode.MISSING_REQUIRED_ROLE,
         SafetyCode.SCOPE_MISMATCH,
         SafetyCode.POLICY_REJECTED,
+        SafetyCode.MISSING_CATEGORY,
+        SafetyCode.UNKNOWN_CATEGORY,
+        SafetyCode.CATEGORY_NOT_APPROVED,
         SafetyCode.SECRET_DETECTED,
     ):
         status_code = 403
@@ -76,27 +83,65 @@ def _render_safety_error(exc: SafetyError) -> JSONResponse:
 def create_app(
     settings: ReviewSettings | None = None,
     *,
-    deepseek_pipeline: object = None,
-    claude_pipeline: object = None,
-    pipeline: object = None,
-    router: object = None,
-    enterprise_credentials: dict[str, TrustedIdentity] | None = None,
-    allow_byok: bool = False,
+    router: ProviderRouter | None = None,
+    authenticator: ByokAuthenticator | None = None,
+    classifier: Callable[[bytes], str] | None = None,
     hmac_key: bytes | None = None,
 ) -> FastAPI:
+    """BYOK ingress. Classification is supplied only by trusted server integration."""
     settings = settings or ReviewSettings()
-    app = FastAPI(title="Enterprise Privacy Gateway Review", docs_url=None,
+    app = FastAPI(title="Enterprise Privacy Gateway", docs_url=None,
                   redoc_url=None, openapi_url=None)
     app.state.settings = settings
-    app.state.deepseek_pipeline = deepseek_pipeline
-    app.state.claude_pipeline = claude_pipeline
-    app.state.pipeline = pipeline
     app.state.router = router
-    if enterprise_credentials or allow_byok:
-        app.state.authenticator = EnterpriseAuthenticator(enterprise_credentials, allow_byok=allow_byok)
-    else:
-        app.state.authenticator = None
+    app.state.authenticator = authenticator
+    app.state.classifier = classifier
     app.state.hmac_key = hmac_key
+
+    def missing_gates():
+        missing = []
+        bound = app.state.router
+        if not isinstance(bound, ProviderRouter):
+            missing.append("admitted_protocol_and_provider")
+        else:
+            try:
+                for model in bound.supported_models:
+                    pipeline = bound.get_pipeline(model)
+                    if not isinstance(pipeline, ProtectedPipeline):
+                        raise ValueError("protected pipeline required")
+                    if not pipeline.evidence_bucket or pipeline.spool_writer is None:
+                        raise ValueError("durable collection required")
+                    if pipeline.evidence_gate._evidence_directory is None or pipeline.evidence_gate._kms is None:
+                        raise ValueError("encrypted evidence required")
+                    probe = b'\x00' * 32
+                    for kms, purpose, bucket in (
+                        (pipeline.evidence_gate._kms, 'model-query', pipeline.evidence_bucket),
+                        (pipeline.spool_writer._kms, 'knowledge-accumulation:knowledge-spool', 'standard-retention'),
+                    ):
+                        wrapped = kms.wrap(probe, purpose=purpose, bucket=bucket)
+                        if kms.unwrap(wrapped, purpose=purpose, bucket=bucket) != probe:
+                            raise ValueError("key lifecycle unavailable")
+                    for directory in (pipeline.evidence_gate._intent_directory,
+                                      pipeline.evidence_gate._evidence_directory,
+                                      pipeline.spool_writer._directory):
+                        if not directory.is_dir():
+                            raise ValueError("durable directory unavailable")
+                    pipeline.version_handle.manifest.require_complete()
+                    pipeline.version_handle.manifest.verify_payloads(pipeline._component_payloads())
+                    pipeline.watermark_guard.check_egress_permitted()
+                    if pipeline.egress_client._client.is_closed or pipeline.detector._executor._closed:
+                        raise ValueError("closed runtime")
+                if getattr(app.state, 'runtime_closed', False):
+                    raise ValueError("closed runtime")
+            except Exception:
+                missing.append("validated_protection_and_durable_resources")
+        if not isinstance(app.state.authenticator, ByokAuthenticator):
+            missing.append("restricted_source_context")
+        if not callable(app.state.classifier):
+            missing.append("trusted_data_classification")
+        if not isinstance(app.state.hmac_key, bytes) or len(app.state.hmac_key) < 32:
+            missing.append("durable_audit_and_key_lifecycle")
+        return missing
 
     @app.get("/healthz")
     async def health() -> dict[str, str]:
@@ -104,53 +149,27 @@ def create_app(
 
     @app.get("/readyz")
     async def readiness() -> JSONResponse:
-        missing: list[str] = []
-        # Gate 1: at least one protected channel or router must be bound
-        has_channel = (
-            getattr(app.state, "router", None) is not None
-            or getattr(app.state, "pipeline", None) is not None
-            or getattr(app.state, "deepseek_pipeline", None) is not None
-            or getattr(app.state, "claude_pipeline", None) is not None
-        )
-        if not has_channel:
-            missing.append("admitted_protocol_and_provider")
-        # Gate 2: authenticator (identity & policy) must be configured
-        if getattr(app.state, "authenticator", None) is None:
-            missing.append("trusted_identity_and_data_policy")
-        # Gate 3: HMAC signing key must be present
-        if getattr(app.state, "hmac_key", None) is None:
-            missing.append("durable_audit_and_key_lifecycle")
-        # Remaining gates (detection, egress, spool, knowledge) are wired at
-        # assembly time and cannot be probed cheaply; they are satisfied once
-        # the structural gates above pass.
+        missing = missing_gates()
         if missing:
             return JSONResponse(status_code=503, content={
                 "ready": False,
                 "code": "PRODUCTION_NOT_ADMITTED",
                 "missing_gates": missing,
             })
-        return JSONResponse(status_code=200, content={"ready": True})
+        return JSONResponse(status_code=200, content={
+            "ready": True, "scope": "protected-runtime", "production_admission": False,
+        })
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/messages")
     async def model_call(request: Request) -> JSONResponse:
-        has_router = getattr(app.state, "router", None) is not None
+        if not isinstance(app.state.router, ProviderRouter) or getattr(app.state, 'runtime_closed', False):
+            return JSONResponse(status_code=503, content={"error": {"code": "CHANNEL_NOT_ADMITTED"}})
+        if not callable(app.state.classifier):
+            return JSONResponse(status_code=503, content={"error": {"code": "CLASSIFICATION_NOT_CONFIGURED"}})
         p = None
-        if not has_router:
-            p = (
-                app.state.deepseek_pipeline
-                if request.url.path == "/v1/chat/completions"
-                else app.state.claude_pipeline
-            ) or app.state.pipeline
-
-            if p is None:
-                return JSONResponse(status_code=503, content={"error": {
-                    "code": "CHANNEL_NOT_ADMITTED",
-                    "message": "受保护渠道尚未通过准入验证，请求未外发。",
-                }})
-
         headers = dict(request.headers)
-        if app.state.authenticator is None:
+        if not isinstance(app.state.authenticator, ByokAuthenticator):
             return JSONResponse(
                 status_code=401,
                 content={"error": {"code": "MISSING_IDENTITY", "message": "缺少可信身份上下文。"}},
@@ -162,12 +181,12 @@ def create_app(
         try:
             req_timeout = p.request_timeout if p is not None else 180.0
             deadline_at = time.monotonic() + req_timeout
-            identity = app.state.authenticator.authenticate(headers)
             auth_count = sum(name.lower() == b'authorization' for name, _ in request.scope['headers'])
             x_api_count = sum(name.lower() == b'x-api-key' for name, _ in request.scope['headers'])
             if auth_count + x_api_count != 1:
                 raise SafetyError(SafetyCode.INVALID_IDENTITY, 'ambiguous credential')
-            if key is None:
+            identity = app.state.authenticator.authenticate(headers)
+            if not isinstance(key, bytes) or len(key) < 32:
                 raise SafetyError(SafetyCode.INVALID_HMAC_KEY)
             
             body_limit = p.body_limit if p is not None else 10485760 # 10MB default
@@ -183,15 +202,21 @@ def create_app(
                 raw.extend(chunk)
             raw_body = bytes(raw)
 
-            if has_router:
-                import json
-                try:
-                    payload = json.loads(raw_body.decode('utf-8'))
-                    model_id = payload.get('model', '')
-                except Exception:
-                    raise SafetyError(SafetyCode.MALFORMED_JSON, 'model extraction')
-                p = app.state.router.get_pipeline(model_id)
-
+            def reject_json(kind):
+                code = SafetyCode.DUPLICATE_JSON_KEY if kind == JsonRejectKind.DUPLICATE_KEY else SafetyCode.MALFORMED_JSON
+                raise SafetyError(code)
+            payload = parse_strict_json(raw_body, reject=reject_json)
+            if not isinstance(payload, dict) or not isinstance(payload.get('model'), str):
+                raise SafetyError(SafetyCode.MALFORMED_JSON)
+            p = app.state.router.get_pipeline(payload['model'])
+            if isinstance(p, ProtectedPipeline) and (p.detector._executor._closed or p.egress_client._client.is_closed):
+                return JSONResponse(status_code=503, content={"error": {"code": "CHANNEL_NOT_ADMITTED"}})
+            category = app.state.classifier(raw_body)
+            if not isinstance(category, str) or not category.strip():
+                raise SafetyError(SafetyCode.POLICY_REJECTED)
+            deadline_at = min(deadline_at, time.monotonic() + p.request_timeout)
+            if len(raw_body) > p.body_limit:
+                raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED)
             if p.path != request.url.path:
                 raise SafetyError(SafetyCode.UNSUPPORTED_PROTOCOL, 'endpoint binding')
             context = MappingContext(p.domain, 'v1', key)
@@ -200,7 +225,7 @@ def create_app(
                     raw_body=raw_body,
                     headers=headers,
                     identity=identity,
-                    category="STANDARD",
+                    category=category,
                     context=context,
                     auto_collect=True,
                     deadline_at=deadline_at,

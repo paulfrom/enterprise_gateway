@@ -45,7 +45,7 @@ from infra.errors import SafetyCode, SafetyError
 from audit.evidence_gate import EvidenceGate, EvidencePermit, EvidenceSpec
 from protocol.identity import (
     FORBIDDEN_CLIENT_IDENTITY_HEADERS,
-    TrustedIdentity,
+    TrustedIdentity, UnverifiedSourceContext,
     validate_request_authorization,
 )
 from gateway.ingress import IngressValidator, ValidatedIngressRequest
@@ -123,6 +123,7 @@ class ProtectedPipeline:
         watermark_guard: AuditWatermarkGuard,
         evidence_gate: EvidenceGate,
         egress_client: BoundEgressClient,
+        evidence_bucket: str,
         spool_writer: SpoolWriter | None = None,
         exemption_registry: StaticExemptionRegistry | None = None,
         package_version: str = "0.1.0",
@@ -131,7 +132,6 @@ class ProtectedPipeline:
         model_mapping: Mapping[str, str] | None = None,
         request_timeout: float = 60.0,
         history_adapter=None,
-        evidence_bucket: str | None = None,
     ) -> None:
         if protocol not in (DEEPSEEK_CHAT_PROTOCOL, CLAUDE_MESSAGES_PROTOCOL):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unsupported protocol")
@@ -157,6 +157,8 @@ class ProtectedPipeline:
         if self.body_limit is None:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'bounded ingress body required')
         self._history_adapter = history_adapter
+        if not isinstance(evidence_bucket, str) or not evidence_bucket.strip():
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'encrypted request evidence bucket required')
         self.evidence_bucket = evidence_bucket
         if self.egress_client.binding.channel_id != self.channel_id:
             raise SafetyError(SafetyCode.UPSTREAM_BINDING_VIOLATION,'channel binding')
@@ -211,8 +213,6 @@ class ProtectedPipeline:
         if dictionary is None or ner_dir is None:
             raise SafetyError(SafetyCode.DETECTION_INCOMPLETE)
         binding = asdict(self.egress_client.binding)
-        credential = binding.pop('credential')
-        binding['credential_ref_sha256'] = hashlib.sha256((credential or '').encode()).hexdigest()
         binding['allowed_addresses'] = sorted(binding['allowed_addresses'])
         validator=self.history_adapter.validator if self.history_adapter is not None else None
         history_trust=None if validator is None else {
@@ -229,15 +229,33 @@ class ProtectedPipeline:
             'route': canonical({'binding':binding,'protocol':route.protocol,'path':route.path,'channel':route.channel_id,'domain':route.domain,'models':dict(route.model_mapping),'deadline':route.request_timeout,'admission':{name:getattr(self.admission_limiter,name) for name in ('_max_body_bytes','_max_decompressed_bytes','_max_expansion_ratio','_max_history_messages','_max_text_chars','_max_concurrency','_max_waiters','_wait_timeout')}}),
         }
 
+    def _collect_observations(self, validated, fragment_spans, identity):
+        if self.spool_writer is None:
+            raise SafetyError(SafetyCode.SPOOL_WRITE_FAILED)
+        permit = None
+        for fragment in validated.fragments:
+            if not fragment.editable:
+                continue
+            digest = hashlib.sha256(fragment.content.encode('utf-8')).hexdigest()
+            mentions = tuple(ObservationMention(name=fragment.content[s.start:s.end],
+                entity_type=s.entity_type, start=s.start, end=s.end)
+                for s in fragment_spans.get(fragment.json_path, ()) if s.entity_type in {'ORG','PER','LOC'})
+            event = build_gateway_observation(tenant=identity.tenant_id, domain=validated.domain,
+                request_id=digest, evidence_digest=digest, source_acl=identity.source_acl,
+                evidence_text=fragment.content,
+                source_kind=SourceKind.MODEL_OUTPUT if fragment.source_kind == 'model-output' else SourceKind.USER_ASSERTION,
+                mentions=mentions, source_context=identity if isinstance(identity, UnverifiedSourceContext) else None)
+            permit = self.spool_writer.collect(event, mode=CollectionMode.REQUIRED)
+        return permit
+
     def process_request(
         self,
         *,
         raw_body: str | bytes,
         headers: Mapping[str, str],
-        identity: TrustedIdentity,
+        identity: TrustedIdentity | UnverifiedSourceContext,
         category: str,
         context: MappingContext,
-        evidence_spec: EvidenceSpec | None = None,
         observation_event: ObservationEvent | None = None,
         collection_mode: CollectionMode | None = None,
         auto_collect: bool = True,
@@ -280,10 +298,6 @@ class ProtectedPipeline:
         if context.domain != route.domain:
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "context domain mismatch")
 
-        egress_policy = resolve_egress_policy(self.policy, category)
-        if egress_policy.scope != route.domain:
-            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "policy scope mismatch")
-
         if (
             self.detector._dictionary is not None
             and getattr(self.detector._dictionary, "domain", None) != route.domain
@@ -299,6 +313,38 @@ class ProtectedPipeline:
                 raise SafetyError(SafetyCode.CORRUPTED_PACKAGE,'history full-version binding')
             if version_handle.manifest.version != route.package_version:
                 raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "package version mismatch")
+
+        # Collection permission is separate from model egress approval.
+        # Locally held BYOK observations keep the restricted context even when
+        # classification cannot permit any supplier call.
+        rule = next((r for r in self.policy.rules if r.category == category), None)
+        if rule is not None and rule.scope != route.domain:
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH)
+        try:
+            egress_policy = resolve_egress_policy(self.policy, category)
+        except SafetyError:
+            if isinstance(identity, UnverifiedSourceContext) and auto_collect:
+                if collection_mode is not None and collection_mode is not CollectionMode.REQUIRED:
+                    raise SafetyError(SafetyCode.CONTRACT_VIOLATION)
+                local = IngressValidator.validate_request(raw_body=raw_body, protocol=route.protocol,
+                    domain=route.domain, category=category, policy=self.policy,
+                    exemption_registry=self.exemption_registry, allowed_models=route.allowed_models,
+                    history_adapter=history_adapter, local_collection_only=True)
+                local_bytes = raw_body.encode('utf-8') if isinstance(raw_body, str) else raw_body
+                self.admission_limiter.admit(local_bytes, history_messages=len(local.fragments),
+                    text_chars=sum(len(f.content) for f in local.fragments))
+                with self.admission_limiter.acquire():
+                    fragments = tuple(f for f in local.fragments if f.requires_detection)
+                    detected = self.detector.detect_many(tuple(f.content for f in fragments),
+                        deadline_at=deadline_at, cancel=cancel)
+                    spans = dict(zip((f.json_path for f in fragments), (d.spans for d in detected), strict=True))
+                    check_deadline()
+                    self.watermark_guard.check_egress_permitted()
+                    self._collect_observations(local, spans, identity)
+                    check_deadline()
+            raise
+        if egress_policy.scope != route.domain:
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "policy scope mismatch")
 
         # Gate 2: Ingress validation (C-01, C-03, C-04, O-01)
         validated = IngressValidator.validate_request(
@@ -355,7 +401,7 @@ class ProtectedPipeline:
                 purpose="model-query",
                 route_id=route.channel_id,
                 model=validated.model,
-                caller_id=identity.subject_id,
+                caller_id=identity.source_id if isinstance(identity, UnverifiedSourceContext) else identity.subject_id,
                 tenant_id=identity.tenant_id,
                 protocol=route.protocol,
                 request_model=validated.model,
@@ -363,8 +409,7 @@ class ProtectedPipeline:
                 package_hash=version_handle.package_hash,
                 channel_version=route.package_version,
             )
-            if self.evidence_bucket is not None:
-                evidence_spec = EvidenceSpec(plaintext=raw_bytes,bucket=self.evidence_bucket,record_id=f'req-{uuid.uuid4().hex}',purpose='model-query')
+            evidence_spec = EvidenceSpec(plaintext=raw_bytes,bucket=self.evidence_bucket,record_id=f'req-{uuid.uuid4().hex}',purpose='model-query')
             evidence_permit = self.evidence_gate.admit(intent, evidence_spec)
 
             # Gate 8: Knowledge Spooling (K-02, O-03)
@@ -377,12 +422,7 @@ class ProtectedPipeline:
                     raise SafetyError(SafetyCode.SPOOL_WRITE_FAILED, "spool writer required but missing")
                 if observation_event is None:
                     if auto_collect:
-                        for fragment in validated.fragments:
-                            if not fragment.editable: continue
-                            digest = hashlib.sha256(fragment.content.encode('utf-8')).hexdigest()
-                            mentions=tuple(ObservationMention(name=fragment.content[s.start:s.end],entity_type=s.entity_type,start=s.start,end=s.end) for s in fragment_spans[fragment.json_path] if s.entity_type in {'ORG','PER','LOC'})
-                            event = build_gateway_observation(tenant=identity.tenant_id,domain=route.domain,request_id=digest,evidence_digest=digest,source_acl=identity.source_acl,evidence_text=fragment.content,source_kind=SourceKind.MODEL_OUTPUT if fragment.source_kind == 'model-output' else SourceKind.USER_ASSERTION,mentions=mentions)
-                            spool_permit = self.spool_writer.collect(event,mode=mode)
+                        spool_permit = self._collect_observations(validated, fragment_spans, identity)
                     else:
                         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "required collection missing observation event")
                 if observation_event is not None:

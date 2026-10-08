@@ -100,7 +100,7 @@ def make_binding(port: int) -> BoundUpstream:
     return BoundUpstream(
         host=LOOPBACK,
         port=port,
-        credential=CREDENTIAL,
+
         allowed_addresses=frozenset({LOOPBACK}),
         **template,
     )
@@ -300,7 +300,7 @@ class GateOrderingTests(unittest.TestCase):
                     evidence=evidence,
                     method="POST",
                     path="/v1/chat/completions",
-                    headers={"Content-Type": "application/json"},
+                    headers={"Authorization": CREDENTIAL, "Content-Type": "application/json"},
                     content=(FIXTURES / "chat_request.json").read_bytes(),
                 )
 
@@ -383,6 +383,7 @@ class GateFailureTests(unittest.TestCase):
                 evidence=evidence,
                 method="POST",
                 path="/v1/chat/completions",
+                headers={"Authorization": CREDENTIAL},
                 content=b"{}",
             )
         finally:
@@ -445,7 +446,8 @@ class GateFailureTests(unittest.TestCase):
                         evidence=make_evidence(),
                         method="POST",
                         path="/v1/chat/completions",
-                        content=b"{}",
+                        headers={"Authorization": CREDENTIAL},
+                content=b"{}",
                     )
             self._assert_gate_failure(ctx, SafetyCode.EVIDENCE_GATE_FAILED, intent_d, evidence_d)
             self.assertTrue((Path(intent_d) / f"{INTENT_ID}.intent.json").exists())
@@ -464,7 +466,8 @@ class GateFailureTests(unittest.TestCase):
                         evidence=make_evidence(),
                         method="POST",
                         path="/v1/chat/completions",
-                        content=b"{}",
+                        headers={"Authorization": CREDENTIAL},
+                content=b"{}",
                     )
             self._assert_gate_failure(ctx, SafetyCode.EVIDENCE_GATE_FAILED, intent_d, evidence_d)
             self.assertTrue((Path(intent_d) / f"{INTENT_ID}.intent.json").exists())
@@ -483,7 +486,8 @@ class GateFailureTests(unittest.TestCase):
                         evidence=make_evidence(),
                         method="POST",
                         path="/v1/chat/completions",
-                        content=b"{}",
+                        headers={"Authorization": CREDENTIAL},
+                content=b"{}",
                     )
             self._assert_gate_failure(ctx, SafetyCode.EVIDENCE_GATE_FAILED, intent_d, evidence_d)
             self.assertTrue((Path(intent_d) / f"{INTENT_ID}.intent.json").exists())
@@ -501,7 +505,8 @@ class GateFailureTests(unittest.TestCase):
                         intent=make_intent(),
                         method="POST",
                         path="/v1/chat/completions",
-                        content=b"{}",
+                        headers={"Authorization": CREDENTIAL},
+                content=b"{}",
                     )
             self._assert_gate_failure(ctx, SafetyCode.AUDIT_WRITE_FAILED, intent_d, evidence_d)
 

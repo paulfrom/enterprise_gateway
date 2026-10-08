@@ -77,18 +77,8 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import MagicMock
         from datetime import datetime, timezone
         from infra.errors import SafetyCode, SafetyError
-        from protocol.identity import TrustedIdentity
-
-        ident = TrustedIdentity(
-            subject_id="user-1",
-            tenant_id="tenant-1",
-            domain="corp.test",
-            roles=frozenset(["employee"]),
-            purposes=frozenset(["model-query"]),
-            auth_source="mTLS",
-            authenticated_at=datetime(2026, 10, 4, 8, 0, 0, tzinfo=timezone.utc),
-            expires_at=datetime(2026, 10, 4, 18, 0, 0, tzinfo=timezone.utc),
-        )
+        from protocol.identity import ByokAuthenticator
+        from gateway.provider_router import ProviderRouter
 
         mock_pipeline = MagicMock()
         mock_pipeline.domain = "corp.test"
@@ -108,8 +98,9 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
         mock_pipeline.process_request.return_value = mock_result
 
         app = create_app(
-            pipeline=mock_pipeline,
-            enterprise_credentials={"valid-token":ident},
+            router=ProviderRouter({'deepseek-flash': mock_pipeline}),
+            authenticator=ByokAuthenticator(domain='corp.test', tenant_id='test', correlation_key=b'c'*32),
+            classifier=lambda _: 'STANDARD',
             hmac_key=b"0123456789abcdef0123456789abcdef",
         )
 
@@ -120,7 +111,7 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.json()["id"], "chatcmpl-test")
 
             # Missing identity returns 401 when no identity is available
-            app_no_id = create_app(pipeline=mock_pipeline)
+            app_no_id = create_app(router=ProviderRouter({'deepseek-flash': mock_pipeline}), classifier=lambda _: 'STANDARD')
             async with AsyncClient(transport=ASGITransport(app=app_no_id), base_url="http://review") as client_no_id:
                 res_no_id = await client_no_id.post("/v1/chat/completions", json={"model": "deepseek-flash", "messages": [{"role": "user", "content": "hi"}]})
                 self.assertEqual(res_no_id.status_code, 401)

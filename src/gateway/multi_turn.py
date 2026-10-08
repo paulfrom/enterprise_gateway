@@ -10,6 +10,8 @@ Ensures that in multi-turn conversations:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import json
 from typing import Any, Sequence
 
@@ -33,6 +35,8 @@ class MultiTurnConversationSession:
         category: str,
         turn_hmac_key: bytes,
         model: str,
+        *,
+        headers: Mapping[str, str],
     ) -> str:
         """Execute one conversational turn through the protected pipeline.
 
@@ -49,7 +53,7 @@ class MultiTurnConversationSession:
         with MappingContext(self.pipeline.domain, "v1", turn_hmac_key) as ctx:
             result = self.pipeline.process_request(
                 raw_body=raw_req,
-                headers={},
+                  headers=headers,
                 identity=self.identity,
                 category=category,
                 context=ctx,
