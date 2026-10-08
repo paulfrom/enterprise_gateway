@@ -39,6 +39,7 @@ packages = [
   "src/masking",
   "src/policy",
   "src/protocol",
+  "src/request_history",
 ]
 
 

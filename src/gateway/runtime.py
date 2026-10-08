@@ -38,6 +38,7 @@ def create_runtime_app(
     package_version: str = "runtime-v1", ner_timeout: float = DEFAULT_NER_TIMEOUT,
     max_body_bytes: int = 1048576, transport: httpx.BaseTransport | None = None,
     resolver: Resolver | None = None,
+    history_store=None, history_read_key: bytes | None = None,
 ) -> FastAPI:
     """Assemble real controls; own all HTTP/detector lifecycle resources.
 
@@ -45,6 +46,12 @@ def create_runtime_app(
     clients and the real disk probe. Supplier configuration is read once.
     """
     configs = load_provider_configs(provider_config_path)
+    if (history_store is None) != (history_read_key is None):
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "complete history assembly required")
+    if history_store is not None:
+        if history_store.domain != domain or history_store.tenant_id != tenant_id:
+            raise SafetyError(SafetyCode.SCOPE_MISMATCH, "history assembly scope")
+        history_store.check_ready()
     authenticator = ByokAuthenticator(domain=domain, tenant_id=tenant_id,
                                       correlation_key=correlation_key)
     if not isinstance(dictionary, CompiledDictionary) or dictionary.domain != domain:
@@ -86,7 +93,11 @@ def create_runtime_app(
             by_model.update({model: pipeline for model in config.models})
         router = ProviderRouter(by_model)
         app = create_app(router=router, authenticator=authenticator,
-                         classifier=classifier, hmac_key=hmac_key)
+                         classifier=classifier, hmac_key=hmac_key,
+                         history_store=history_store)
+        if history_store is not None:
+            from gateway.history_api import install_history_routes
+            install_history_routes(app, history_store, history_read_key)
 
         def close_resources():
             try:

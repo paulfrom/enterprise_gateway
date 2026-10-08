@@ -189,6 +189,27 @@ docker compose up -d
 
 ---
 
+## 请求历史网页
+
+访问同源 `/history`，输入部署方配置的网关查询 Key，可查看当前租户/保护域内全部未过期请求的输入、脱敏外发、供应商回复、还原输出。无需账号系统，不按用户或供应商 Key 分组；持有查询 Key 即能读取全部历史。输入与还原正文默认遮挡，可主动显示和复制。列表支持模型/协议/请求ID搜索、状态筛选和分页，部分或未产生的阶段单独标记，网关拒绝正文不会标成成功模型回复。
+
+历史使用独立 PostgreSQL schema、用途为 `request-history` 的加密密钥和访问留痕。完整四阶段可推断原值关系，须按原文敏感级别治理。供应商 Key 不作为查询凭据，不保存到历史；网页查询 Key 只在浏览器内存中，刷新或退出后重新输入。
+
+部署须显式提供以下整组配置，缺项拒绝启动；未选择历史装配时不采集四阶段正文：
+
+| 设置 | 内容 |
+|---|---|
+| `GATEWAY_HISTORY_PG_DSN` 或 `_FILE` | 独立历史 schema 的受限应用连接，不是管理连接 |
+| `GATEWAY_HISTORY_READ_KEY` 或 `_FILE` | 独立32字节随机 Key，编码为64字符小写十六进制 |
+| `GATEWAY_HISTORY_RETENTION_DAYS` | 明确的留存天数，范围1～36500，无默认值 |
+| `GATEWAY_HISTORY_BUCKET` | 历史加密用途的受控留存桶 |
+
+先使用 `scripts/prepare_request_database.py --config <private-input.json> --output-config <new-private-bound.json>` 初始化尚不存在的历史 schema。输入字段为 `schema`、`application_role`、`admin_dsn`、`app_dsn`；应用账号须预先具备数据库连接权限且不能拥有或切换到管理角色。工具在事务内建立2张表及forced RLS，拒绝已有 schema，不提供迁移。将输出的应用连接存入受限秘密文件；管理连接不交给服务。
+
+历史配置完成后，首次显式执行 `start_gateway.py --provision-keys` 初始化用途密钥，再正常启动。已有历史（包括过期但未删除的记录）而密钥丢失时拒绝补建。查询 API 是 `GET /api/requests?limit=50&q=&status=&cursor=` 和 `GET /api/requests/{request_id}`，仅接受一个 `Authorization: Bearer <网关查询Key>`；模型调用返回 `x-request-id`。搜索仅针对元数据，不索引正文。
+
+启用历史后，持久化失败会停止模型外发或正文释放。流式保存实际供应商字节及网关输出片段，断连可显示部分记录；`completed`表示完整生成和留存，不能证明客户端已收到。过期记录不可查询，使用 `scripts/purge_request_history.py --config <private-purge.json>` 定期物理删除；配置字段及密钥输入见工具 `--help`。在线删除不证明备份和复制密钥已销毁。HTTP不加密查询 Key 和正文，远端访问应依据数据敏感度选择受验证的HTTPS；生产数据库TLS、目录权限、备份/删除、性能和真实客户端/供应商仍须验证。
+
 ## 生产部署与安全边界声明
 
 1. **不可绕过性**：完整覆盖必须由企业网络/客户端管理约束模型出口，并在供应商支持时实施来源限制；客户端持有供应商 Key，单纯配置 Base URL 无法阻止其绕过网关直连。

@@ -24,10 +24,16 @@ services:
       GATEWAY_DICTIONARY_FILE: /app/operator/dictionary.json
       GATEWAY_POLICY_FILE: /app/operator/policy.json
       GATEWAY_NER_PACKAGE_DIR: /app/models/bert4ner-base-chinese-onnx
+      GATEWAY_HISTORY_PG_DSN_FILE: /run/secrets/history_pg_dsn
+      GATEWAY_HISTORY_READ_KEY_FILE: /run/secrets/history_read_key
+      GATEWAY_HISTORY_RETENTION_DAYS: ${GATEWAY_HISTORY_RETENTION_DAYS:?required explicit history retention days}
+      GATEWAY_HISTORY_BUCKET: ${GATEWAY_HISTORY_BUCKET:?required history key bucket}
     secrets:
       - hmac_key
       - source_correlation_key
       - kms_master_key
+      - history_pg_dsn
+      - history_read_key
     volumes:
       - gateway-state:/app/state
       - ./config/providers.json:/app/config/providers.json:ro
@@ -80,3 +86,7 @@ secrets:
     file: ${GATEWAY_KMS_MASTER_KEY_FILE:?required persistent master secret file}
   knowledge_pg_dsn:
     file: ${GATEWAY_KNOWLEDGE_PG_DSN_FILE:?required restricted PG connection file}
+  history_pg_dsn:
+    file: ${GATEWAY_HISTORY_PG_DSN_FILE:?required restricted history PG connection file}
+  history_read_key:
+    file: ${GATEWAY_HISTORY_READ_KEY_FILE:?required 32-byte hex history query key file}

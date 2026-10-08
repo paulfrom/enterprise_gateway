@@ -449,7 +449,8 @@ class ProtectedStream:
 
 async def iter_protected_stream(source: AsyncIterable[bytes], stream: ProtectedStream, *,
                                 disconnected: Callable | None = None, close: Callable | None = None,
-                                keepalive_seconds: float = 15.0) -> AsyncIterator[bytes]:
+                                keepalive_seconds: float = 15.0,
+                                history_recorder=None) -> AsyncIterator[bytes]:
     """Single in-flight upstream read; deadlines/keepalives never restart it.
 
     The caller owns the MappingContext and keeps it active for this iterator.
@@ -460,6 +461,35 @@ async def iter_protected_stream(source: AsyncIterable[bytes], stream: ProtectedS
     iterator = source.__aiter__()
     pending = None
     last_activity = time.monotonic()
+    raw_history = bytearray()
+    final_frames = None
+    complete_persisted = False
+    restored_seen = False
+    stream._history_status = 'partial'
+    stream._history_error_code = 'STREAM_INTERRUPTED'
+    stream._history_cleanup_succeeded = False
+    stream._history_success_committed = False
+    stream._history_write_failed = False
+    async def persist(frames, *, complete=False):
+        nonlocal restored_seen
+        if history_recorder is None:
+            return
+        updates = []
+        state = 'complete' if complete else 'partial'
+        if raw_history:
+            updates.append(dict(stage='upstream', body=bytes(raw_history),
+                media_type='text/event-stream', state=state))
+        if frames or complete and restored_seen:
+            updates.append(dict(stage='restored', body=b''.join(frames),
+                media_type='text/event-stream', state=state, append=True))
+        if updates:
+            try:
+                await asyncio.to_thread(history_recorder.write_many, updates)
+            except BaseException:
+                stream._history_write_failed = True
+                raise
+        if frames:
+            restored_seen = True
     try:
         while True:
             stream._check()
@@ -480,19 +510,39 @@ async def iter_protected_stream(source: AsyncIterable[bytes], stream: ProtectedS
             if not ready:
                 if not stream._done and time.monotonic() - last_activity >= keepalive_seconds:
                     last_activity = time.monotonic()
-                    yield b": keep-alive\n\n"
+                    frame = b": keep-alive\n\n"
+                    await persist([frame])
+                    stream._check()
+                    yield frame
                 continue
             task, pending = pending, None
             try:
                 chunk = task.result()
             except StopAsyncIteration:
-                for frame in stream.finalize():
-                    yield frame
-                return
-            for frame in stream.feed(chunk):
+                final_frames = stream.finalize()
+                await persist(final_frames, complete=True)
+                complete_persisted = True
+                if time.monotonic() >= stream.deadline_at:
+                    raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+                break
+            if history_recorder is not None:
+                if len(raw_history) + len(chunk) > min(stream.max_stream_bytes, history_recorder.max_stage_bytes):
+                    from request_history.models import HistoryUnavailable
+                    raise HistoryUnavailable()
+                raw_history.extend(chunk)
+            frames = stream.feed(chunk)
+            if frames:
+                await persist(frames)
+            for frame in frames:
                 stream._check()
                 yield frame
             last_activity = time.monotonic()
+    except BaseException as exc:
+        stream._history_status = 'partial' if raw_history else 'failed'
+        stream._history_error_code = ('STREAM_PROTECTION_FAILED' if isinstance(exc, SafetyError)
+            else 'STREAM_INTERRUPTED' if isinstance(exc, asyncio.CancelledError)
+            else 'STREAM_TRANSPORT_FAILED')
+        raise
     finally:
         # Starlette disconnects cancel an AnyIO task group. Cleanup must survive
         # that enclosing cancel scope; plain asyncio.shield does not protect
@@ -510,12 +560,33 @@ async def iter_protected_stream(source: AsyncIterable[bytes], stream: ProtectedS
                     if inspect.isawaitable(value):
                         await value
             finally:
-                if pending is not None:
-                    await asyncio.gather(pending, return_exceptions=True)
+                try:
+                    if pending is not None:
+                        await asyncio.gather(pending, return_exceptions=True)
+                finally:
+                    # A raw partial snapshot needs no active restoration map.
+                    if history_recorder is not None and not complete_persisted:
+                        await persist([])
         with anyio.CancelScope(shield=True):
             cleanup_task = asyncio.create_task(cleanup())
             try:
                 await asyncio.shield(cleanup_task)
             except asyncio.CancelledError:
                 await cleanup_task
+                stream._history_cleanup_succeeded = True
                 raise
+            stream._history_cleanup_succeeded = True
+    # Business frames remain withheld until real EOF, history commit and
+    # successful resource cleanup. No mapping operations occur after cleanup.
+    if final_frames is not None:
+        if history_recorder is not None:
+            try:
+                await asyncio.to_thread(history_recorder.finish, 'completed')
+            except BaseException:
+                stream._history_write_failed = True
+                raise
+        stream._history_success_committed = True
+        if time.monotonic() >= stream.deadline_at:
+            raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+        for frame in final_frames:
+            yield frame

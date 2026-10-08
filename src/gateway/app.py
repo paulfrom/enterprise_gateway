@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException
 from fastapi.responses import StreamingResponse
 import asyncio
@@ -87,6 +87,7 @@ def create_app(
     authenticator: ByokAuthenticator | None = None,
     classifier: Callable[[bytes], str] | None = None,
     hmac_key: bytes | None = None,
+    history_store=None,
 ) -> FastAPI:
     """BYOK ingress. Classification is supplied only by trusted server integration."""
     settings = settings or ReviewSettings()
@@ -97,6 +98,7 @@ def create_app(
     app.state.authenticator = authenticator
     app.state.classifier = classifier
     app.state.hmac_key = hmac_key
+    app.state.history_store = history_store
 
     def missing_gates():
         missing = []
@@ -141,6 +143,11 @@ def create_app(
             missing.append("trusted_data_classification")
         if not isinstance(app.state.hmac_key, bytes) or len(app.state.hmac_key) < 32:
             missing.append("durable_audit_and_key_lifecycle")
+        if app.state.history_store is not None:
+            try:
+                app.state.history_store.check_ready()
+            except Exception:
+                missing.append('request_history_resources')
         return missing
 
     @app.get("/healthz")
@@ -178,6 +185,19 @@ def create_app(
         key = app.state.hmac_key
         cancel = threading.Event()
         context = None
+        history_recorder = None
+        def attach_request_id(response):
+            if history_recorder is not None:
+                response.headers['x-request-id'] = history_recorder.request_id
+            return response
+        async def record_failure(response, status, code):
+            if history_recorder is not None:
+                try:
+                    await asyncio.to_thread(history_recorder.write, 'restored', response.body)
+                    await asyncio.to_thread(history_recorder.finish, status, code)
+                except Exception:
+                    response = JSONResponse(status_code=503, content={'error': {'code': 'HISTORY_UNAVAILABLE'}})
+            return attach_request_id(response)
         try:
             req_timeout = p.request_timeout if p is not None else 180.0
             deadline_at = time.monotonic() + req_timeout
@@ -211,14 +231,18 @@ def create_app(
             p = app.state.router.get_pipeline(payload['model'])
             if isinstance(p, ProtectedPipeline) and (p.detector._executor._closed or p.egress_client._client.is_closed):
                 return JSONResponse(status_code=503, content={"error": {"code": "CHANNEL_NOT_ADMITTED"}})
-            category = app.state.classifier(raw_body)
-            if not isinstance(category, str) or not category.strip():
-                raise SafetyError(SafetyCode.POLICY_REJECTED)
             deadline_at = min(deadline_at, time.monotonic() + p.request_timeout)
             if len(raw_body) > p.body_limit:
                 raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED)
             if p.path != request.url.path:
                 raise SafetyError(SafetyCode.UNSUPPORTED_PROTOCOL, 'endpoint binding')
+            if app.state.history_store is not None:
+                await asyncio.to_thread(app.state.history_store.check_ready)
+                history_recorder = await asyncio.to_thread(app.state.history_store.begin,
+                    protocol=p.protocol, model=payload['model'], raw_body=raw_body)
+            category = app.state.classifier(raw_body)
+            if not isinstance(category, str) or not category.strip():
+                raise SafetyError(SafetyCode.POLICY_REJECTED)
             context = MappingContext(p.domain, 'v1', key)
             context.__enter__()
             work = asyncio.create_task(asyncio.to_thread(p.process_request,
@@ -230,6 +254,7 @@ def create_app(
                     auto_collect=True,
                     deadline_at=deadline_at,
                     cancel=cancel,
+                      history_recorder=history_recorder,
                 ))
             try:
                 while not work.done():
@@ -271,29 +296,63 @@ def create_app(
                     finally: context.__exit__(None,None,None)
                 async def protected():
                     try:
-                        async for chunk in iter_protected_stream(source(),stream,disconnected=request.is_disconnected,close=close):
+                        async for chunk in iter_protected_stream(source(),stream,disconnected=request.is_disconnected,close=close,
+                                                                history_recorder=history_recorder):
                             yield chunk
-                    except SafetyError:
-                        # The upstream body is never used as a public error.
-                        yield b'event: error\ndata: {"error":{"code":"STREAM_PROTECTION_FAILED"}}\n\n'
-                    except Exception:
-                        yield b'event: error\ndata: {"error":{"code":"STREAM_TRANSPORT_FAILED"}}\n\n'
-                return StreamingResponse(protected(),media_type='text/event-stream')
+                    except Exception as exc:
+                        from request_history.models import HistoryUnavailable
+                        if isinstance(exc, HistoryUnavailable):
+                            return
+                        code = 'STREAM_PROTECTION_FAILED' if isinstance(exc, SafetyError) else 'STREAM_TRANSPORT_FAILED'
+                        frame = ('event: error\ndata: {"error":{"code":"' + code + '"}}\n\n').encode()
+                        if history_recorder is not None:
+                            try:
+                                await asyncio.to_thread(history_recorder.write, 'restored', frame,
+                                    media_type='text/event-stream', state='partial', append=True)
+                            except Exception:
+                                stream._history_write_failed = True
+                                return
+                        yield frame
+                    finally:
+                        if (history_recorder is not None and not getattr(stream, '_history_success_committed', False)
+                                and not getattr(stream, '_history_write_failed', False)
+                                and getattr(stream, '_history_cleanup_succeeded', False)):
+                            with anyio.CancelScope(shield=True):
+                                try:
+                                    await asyncio.to_thread(history_recorder.finish,
+                                        getattr(stream, '_history_status', 'partial'),
+                                        getattr(stream, '_history_error_code', 'STREAM_INTERRUPTED'))
+                                except Exception:
+                                    pass  # Persisted processing means the terminal outcome is unknown.
+                return attach_request_id(StreamingResponse(protected(),media_type='text/event-stream'))
             else:
                 context.__exit__(None,None,None)
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=200,
                     content=res.response.model_dump(exclude_unset=True),
                 )
+                if history_recorder is not None:
+                    await asyncio.to_thread(history_recorder.write, 'restored', response.body)
+                    if time.monotonic() >= deadline_at or cancel.is_set():
+                        raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+                    await asyncio.to_thread(history_recorder.finish, 'completed')
+                    if time.monotonic() >= deadline_at or cancel.is_set():
+                        return attach_request_id(Response(status_code=504))
+                return attach_request_id(response)
         except SafetyError as exc:
             if context is not None: context.__exit__(None,None,None)
-            return _render_safety_error(exc)
+            return await record_failure(_render_safety_error(exc), 'blocked', exc.code.value)
         except Exception as exc:
             from gateway.pipeline import UpstreamFailure
             if context is not None: context.__exit__(None,None,None)
             if isinstance(exc,UpstreamFailure):
-                return JSONResponse(status_code=exc.response.status_code,content=exc.response.body,headers=exc.response.headers)
-            return JSONResponse(status_code=500,content={'error':{'code':'INTERNAL_FAILURE','message':'请求处理失败，已停止。'}})
+                return await record_failure(JSONResponse(status_code=exc.response.status_code,content=exc.response.body,headers=exc.response.headers),
+                                            'failed', 'UPSTREAM_FAILURE')
+            from request_history.models import HistoryUnavailable
+            if isinstance(exc, HistoryUnavailable):
+                return attach_request_id(JSONResponse(status_code=503, content={'error': {'code': 'HISTORY_UNAVAILABLE'}}))
+            return await record_failure(JSONResponse(status_code=500,content={'error':{'code':'INTERNAL_FAILURE','message':'请求处理失败，已停止。'}}),
+                                        'failed', 'INTERNAL_FAILURE')
         except BaseException:
             cancel.set()
             if context is not None: context.__exit__(None,None,None)

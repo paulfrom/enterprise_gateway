@@ -64,6 +64,42 @@ def _reject_asset(_kind):
     raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "invalid operator asset")
 
 
+def _load_text_secret(name: str) -> str:
+    value, filename = os.environ.get(name), os.environ.get(name + "_FILE")
+    if (value is None) == (filename is None):
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "one explicit history connection source")
+    failed = False
+    try:
+        text = Path(filename).read_text(encoding="utf-8").strip() if filename is not None else value
+    except (OSError, UnicodeError):
+        failed = True
+    if failed or not isinstance(text, str) or not text or text.strip() != text:
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "history connection unavailable") from None
+    return text
+
+
+def _history_spec() -> dict | None:
+    names = ("GATEWAY_HISTORY_PG_DSN", "GATEWAY_HISTORY_READ_KEY",
+             "GATEWAY_HISTORY_RETENTION_DAYS", "GATEWAY_HISTORY_BUCKET")
+    if not any(name in os.environ or name + "_FILE" in os.environ for name in names):
+        return None
+    days = _required("GATEWAY_HISTORY_RETENTION_DAYS")
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", days) or int(days) > 36500:
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "explicit finite history retention required")
+    return {"connection_uri": _load_text_secret("GATEWAY_HISTORY_PG_DSN"),
+            "read_key": _load_secret("GATEWAY_HISTORY_READ_KEY", exact_bytes=32),
+            "retention_days": int(days), "bucket": _required("GATEWAY_HISTORY_BUCKET")}
+
+
+def _assemble_history(spec, kms, state: Path, *, domain: str, tenant: str):
+    from request_history.storage import PostgresHistoryStore
+    audit = state / "history-audit"
+    audit.mkdir(parents=True, exist_ok=True)
+    return PostgresHistoryStore(spec["connection_uri"], kms, tenant_id=tenant,
+                                domain=domain, retention_days=spec["retention_days"],
+                                bucket=spec["bucket"], audit_directory=audit)
+
+
 def _key_store():
     state = Path(_required("GATEWAY_STATE_DIR"))
     bucket = _required("GATEWAY_EVIDENCE_BUCKET")
@@ -87,9 +123,21 @@ def provision_keys() -> None:
                       for path in (state / "intents", state / "evidence", state / "spool"))
     if has_records:
         _probe_keys(kms, bucket)
-        return
-    kms.provision(purpose="model-query", bucket=bucket)
-    kms.provision(purpose="knowledge-accumulation:knowledge-spool", bucket="standard-retention")
+    else:
+        kms.provision(purpose="model-query", bucket=bucket)
+        kms.provision(purpose="knowledge-accumulation:knowledge-spool", bucket="standard-retention")
+    history = _history_spec()
+    if history is not None:
+        store = _assemble_history(history, kms, state,
+                                  domain=_required("GATEWAY_PROCESSING_DOMAIN"),
+                                  tenant=_required("GATEWAY_PROCESSING_TENANT"))
+        if store.has_records():
+            sample = os.urandom(32)
+            wrapped = kms.wrap(sample, purpose="request-history", bucket=history["bucket"])
+            if kms.unwrap(wrapped, purpose="request-history", bucket=history["bucket"]) != sample:
+                raise KmsUnavailableError("history key readiness refused")
+        else:
+            kms.provision(purpose="request-history", bucket=history["bucket"])
 
 
 def build_app(*, providers_config_path: Path | None = None,
@@ -108,11 +156,15 @@ def build_app(*, providers_config_path: Path | None = None,
     _, _, kms = _key_store()
     _probe_keys(kms, evidence_bucket)
     providers = providers_config_path or Path(os.environ.get("PROVIDERS_CONFIG", ROOT_DIR / "config" / "providers.json"))
+    history = _history_spec()
+    history_store = None if history is None else _assemble_history(history, kms, state,
+                                                                  domain=domain, tenant=tenant)
     return create_runtime_app(provider_config_path=providers, domain=domain, tenant_id=tenant,
         correlation_key=correlation_key, hmac_key=hmac_key, kms=kms,
         dictionary=dictionary, ner_package_dir=Path(_required("GATEWAY_NER_PACKAGE_DIR")),
         state_directory=state, policy=policy, watermark_policy=WatermarkPolicy(),
-        evidence_bucket=evidence_bucket, classifier=classifier)
+        evidence_bucket=evidence_bucket, classifier=classifier,
+        history_store=history_store, history_read_key=None if history is None else history["read_key"])
 
 
 def _load_classifier(reference: str | None) -> Callable[[bytes], str] | None:

@@ -225,7 +225,7 @@ class ProtectedPipeline:
             'ner': canonical({str(p.relative_to(ner_dir)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(ner_dir).rglob('*')) if p.is_file()})+canonical({'timeout':self.detector._ner_timeout,'window':self.detector._window_length,'stride':self.detector._stride,'max_workers':self.detector._executor._max_workers,'max_pending':self.detector._executor._max_pending})+marshal.dumps(self.detector._ner_worker.__code__),
             'mapping': modules('masking'),
             'protocol': modules('protocol','gateway')+canonical({'exemptions':self.exemption_registry.model_dump(mode='json') if self.exemption_registry is not None else None,'history_trust':history_trust}),
-            'audit': modules('audit','infra','knowledge')+canonical({'bucket':self.evidence_bucket,'intent':str(self.evidence_gate._intent_directory),'evidence':str(self.evidence_gate._evidence_directory),'watermark':asdict(self.watermark_guard._policy),'spool':str(self.spool_writer._directory) if self.spool_writer else None}),
+            'audit': modules('audit','infra','knowledge','request_history')+canonical({'bucket':self.evidence_bucket,'intent':str(self.evidence_gate._intent_directory),'evidence':str(self.evidence_gate._evidence_directory),'watermark':asdict(self.watermark_guard._policy),'spool':str(self.spool_writer._directory) if self.spool_writer else None}),
             'route': canonical({'binding':binding,'protocol':route.protocol,'path':route.path,'channel':route.channel_id,'domain':route.domain,'models':dict(route.model_mapping),'deadline':route.request_timeout,'admission':{name:getattr(self.admission_limiter,name) for name in ('_max_body_bytes','_max_decompressed_bytes','_max_expansion_ratio','_max_history_messages','_max_text_chars','_max_concurrency','_max_waiters','_wait_timeout')}}),
         }
 
@@ -261,6 +261,7 @@ class ProtectedPipeline:
         auto_collect: bool = True,
         deadline_at: float | None = None,
         cancel=None,
+        history_recorder=None,
     ) -> PipelineResult:
         """Execute the end-to-end protected pipeline for an incoming request.
 
@@ -442,6 +443,8 @@ class ProtectedPipeline:
                                 # This admission receipt belongs only to the enterprise client.
                                 del block['metadata']
             redacted_payload=json.dumps(provider_payload,ensure_ascii=False).encode('utf-8')
+            if history_recorder is not None:
+                history_recorder.write('redacted', redacted_payload)
 
             egress_headers = {
                 "content-type": "application/json",
@@ -462,6 +465,10 @@ class ProtectedPipeline:
                 timeout=max(0.001,deadline_at-time.monotonic()),
             )
             try:
+                # A non-stream response is already fully received here. Retain
+                # those bytes even when the send completed after the deadline.
+                if history_recorder is not None and not redacted_request.stream:
+                    history_recorder.write('upstream', upstream_response.content)
                 check_deadline()
             except BaseException:
                 upstream_response.close()
@@ -471,7 +478,26 @@ class ProtectedPipeline:
             if upstream_response.status_code != 200:
                 from gateway.error_sanitizer import ErrorSanitizer
                 sanitized = ErrorSanitizer.sanitize(upstream_response.status_code,upstream_response.headers)
-                upstream_response.close()
+                try:
+                    if history_recorder is not None and redacted_request.stream:
+                        error_body = bytearray()
+                        error_complete = False
+                        try:
+                            for chunk in upstream_response.iter_bytes():
+                                available = history_recorder.max_stage_bytes - len(error_body)
+                                if len(chunk) > available:
+                                    error_body.extend(chunk[:available])
+                                    from request_history.models import HistoryUnavailable
+                                    raise HistoryUnavailable()
+                                error_body.extend(chunk)
+                                check_deadline()
+                            error_complete = True
+                        finally:
+                            if error_body or error_complete:
+                                history_recorder.write('upstream', bytes(error_body),
+                                    state='complete' if error_complete else 'partial')
+                finally:
+                    upstream_response.close()
                 raise UpstreamFailure(sanitized)
 
             if redacted_request.stream:
