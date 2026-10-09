@@ -80,7 +80,7 @@ def _load_text_secret(name: str) -> str:
 
 
 def _history_spec() -> dict | None:
-    names = ("GATEWAY_HISTORY_PG_DSN", "GATEWAY_HISTORY_READ_KEY",
+    names = ("GATEWAY_HISTORY_PG_DSN",
              "GATEWAY_HISTORY_RETENTION_DAYS", "GATEWAY_HISTORY_BUCKET")
     if not any(name in os.environ or name + "_FILE" in os.environ for name in names):
         return None
@@ -88,7 +88,6 @@ def _history_spec() -> dict | None:
     if not re.fullmatch(r"[1-9][0-9]{0,4}", days) or int(days) > 36500:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "explicit finite history retention required")
     return {"connection_uri": _load_text_secret("GATEWAY_HISTORY_PG_DSN"),
-            "read_key": _load_secret("GATEWAY_HISTORY_READ_KEY", exact_bytes=32),
             "retention_days": int(days), "bucket": _required("GATEWAY_HISTORY_BUCKET")}
 
 
@@ -174,6 +173,13 @@ def build_app(*, providers_config_path: Path | None = None,
     history = _history_spec()
     history_store = None if history is None else _assemble_history(history, kms, state,
                                                                   domain=domain, tenant=tenant)
+    # Admin state initializes only through scripts/prepare_admin_state.py; the
+    # runtime assembles the service against the durable directory either way, so
+    # login stays possible when history is not enabled.
+    from gateway.admin_auth import AdminAuthService
+    from gateway.admin_storage import AdminStateStore
+    admin_service = AdminAuthService(AdminStateStore(state / "admin"),
+                                     scope=f"{tenant}/{domain}")
     from detection.quick_screen import QuickScreenConfig
     screen_enabled = os.environ.get('GATEWAY_QUICK_SCREEN_ENABLED', 'true').lower()
     if screen_enabled not in ('true', 'false'):
@@ -191,7 +197,7 @@ def build_app(*, providers_config_path: Path | None = None,
         client_profile=os.environ.get('GATEWAY_CLIENT_PROFILE') or 'compatible',
         detection_failure_mode=os.environ.get('GATEWAY_DETECTION_FAILURE_MODE', 'error'),
         quick_screen=quick_screen,
-        history_store=history_store, history_read_key=None if history is None else history["read_key"],
+        history_store=history_store, admin_service=admin_service,
         **override)
 
 
