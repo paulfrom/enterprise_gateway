@@ -1,6 +1,7 @@
 """Replace only ingress-classified editable leaves; detected structure blocks."""
 from __future__ import annotations
 import re
+import json
 from collections.abc import Iterable, Mapping
 from infra.errors import SafetyCode, SafetyError
 from gateway.ingress import BusinessTextFragment, ValidatedIngressRequest
@@ -59,8 +60,8 @@ def replace_request(
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "fragment")
         fragments_by_path[fragment.json_path] = fragment
 
-    # The ingress contract now classifies every string leaf and key. Only
-    # explicitly editable leaves can be rewritten; detected structure blocks.
+    # The ingress contract classifies user text and tool results as editable
+    # leaves; any other span path resolves to structure or nowhere and blocks.
     payload = parsed.model_dump(exclude_unset=True)
     def set_path(path: str, value: str) -> None:
         parts = re.findall(r'([^\.\[\]]+)|\[(\d+)\]', path)
@@ -91,5 +92,8 @@ def replace_request(
         if not fragment.requires_detection and spans:
             raise SafetyError(SafetyCode.UNSAFE_REPLACEMENT, 'exempt_fragment')
         set_path(path, redact_text(fragment.content, spans, context))
+    from protocol.passthrough import PassthroughPayload, parse_passthrough_request
+    if isinstance(parsed, PassthroughPayload):
+        return parse_passthrough_request(json.dumps(payload), protocol, frozenset({parsed.model}))
     return model_cls.model_validate(payload)
 

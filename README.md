@@ -9,15 +9,21 @@
 2. **企业受控知识资产沉淀**：
    * 当前完成来源可追溯的受限观察与候选沉淀，知识归属保持待定；员工 SSO、所有者分配与发布审批不作为沉淀前置。已有可信 ACL 保留，未知权限限制到服务端处理域。代码包含本地关系抽取、PostgreSQL/RLS、审批、Outbox、授权消费与撤回组件，后续发布仍须验证。
 
-已支持严格 Chat Completions 与 Messages 子集的受保护 HTTP 非流式、SSE、工具与多轮往返，以及加密采集产物到独立 worker、PostgreSQL、审批、授权消费、词典和撤回/到期的本地闭环。技术验证使用合成上游与业务身份，不能代表实际客户端、供应商或生产基础设施准入；未装配默认服务保持503。
+已支持 Chat Completions 与 Messages 的文本选择性处理的受保护 HTTP 非流式、SSE、工具与多轮往返，以及加密采集产物到独立 worker、PostgreSQL、审批、授权消费、词典和撤回/到期的本地闭环。技术验证使用合成上游与业务身份，不能代表实际客户端、供应商或生产基础设施准入；未装配默认服务保持503。
 
-SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，此前只发送固定保活。原始及恢复后响应各有8MiB预算，工具参数恢复后每调用64KiB、全请求256KiB。该模式的首业务内容等待时间需要实际客户端联调；历史thinking必须由已绑定验证器验签，网关receipt只证明本域完整版本绑定。
+HTTP 入口采用选择性处理：只检测和脱敏 `user`/`assistant` 消息中的字符串与 `text` 块、assistant 的 `reasoning`/`reasoning_content` 及工具/MCP 结果（名为 `Skill` 的技能加载工具结果豁免）。系统提示词、工具定义与参数、客户端追踪字段、用量字段、未知参数、图片/文件及未知内容块保持原样，不因超出网关处理能力而拒绝。网关不承担未处理内容的脱敏，也不替供应商校验工具 schema 和模型控制参数。完整原始请求仍交给可信分类器和已装配的加密历史；客户端自报身份不授予处理域或知识权限。
+
+NER 前默认启用本地快速风险筛选，无模型推理、网络请求或磁盘访问。每次请求的全部可检测文本共用默认 2ms 筛选预算：词典、敏感格式、姓名/机构等线索命中时进入完整规则 + 词典 + NER 检测；低风险文本保留原文并跳过检测。超预算或无法覆盖自定义规则时转完整检测，不因筛选预算耗尽而拒绝请求。长文本逐块扫描，未扫描部分不会被判为低风险。该评分是未经训练数据校准的启发式风险估计，不是保证无隐私的概率；调整阈值前应使用实际业务样本评估漏检和误报。鉴权、审计、留存和响应还原仍照常执行。操作系统调度可能使实际耗时超过预算，因此 2ms 是计算预算而非硬实时承诺。
+
+请求期间检测故障默认报错。设置 `GATEWAY_DETECTION_FAILURE_MODE=passthrough` 可在检测器故障或检测超时时透传未脱敏文本，并记录仅含错误码的 `DETECTION_FAILURE_PASSTHROUGH` 日志；默认值为 `error`。该开关只作用于检测阶段，不改变鉴权、请求总超时、持久化失败或已检测到高敏秘密时的处理。
+
+SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，此前只发送固定保活。原始及恢复后响应各有8MiB预算，工具参数恢复后每调用64KiB、全请求256KiB。该模式的首业务内容等待时间需要实际客户端联调；未处理的签名历史内容保持原样，不要求客户端携带网关receipt。
 
 ---
 
 ## 核心安全与架构原则
 
-* **零原文直连**：彻底废除 Break-Glass 明文穿透旁路；任何检测能力缺失、策略未知或组件异常时严格阻断外发。
+* **明确处理边界**：支持的内容字段执行检测与脱敏；未支持字段透传。检测故障默认报错，可由服务端显式配置故障透传。
 * **请求级隔离映射**：原值恢复映射仅保存在单次请求生命周期内存中，严禁写入外部持久数据库或审计日志，避免放大攻击面。
 * **多级流水线检测**：集成预置中文规则（身份证、手机号、统一信用代码等）、敏感私钥/密码探测、企业自定义词典、以及 ONNX 本地 NER 模型长文本滑动窗口推理。
 * **受控异常体系**：全系统使用统一的受控错误注册表（`SafetyError`），异常诊断绝不携带业务明文，切断堆栈回溯链，杜绝错误回显泄露。
@@ -35,7 +41,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
       ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ 1. 协议准入与免检 (protocol)                                     │
-│    ├── 逐字段严格解析 (OpenAI / Claude)                         │
+│    ├── 提取可处理文本、保留未知结构 (OpenAI / Claude)                         │
 │    ├── BYOK 来源关联与服务端处理域 (identity / admission)       │
 │    └── 静态审批模板精确免检 (static_exemption)                  │
 ├─────────────────────────────────────────────────────────────────┤
@@ -112,9 +118,9 @@ uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unitte
 
 网关入口和供应商上游均支持 HTTP/HTTPS，HTTPS 为可选配置。上游 URL 可使用域名、私网或公网 HTTP 地址，例如 `http://10.0.0.8:8000/v1/chat/completions`；仍须匹配配置的协议路径和模型白名单。两种传输都执行 BYOK、分类、检测、留证、固定出口和 DNS 地址集校验。选择 HTTPS 时验证证书链与主机名，失败即拒绝，不自动降级；HTTP 不提供传输加密。
 
-客户端每次只携带一个规范 `Authorization: Bearer ...` 或 `x-api-key` 凭据。网关转发当次客户端 Key，账单归供应商账户；不持有付费供应商 Key、不提供模型推理算力、不垫资、不换 Key/供应商重试。Key 的带密钥关联标识只标记未验证来源，不授予企业员工角色、知识所有权或阅读权限。内部 `TrustedIdentity` 和 `EnterpriseAuthenticator` 仅保留给受信审阅组件，不能作为 BYOK 入口的默认身份。
+客户端通过规范 `Authorization: Bearer ...` 或 `x-api-key` 携带凭据；允许两个头同时出现，但去掉 Bearer 前缀后的令牌必须相同且非空。同名鉴权头重复、令牌冲突或任一凭据格式错误均拒绝。外发仅生成渠道指定的一个鉴权头。网关转发当次客户端 Key，账单归供应商账户；不持有付费供应商 Key、不提供模型推理算力、不垫资、不换 Key/供应商重试。Key 的带密钥关联标识只标记未验证来源，不授予企业员工角色、知识所有权或阅读权限。内部 `TrustedIdentity` 和 `EnterpriseAuthenticator` 仅保留给受信审阅组件，不能作为 BYOK 入口的默认身份。
 
-DeepSeek响应支持普通`reasoning_content`文本的精确恢复、`system_fingerprint`、空`logprobs`和有限用量明细：`prompt_tokens_details.cached_tokens`及`completion_tokens_details.reasoning_tokens`。计费和结构元数据保持不变；未知明细、非空logprobs和无法恢复的令牌拒绝。普通推理文本不构成已验签历史状态，下一轮请求仍按请求契约准入。
+DeepSeek响应恢复支持普通 `content`、`reasoning_content`、`reasoning_details` 文本和可解析的工具参数中的已知映射令牌；未知字段、用量明细和 `logprobs` 保持原值。无法恢复的保留令牌仍报告恢复错误。
 
 `audit.record_review.RecordReviewService`提供受控单记录审阅：限时工单绑定请求者、租户、域及精确加密记录，由两名不同角色审批者批准，持久化一次性消费标记并审计后才解密交付。记录与租户的关联须由可信存储提供；模块没有公开HTTP或批量审阅接口。生产身份、KMS及审计卷政策由部署方接入。
 
@@ -132,9 +138,15 @@ DeepSeek响应支持普通`reasoning_content`文本的精确恢复、`system_fin
 | `GATEWAY_DICTIONARY_FILE` | 符合现有词典 schema 和内容哈希的受控 JSON |
 | `GATEWAY_POLICY_FILE` | 符合 `ClassificationPolicy` schema 的受信政策 JSON |
 | `GATEWAY_NER_PACKAGE_DIR` | 已核验完整本地 ONNX 模型包 |
+| `GATEWAY_NER_TIMEOUT_SECONDS` | 可选的 NER 单次检测时间预算（秒），代码默认 30，Compose 部署默认 120；大文本 CPU 推理需按硬件调整，仍受请求总超时约束 |
 | `GATEWAY_EVIDENCE_BUCKET` | 受控原始请求证据留存桶 |
 | `PROVIDERS_CONFIG` 或 `--config` | 路由文件，默认 `config/providers.json` |
 | `GATEWAY_CLASSIFIER` 或 `--classifier` | 运维批准的同步 Python `module:callable`，接收请求 bytes 并返回政策分类；未配置保持拒绝 |
+| `GATEWAY_CLIENT_PROFILE` | 默认 `compatible`，忽略客户端自报身份；`strict` 拒绝自报身份头 |
+| `GATEWAY_QUICK_SCREEN_ENABLED` | 默认 `true`；`false` 恢复对全部可检测文本的完整检测 |
+| `GATEWAY_QUICK_SCREEN_THRESHOLD` | 默认 `0.35`，范围 `(0,1]`；分数达到阈值进入完整检测，越低越保守 |
+| `GATEWAY_QUICK_SCREEN_BUDGET_MS` | 默认 `2`，范围 `(0,10]`；整个请求共享的筛选预算，耗尽后转完整检测 |
+| `GATEWAY_DETECTION_FAILURE_MODE` | 默认 `error`；`passthrough` 在请求检测故障时透传未脱敏文本，客户端无法通过请求切换 |
 | `GATEWAY_SSL_CERTFILE` / `GATEWAY_SSL_KEYFILE` | 可选的原生 HTTPS PEM 证书与私钥；启用时必须成对提供，也可用同名命令行参数；未配置时使用 HTTP |
 
 Compose 使用一个受控只读 `GATEWAY_OPERATOR_DIR`，其中放置 `dictionary.json`、`policy.json`、受信分类器模块和可选 TLS 文件。该目录加入容器 Python 模块路径；例如 `deployment_classifier.py` 的 `classify` 函数对应 `GATEWAY_CLASSIFIER=deployment_classifier:classify`。这是部署方受信代码，会执行 Python 导入；不得挂载用户上传文件或把合成测试分类器用于真实业务。密钥仍使用独立 Docker secrets。端口默认只绑定 `127.0.0.1:8080`；对外监听须显式设置 `GATEWAY_BIND_ADDRESS` 与 `GATEWAY_PUBLISHED_PORT`，并配置入口访问控制。入口允许 HTTP；需要原生 HTTPS 时再配置证书对。

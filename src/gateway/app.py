@@ -9,6 +9,7 @@ import asyncio
 import anyio
 import threading
 import time
+import json
 
 from infra.config import ReviewSettings
 from infra.errors import SafetyCode, SafetyError
@@ -16,6 +17,7 @@ from masking.mapping import MappingContext
 from protocol.identity import ByokAuthenticator
 from gateway.provider_router import ProviderRouter
 from gateway.pipeline import ProtectedPipeline
+from gateway.client_compatibility import compatible_headers, compatible_payload
 from infra.strict_json import parse_strict_json, JsonRejectKind
 from typing import Callable
 
@@ -88,8 +90,11 @@ def create_app(
     classifier: Callable[[bytes], str] | None = None,
     hmac_key: bytes | None = None,
     history_store=None,
+    client_profile: str = 'compatible',
 ) -> FastAPI:
     """BYOK ingress. Classification is supplied only by trusted server integration."""
+    if client_profile not in ('compatible', 'strict'):
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unknown client profile')
     settings = settings or ReviewSettings()
     app = FastAPI(title="Enterprise Privacy Gateway", docs_url=None,
                   redoc_url=None, openapi_url=None)
@@ -99,6 +104,33 @@ def create_app(
     app.state.classifier = classifier
     app.state.hmac_key = hmac_key
     app.state.history_store = history_store
+    app.state.client_profile = client_profile
+
+    @app.middleware("http")
+    async def log_request_ingress(request: Request, call_next):
+        client = f"{request.client.host}:{request.client.port}" if request.client else "unknown"
+        headers_str = "\n".join(f"  {k}: {v}" for k, v in request.headers.items())
+        try:
+            raw_body = await request.body()
+            try:
+                body_str = raw_body.decode("utf-8")
+            except UnicodeDecodeError:
+                body_str = repr(raw_body)
+        except Exception as exc:
+            body_str = f"<failed to read body: {exc}>"
+
+        print(
+            f"\n==================== [GATEWAY INGRESS REQUEST] ====================\n"
+            f"Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n"
+            f"Method: {request.method}\n"
+            f"URL: {request.url}\n"
+            f"Client: {client}\n"
+            f"Headers:\n{headers_str if headers_str else '  (none)'}\n"
+            f"Body:\n{body_str if body_str else '  (empty)'}\n"
+            f"===================================================================\n",
+            flush=True,
+        )
+        return await call_next(request)
 
     def missing_gates():
         missing = []
@@ -176,6 +208,8 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": {"code": "CLASSIFICATION_NOT_CONFIGURED"}})
         p = None
         headers = dict(request.headers)
+        if client_profile == 'compatible':
+            headers = compatible_headers(headers)
         if not isinstance(app.state.authenticator, ByokAuthenticator):
             return JSONResponse(
                 status_code=401,
@@ -203,7 +237,7 @@ def create_app(
             deadline_at = time.monotonic() + req_timeout
             auth_count = sum(name.lower() == b'authorization' for name, _ in request.scope['headers'])
             x_api_count = sum(name.lower() == b'x-api-key' for name, _ in request.scope['headers'])
-            if auth_count + x_api_count != 1:
+            if auth_count > 1 or x_api_count > 1:
                 raise SafetyError(SafetyCode.INVALID_IDENTITY, 'ambiguous credential')
             identity = app.state.authenticator.authenticate(headers)
             if not isinstance(key, bytes) or len(key) < 32:
@@ -236,6 +270,12 @@ def create_app(
                 raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED)
             if p.path != request.url.path:
                 raise SafetyError(SafetyCode.UNSUPPORTED_PROTOCOL, 'endpoint binding')
+            processing_body = raw_body
+            if client_profile == 'compatible':
+                processing_body = json.dumps(compatible_payload(payload), ensure_ascii=False,
+                                             separators=(',', ':')).encode('utf-8')
+                if len(processing_body) > p.body_limit:
+                    raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED)
             if app.state.history_store is not None:
                 await asyncio.to_thread(app.state.history_store.check_ready)
                 history_recorder = await asyncio.to_thread(app.state.history_store.begin,
@@ -246,7 +286,7 @@ def create_app(
             context = MappingContext(p.domain, 'v1', key)
             context.__enter__()
             work = asyncio.create_task(asyncio.to_thread(p.process_request,
-                    raw_body=raw_body,
+                    raw_body=processing_body,
                     headers=headers,
                     identity=identity,
                     category=category,
@@ -279,9 +319,9 @@ def create_app(
                             await asyncio.to_thread(abandoned.upstream_stream.close)
                 raise
             if res.upstream_stream is not None:
-                from gateway.streaming import ProtectedStream, iter_protected_stream
+                from gateway.streaming import PassthroughStream, iter_protected_stream
                 client_model=res.client_model
-                stream = ProtectedStream(protocol=res.protocol,expected_model=res.redacted_request.model,client_model=client_model,context=context,allowed_tools=res.allowed_tools,deadline_at=deadline_at,state_validator=res.state_validator,state_version=res.state_version,allowed_models=(frozenset(p.allowed_models) | {res.redacted_request.model}) if p is not None else None)
+                stream = PassthroughStream(protocol=res.protocol,expected_model=res.redacted_request.model,client_model=client_model,context=context,allowed_tools=res.allowed_tools,deadline_at=deadline_at,state_validator=res.state_validator,state_version=res.state_version,allowed_models=(frozenset(p.allowed_models) | {res.redacted_request.model}) if p is not None else None)
                 upstream = res.upstream_stream
                 iterator = upstream.iter_bytes()
                 marker = object()
@@ -381,4 +421,3 @@ def create_app(
 
 
 app = create_app()
-

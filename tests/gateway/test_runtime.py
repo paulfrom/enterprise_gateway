@@ -136,15 +136,22 @@ class RuntimeAssemblyTests(unittest.TestCase):
                 close.assert_called_once()
             self.assertTrue(app.state.runtime_closed)
 
-    def test_unknown_model_url_fields_and_missing_key_rejected_zero_calls(self):
+    def test_unknown_fields_pass_through_but_do_not_override_route_or_credentials(self):
         app = self.app()
         with TestClient(app) as client:
-            for changes in ({"model": "unadmitted"}, {"base_url": "https://other.example"},
-                            {"apiKey": "payload-secret"}, {"thinking": {"type": "enabled"}}):
-                self.assertGreaterEqual(self.post(client, **changes).status_code, 400)
+            self.assertGreaterEqual(self.post(client, model="unadmitted").status_code, 400)
             response = client.post("/v1/chat/completions", json={"model": "chat-fixture", "messages": []})
             self.assertGreaterEqual(response.status_code, 400)
             self.assertEqual(0, len(self.calls))
+            for changes in ({"base_url": "https://other.example"},
+                            {"apiKey": "payload-secret"}, {"thinking": {"type": "enabled"}}):
+                self.assertEqual(self.post(client, **changes).status_code, 200)
+                request = self.calls[-1]
+                self.assertEqual(request.url.host, app.state.runtime_pipelines[0].egress_client.binding.host)
+                self.assertEqual(request.headers['authorization'], 'Bearer synthetic-key')
+                payload = json.loads(request.content)
+                for name, value in changes.items():
+                    self.assertEqual(payload[name], value)
 
     def test_classifier_missing_secret_and_unknown_categories_never_egress(self):
         for classifier in (None, lambda _raw: "SECRET", lambda _raw: "unknown"):
@@ -213,6 +220,10 @@ class RuntimeAssemblyTests(unittest.TestCase):
             # DNS must remain controlled for synthetic supplier hosts.
             with patch("infra.egress_client.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))]):
                 app = start_gateway.build_app(providers_config_path=self.provider_file)
+            screen = app.state.runtime_pipelines[0].detector._risk_screener
+            self.assertTrue(screen.config.enabled)
+            self.assertEqual(screen.config.threshold, 0.35)
+            self.assertEqual(screen.config.budget_ms, 2)
             with TestClient(app) as client:
                 self.assertEqual(200, client.get("/healthz").status_code)
                 self.assertEqual(503, client.get("/readyz").status_code)

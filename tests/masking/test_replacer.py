@@ -88,6 +88,7 @@ class ReplacerTests(unittest.TestCase):
         fragments = {fragment.json_path: fragment for fragment in validated.fragments}
         user = fragments["messages[1].content"]
         assistant = fragments["messages[2].content"]
+        self.assertEqual({"messages[1].content", "messages[2].content"}, set(fragments))
         span_map = self._empty_spans(validated.fragments)
         span_map["messages[1].content"] = (
             self._span(user, "13900001111", "PHONE"),
@@ -117,24 +118,24 @@ class ReplacerTests(unittest.TestCase):
         self.assertEqual(0.2, result.temperature)
         self.assertEqual(0.9, result.top_p)
         self.assertEqual(["END"], result.stop)
-        self.assertEqual("json_object", result.response_format.type)
+        self.assertEqual("json_object", result.model_dump()['response_format']['type'])
         self.assertEqual(["system", "user", "assistant"], [m.role for m in result.messages])
         self.assertEqual(original_dump["messages"][0], result.model_dump()["messages"][0])
 
+        # System prompts are out of detection scope and pass through verbatim.
         serialized = json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
         self.assertNotIn("13900001111", serialized)
         self.assertNotIn("02155556666", serialized)
         self.assertNotIn("sk-synthetic-", serialized)
-        self.assertEqual(result, parse_deepseek_chat_completion(serialized,allowed_models=frozenset({"deepseek-flash"})))
+        self.assertEqual(result.model_dump(), parse_deepseek_chat_completion(serialized,allowed_models=frozenset({"deepseek-flash"})).model_dump(exclude_unset=True))
 
     def test_claude_hits_replaced_all_editable_positions(self) -> None:
         validated = self._validated(CLAUDE_MESSAGES_PROTOCOL, self.claude_body)
         fragments = {fragment.json_path: fragment for fragment in validated.fragments}
-        system = fragments["system"]
         user = fragments["messages[0].content"]
         block = fragments["messages[1].content[0].text"]
+        self.assertEqual({"messages[0].content", "messages[1].content[0].text"}, set(fragments))
         span_map = self._empty_spans(validated.fragments)
-        span_map["system"] = (self._span(system, "T-2026-0001", "CASE_ID"),)
         span_map["messages[0].content"] = (self._span(user, "13800002222", "PHONE"),)
         span_map["messages[1].content[0].text"] = (
             self._span(block, "HT-2026-SYNTH-0007", "CONTRACT_ID"),
@@ -142,8 +143,7 @@ class ReplacerTests(unittest.TestCase):
 
         with MappingContext("scope-ext", "v1", KEY) as context:
             result = replace_request(validated, span_map, context)
-            self.assertEqual(3, context.entry_count)
-            self.assertEqual(system.content, context.restore(result.system))
+            self.assertEqual(2, context.entry_count)
             self.assertEqual(user.content, context.restore(result.messages[0].content))
             self.assertEqual(
                 block.content, context.restore(result.messages[1].content[0].text)
@@ -153,9 +153,7 @@ class ReplacerTests(unittest.TestCase):
         changed = set(
             _diff_paths(validated.parsed_request.model_dump(), result.model_dump())
         )
-        self.assertEqual(
-            {"system", "messages[0].content", "messages[1].content[0].text"}, changed
-        )
+        self.assertEqual({"messages[0].content", "messages[1].content[0].text"}, changed)
 
         self.assertEqual("claude-sonnet-5-5", result.model)
         self.assertEqual(512, result.max_tokens)
@@ -166,10 +164,12 @@ class ReplacerTests(unittest.TestCase):
         self.assertEqual("user", result.messages[0].role)
         self.assertEqual("text", result.messages[1].content[0].type)
 
+        # System prompts are out of scope and pass through verbatim.
         serialized = json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
         self.assertNotIn("13800002222", serialized)
         self.assertNotIn("HT-2026-SYNTH-0007", serialized)
-        self.assertEqual(result, parse_claude_messages(serialized,allowed_models=frozenset({"claude-sonnet-5-5"})))
+        self.assertIn("T-2026-0001", serialized)
+        self.assertEqual(result.model_dump(), parse_claude_messages(serialized,allowed_models=frozenset({"claude-sonnet-5-5"})).model_dump(exclude_unset=True))
 
     def test_request_without_hits_is_byte_identical(self) -> None:
         validated = self._validated(DEEPSEEK_CHAT_PROTOCOL, self.deepseek_body)
@@ -178,9 +178,19 @@ class ReplacerTests(unittest.TestCase):
             self.assertEqual(0, context.entry_count)
         self.assertEqual(validated.parsed_request.model_dump(), result.model_dump())
 
+    @staticmethod
+    def _template_user_body() -> str:
+        return json.dumps(
+            {
+                "model": "deepseek-flash",
+                "messages": [{"role": "user", "content": "You are a helpful assistant."}],
+            },
+            ensure_ascii=False,
+        )
+
     def test_exempt_fragment_passes_through_without_detection(self) -> None:
         registry = load_exemption_registry(EXEMPTION_DATA)
-        validated = self._validated(DEEPSEEK_CHAT_PROTOCOL, self.deepseek_body, registry)
+        validated = self._validated(DEEPSEEK_CHAT_PROTOCOL, self._template_user_body(), registry)
         exempt = {f.json_path: f for f in validated.fragments if not f.requires_detection}
         self.assertEqual({"messages[0].content"}, set(exempt))
         with MappingContext("scope-ext", "v1", KEY) as context:
@@ -190,7 +200,7 @@ class ReplacerTests(unittest.TestCase):
 
     def test_hit_in_exempt_fragment_blocked(self) -> None:
         registry = load_exemption_registry(EXEMPTION_DATA)
-        validated = self._validated(DEEPSEEK_CHAT_PROTOCOL, self.deepseek_body, registry)
+        validated = self._validated(DEEPSEEK_CHAT_PROTOCOL, self._template_user_body(), registry)
         span_map = self._empty_spans(validated.fragments)
         span_map["messages[0].content"] = (Span(0, 3, "ORG"),)
         with MappingContext("scope-ext", "v1", KEY) as context:

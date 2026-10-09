@@ -40,16 +40,25 @@ class DeepSeekResponseFormat(BaseModel):
     type: Literal["text", "json_object"] = "text"
 
 
+class DeepSeekTextBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    type: Literal["text"]
+    text: str
+
+
 class DeepSeekMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | None = None
+    content: str | Annotated[list[DeepSeekTextBlock], Field(min_length=1)] | None = None
     tool_calls: list['DeepSeekToolCall'] | None = None
     tool_call_id: str | None = None
+    reasoning_content: str | None = None
 
     @model_validator(mode='after')
     def _valid_role_content(self):
+        if self.reasoning_content is not None and self.role != 'assistant':
+            raise ValueError('reasoning role')
         if self.role == 'tool':
             if not self.tool_call_id or self.content is None or self.tool_calls:
                 raise ValueError('tool result shape')
@@ -76,6 +85,7 @@ class ToolDefinitionFunction(BaseModel):
     name: Annotated[str, Field(min_length=1)]
     description: str | None = None
     parameters: dict[str, Any]
+    strict: bool | None = None
 
 
 class DeepSeekToolDefinition(BaseModel):
@@ -90,6 +100,16 @@ class DeepSeekNamedTool(BaseModel):
     function: dict[Literal['name'],str]
 
 
+class DeepSeekStreamOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    include_usage: bool = False
+
+
+class DeepSeekThinking(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    type: Literal['enabled', 'disabled']
+
+
 class DeepSeekChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -102,6 +122,9 @@ class DeepSeekChatRequest(BaseModel):
     stop: str | Annotated[list[str], Field(max_length=16)] | None = None
     response_format: DeepSeekResponseFormat | None = None
     stream: bool = False
+    stream_options: DeepSeekStreamOptions | None = None
+    thinking: DeepSeekThinking | None = None
+    reasoning_effort: Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] | None = None
     tools: list[DeepSeekToolDefinition] | None = None
     tool_choice: Literal['auto','none','required'] | DeepSeekNamedTool | None = None
 

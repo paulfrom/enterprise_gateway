@@ -19,9 +19,10 @@ class ByokAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.router = ProviderRouter({'test-model': self.pipeline})
         self.auth = ByokAuthenticator(domain='corp.test', tenant_id='test-tenant', correlation_key=b'c'*32)
 
-    def app(self, classifier=None, router=None):
+    def app(self, classifier=None, router=None, client_profile='compatible'):
         return create_app(router=router if router is not None else self.router,
-                          authenticator=self.auth, classifier=classifier, hmac_key=b'h'*32)
+                          authenticator=self.auth, classifier=classifier, hmac_key=b'h'*32,
+                          client_profile=client_profile)
 
     async def post(self, app, *, headers=None, content=None):
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
@@ -49,14 +50,25 @@ class ByokAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_model_and_credential_reject_before_processing(self):
         for content, headers in [('{"model":"test-model","model":"test-model"}', None),
                                  (None, [('authorization', 'Bearer one'), ('authorization', 'Bearer two')]),
+                                 (None, [('authorization', 'Bearer one'), ('authorization', 'Bearer one'), ('x-api-key', 'one')]),
+                                 (None, [('authorization', 'Bearer one'), ('x-api-key', 'one'), ('x-api-key', 'one')]),
                                  (None, {'authorization': 'Bearer one', 'x-api-key': 'two'})]:
             res = await self.post(self.app(lambda raw: 'TEST'), content=content, headers=headers)
             self.assertIn(res.status_code, (400, 401))
         self.pipeline.process_request.assert_not_called()
 
+    async def test_matching_dual_credentials_reach_pipeline_with_same_source(self):
+        res = await self.post(self.app(lambda raw: 'TEST'), headers={
+            'Authorization': 'Bearer synthetic-key', 'X-API-Key': 'synthetic-key'})
+        self.assertEqual(res.status_code, 200)
+        kw = self.pipeline.process_request.call_args.kwargs
+        expected = self.auth.authenticate({'Authorization': 'Bearer synthetic-key'})
+        self.assertEqual(kw['identity'].source_id, expected.source_id)
+        self.assertEqual(kw['identity'].source_acl, expected.source_acl)
+
     async def test_unknown_classification_and_forged_source_header_rejected(self):
         res = await self.post(self.app(lambda raw: ''))
         self.assertEqual(res.status_code, 403)
-        res = await self.post(self.app(lambda raw: 'TEST'), headers={'authorization': 'Bearer synthetic', 'x-domain': 'other'})
+        res = await self.post(self.app(lambda raw: 'TEST', client_profile='strict'), headers={'authorization': 'Bearer synthetic', 'x-domain': 'other'})
         self.assertEqual(res.status_code, 400)
         self.pipeline.process_request.assert_not_called()

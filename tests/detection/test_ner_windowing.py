@@ -21,6 +21,7 @@ import numpy as np
 from infra.errors import SafetyCode, SafetyError
 from detection.ner_model import load_model_package
 from detection.ner_windowing import (
+    _INFERENCE_BATCH_SIZE,
     DEFAULT_STRIDE,
     DEFAULT_WINDOW_LENGTH,
     EntitySpan,
@@ -90,7 +91,11 @@ def build_queue(encoding, specs, windows):
 
 
 class FakeSession:
-    """ONNX session stub returning controlled per-window label sequences."""
+    """ONNX session stub returning controlled per-window label sequences.
+
+    Batch-aware: one queued content-label row is consumed per batch row,
+    with each row's real sequence length recovered from the attention mask.
+    """
 
     def __init__(self, queues, num_labels=NUM_LABELS):
         self._queues = [list(queue) for queue in queues]
@@ -100,16 +105,20 @@ class FakeSession:
     def run(self, output_names, feed):
         if output_names != ["logits"]:
             raise AssertionError(f"unexpected outputs: {output_names}")
-        batch = feed["input_ids"]
-        sequence = batch[0].tolist() if hasattr(batch[0], "tolist") else list(batch[0])
-        if not self._queues:
+        batch = np.asarray(feed["input_ids"])
+        mask = np.asarray(feed["attention_mask"])
+        rows, width = batch.shape
+        if len(self._queues) < rows:
             raise AssertionError("unexpected extra inference call")
-        content = self._queues.pop(0)
-        if len(content) != len(sequence) - 2:
-            raise AssertionError("window content length mismatch")
-        labels = [LABEL_IDS["O"], *content, LABEL_IDS["O"]]
-        logits = np.full((1, len(sequence), self._num_labels), -10.0, dtype=np.float32)
-        logits[0, np.arange(len(sequence)), labels] = 10.0
+        logits = np.full((rows, width, self._num_labels), -10.0, dtype=np.float32)
+        for row in range(rows):
+            real = int(mask[row].sum())
+            content = self._queues.pop(0)
+            if len(content) != real - 2:
+                raise AssertionError("window content length mismatch")
+            labels = [LABEL_IDS["O"], *content, LABEL_IDS["O"]]
+            labels += [LABEL_IDS["O"]] * (width - real)
+            logits[row, np.arange(width), labels] = 10.0
         self.calls += 1
         return [logits]
 
@@ -215,7 +224,6 @@ class MergerConstructorTests(unittest.TestCase):
             {"stride": 0},
             {"stride": -1},
             {"stride": 200},
-            {"stride": 3},  # capacity 6 minus stride 3 is odd
             {"stride": True},
         ]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -297,7 +305,7 @@ class MergerMockTests(unittest.TestCase):
         )
         self.assertEqual(text[per_span[0] : per_span[1]], "ab")
         self.assertEqual(text[org_span[0] : org_span[1]], "cd")
-        self.assertEqual(session.calls, 2)
+        self.assertEqual(session.calls, 1)  # both windows ride one batch
 
     def test_chinese_entity_exact_offsets(self):
         text = "张三在北京"
@@ -345,7 +353,7 @@ class MergerMockTests(unittest.TestCase):
         self.assertEqual(result, (EntitySpan(start, end, "PER"),))
         self.assertEqual((start, end), (13, 19))
         self.assertEqual(text[start:end], "e ff g")
-        self.assertEqual(session.calls, 3)
+        self.assertEqual(session.calls, 1)  # three windows, one batch
 
     def test_repeated_calls_are_deterministic(self):
         text = "aa bb cc dd ee ff gg hh"
@@ -379,24 +387,20 @@ class MergerBlockTests(unittest.TestCase):
         )
         return merger, windows
 
-    def test_entity_stuck_at_window_boundaries_blocks(self):
+    def test_entity_at_window_boundaries_emits_union_envelope(self):
         text = "aa bb cc dd ee"
         encoding = encode(text)
         self.assertEqual(len(encoding.ids), 10)
         merger, _ = self.make_merger(encoding, [(5, 6, "PER")])
-        with self.assertRaises(SafetyError) as ctx:
-            merger.extract(text)
-        assert_blocked(
-            self, ctx, "entity_not_recovered_in_core", "aa bb", "cc", "dd", "ee"
-        )
+        start, end = token_offsets(encoding, 5, 6)
+        self.assertEqual(merger.extract(text), (EntitySpan(start, end, "PER"),))
 
-    def test_entity_longer_than_core_region_blocks(self):
+    def test_entity_longer_than_core_region_emits_union_envelope(self):
         text = "aa bb cc dd ee"
         encoding = encode(text)
         merger, _ = self.make_merger(encoding, [(2, 7, "ORG")])
-        with self.assertRaises(SafetyError) as ctx:
-            merger.extract(text)
-        assert_blocked(self, ctx, "entity_not_recovered_in_core", "bb", "cc")
+        start, end = token_offsets(encoding, 2, 7)
+        self.assertEqual(merger.extract(text), (EntitySpan(start, end, "ORG"),))
 
     def test_contradictory_labels_across_windows_block(self):
         text = "aa bb cc d"
@@ -545,7 +549,8 @@ class MergerRealPackageTests(unittest.TestCase):
             return
         second = merger.extract(text)
         self.assertEqual(first, second)
-        self.assertEqual(counter.calls, 2 * len(expected_windows))
+        expected_calls = -(-len(expected_windows) // _INFERENCE_BATCH_SIZE)
+        self.assertEqual(counter.calls, 2 * expected_calls)
         self.assert_valid_result(first, text)
 
     def test_real_package_results_repeat_across_instances(self):
@@ -572,6 +577,158 @@ class MergerRealPackageTests(unittest.TestCase):
             self.assertIn("NER_OFFSET_UNRECOVERABLE (", str(ctx.exception))
             return
         self.assertEqual(result_a, merger_b.extract(text))
+
+
+class MergerBatchTests(unittest.TestCase):
+    """Window inference is batched; results match the per-window plan."""
+
+    def make_merger(self, encoding, specs, window_length, stride):
+        windows = plan_windows(len(encoding.ids), window_length - 2, stride)
+        session = FakeSession(build_queue(encoding, specs, windows))
+        merger = NerWindowMerger(
+            mini_tokenizer(), session, mini_id2label(),
+            window_length=window_length, stride=stride,
+        )
+        return merger, session, windows
+
+    def test_windows_infer_in_fixed_size_batches(self):
+        text = " ".join(["aa"] * 120)
+        encoding = encode(text)
+        merger, session, windows = self.make_merger(encoding, [], 8, 2)
+        self.assertGreater(len(windows), _INFERENCE_BATCH_SIZE)
+        self.assertEqual(merger.extract(text), ())
+        self.assertEqual(session.calls, -(-len(windows) // _INFERENCE_BATCH_SIZE))
+
+    def test_batched_spans_match_window_plan(self):
+        text = "aa bb cc dd ee ff gg hh"
+        encoding = encode(text)
+        merger, session, _ = self.make_merger(encoding, [(9, 12, "PER")], 13, 3)
+        start, end = token_offsets(encoding, 9, 12)
+        self.assertEqual(merger.extract(text), (EntitySpan(start, end, "PER"),))
+        self.assertEqual(session.calls, 1)
+
+
+class MergerCoverageToleranceTests(unittest.TestCase):
+    """Tokenizer-dropped head/tail whitespace must not block extraction."""
+
+    def make_merger(self, ids, offsets):
+        queue = [[LABEL_IDS["O"]] * len(ids)] if ids else []
+        return NerWindowMerger(
+            FakeTokenizer(ids, offsets), FakeSession(queue), ID2LABEL,
+            window_length=8, stride=2,
+        )
+
+    def test_trailing_whitespace_uncovered_accepted(self):
+        merger = self.make_merger([5, 6], [(0, 1), (1, 2)])
+        self.assertEqual(merger.extract("ab\n"), ())
+
+    def test_leading_whitespace_uncovered_accepted(self):
+        merger = self.make_merger([5, 6], [(1, 2), (2, 3)])
+        self.assertEqual(merger.extract("\nab"), ())
+
+    def test_whitespace_only_text_returns_no_spans(self):
+        merger = self.make_merger([5, 5], [(0, 0), (0, 0)])
+        self.assertEqual(merger.extract("  "), ())
+
+    def test_trailing_non_whitespace_uncovered_still_blocks(self):
+        merger = self.make_merger([5, 6], [(0, 1), (1, 2)])
+        with self.assertRaises(SafetyError) as ctx:
+            merger.extract("abc")
+        assert_blocked(self, ctx, "offset_coverage_incomplete", "abc")
+
+    def test_leading_non_whitespace_uncovered_still_blocks(self):
+        merger = self.make_merger([5, 6], [(1, 2), (2, 3)])
+        with self.assertRaises(SafetyError) as ctx:
+            merger.extract("zab")
+        assert_blocked(self, ctx, "offset_coverage_incomplete", "zab")
+
+    def test_real_tokenizer_trailing_newline_accepted(self):
+        encoding = encode("ab\n")
+        windows = plan_windows(len(encoding.ids), 6, 2)
+        session = FakeSession(build_queue(encoding, [], windows))
+        merger = NerWindowMerger(
+            mini_tokenizer(), session, mini_id2label(), window_length=8, stride=2
+        )
+        self.assertEqual(merger.extract("ab\n"), ())
+
+
+class MergerCompositionTests(unittest.TestCase):
+    """Split/join labeling variants of one mention across windows.
+
+    Core-region trust plus union-envelope merge: a boundary-straddling
+    mention trusted in split form and sighted in joined form at window
+    edges emits the union envelope (over-masking boundary noise is the
+    safe direction); components never confirmed by any core still block.
+    """
+
+    TOKEN_COUNT = 30
+
+    def make_merger(self, queue):
+        ids = list(range(100, 100 + self.TOKEN_COUNT))
+        offsets = [(i, i + 1) for i in range(self.TOKEN_COUNT)]
+        merger = NerWindowMerger(
+            FakeTokenizer(ids, offsets), FakeSession(queue), ID2LABEL,
+            window_length=12, stride=2,
+        )
+        return merger
+
+    def base_queue(self):
+        windows = plan_windows(self.TOKEN_COUNT, 10, 2)
+        assert len(windows) == 11 and windows[3] == (6, 16) and windows[5] == (10, 20)
+        return [[LABEL_IDS["O"]] * (end - start) for start, end in windows]
+
+    @staticmethod
+    def mark(queue, window_index, specs):
+        for first, last, entity_type in specs:
+            queue[window_index][first] = LABEL_IDS[f"B-{entity_type}"]
+            for index in range(first + 1, last + 1):
+                queue[window_index][index] = LABEL_IDS[f"I-{entity_type}"]
+
+    def test_joined_edge_sighting_unions_with_trusted_split_parts(self):
+        queue = self.base_queue()
+        # Mention at tokens 10-13 (chars [10,14)); the core boundary at
+        # token 12 splits it into trusted parts (10,12) and (12,14), while
+        # an edge window sights the joined form (10,14).
+        self.mark(queue, 3, [(4, 5, "PER"), (6, 7, "PER")])  # window (6,16): part1 trusted
+        self.mark(queue, 4, [(2, 3, "PER"), (4, 5, "PER")])  # window (8,18): part2 trusted
+        self.mark(queue, 5, [(0, 3, "PER")])                 # window (10,20): joined, edge only
+        merger = self.make_merger(queue)
+        self.assertEqual(
+            merger.extract("x" * self.TOKEN_COUNT),
+            (EntitySpan(10, 14, "PER"),),
+        )
+
+    def test_joined_sighting_bridges_gap_into_one_envelope(self):
+        queue = self.base_queue()
+        # Trusted parts (10,12) and (13,14) leave token 12 outside both;
+        # the joined edge sighting (10,14) overlaps both, so the envelope
+        # over-masks the gap rather than blocking.
+        self.mark(queue, 3, [(4, 5, "PER")])  # part (10,12) trusted in window (6,16)
+        self.mark(queue, 4, [(5, 5, "PER")])  # part (13,14) trusted in window (8,18)
+        self.mark(queue, 5, [(0, 3, "PER")])  # joined sighting in window (10,20)
+        merger = self.make_merger(queue)
+        self.assertEqual(
+            merger.extract("x" * self.TOKEN_COUNT),
+            (EntitySpan(10, 14, "PER"),),
+        )
+
+    def test_different_type_overlap_still_blocks(self):
+        queue = self.base_queue()
+        self.mark(queue, 3, [(4, 5, "PER")])  # PER (10,12) sighted in window (6,16)
+        self.mark(queue, 5, [(1, 2, "ORG")])  # ORG (11,13) sighted in window (10,20)
+        merger = self.make_merger(queue)
+        with self.assertRaises(SafetyError) as ctx:
+            merger.extract("x" * self.TOKEN_COUNT)
+        assert_blocked(self, ctx, "contradictory_span_labels", "x")
+
+    def test_edge_only_entity_emits_envelope(self):
+        queue = self.base_queue()
+        self.mark(queue, 5, [(0, 3, "PER")])  # sighted by one window only
+        merger = self.make_merger(queue)
+        self.assertEqual(
+            merger.extract("x" * self.TOKEN_COUNT),
+            (EntitySpan(10, 14, "PER"),),
+        )
 
 
 if __name__ == "__main__":

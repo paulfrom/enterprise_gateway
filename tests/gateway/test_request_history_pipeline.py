@@ -80,7 +80,8 @@ class RequestHistoryPipelineTests(unittest.TestCase):
             if stage == 'redacted':
                 elapsed.append(True)
         self.recorder.write = write
-        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0))
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0),
+                                strftime=time.strftime, localtime=time.localtime)
         with patch('gateway.pipeline.time', clock):
             response = self.post()
         self.assertEqual(504, response.status_code, response.text)
@@ -117,7 +118,8 @@ class RequestHistoryPipelineTests(unittest.TestCase):
             real_finish(status, error_code)
             elapsed.append(True)
         self.recorder.finish = finish
-        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0))
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0),
+                                strftime=time.strftime, localtime=time.localtime)
         with patch('gateway.app.time', clock):
             response = self.post()
         self.assertEqual(504, response.status_code)
@@ -213,7 +215,8 @@ class RequestHistoryPipelineTests(unittest.TestCase):
             elapsed.append(True)
             return response
         self.transport.response_factory = upstream
-        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0))
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0),
+                                strftime=time.strftime, localtime=time.localtime)
         with patch('gateway.pipeline.time', clock):
             response = self.post()
         self.assertEqual(504, response.status_code)
@@ -248,7 +251,8 @@ class RequestHistoryPipelineTests(unittest.TestCase):
             def close(self):
                 closed.append(True)
         self.transport.response_factory = lambda _: httpx.Response(500, stream=LateChunkStream())
-        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0))
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + (1000 if elapsed else 0),
+                                strftime=time.strftime, localtime=time.localtime)
         with patch('gateway.pipeline.time', clock):
             response = self.post()
         self.assertEqual(504, response.status_code)

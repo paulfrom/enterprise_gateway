@@ -29,6 +29,9 @@ from protocol.history_state import ReasoningBlock, ReasoningStateValidator
 from protocol.protocols import CLAUDE_MESSAGES_PROTOCOL, DEEPSEEK_CHAT_PROTOCOL
 from protocol.sse import ServerSentEvent, SseIncrementalParser
 from protocol.tool_buffer import BoundedToolCallBuffer
+from contextvars import ContextVar
+
+_PASSTHROUGH = ContextVar('stream_passthrough', default=False)
 
 
 def _reject(detail: str = "invalid stream contract") -> None:
@@ -42,7 +45,7 @@ def _json_reject(kind: JsonRejectKind) -> None:
 
 
 def _object(value: Any, fields: set[str], required: set[str] = frozenset()) -> dict:
-    if not isinstance(value, dict) or set(value) - fields or required - set(value):
+    if not isinstance(value, dict) or (not _PASSTHROUGH.get() and set(value) - fields) or required - set(value):
         _reject()
     return value
 
@@ -58,6 +61,8 @@ def _string(value: Any) -> None:
 
 
 def _structural(value: Any) -> None:
+    if _PASSTHROUGH.get():
+        return
     if isinstance(value, str) and ("<<ENT" in value or value.endswith(("<<E", "<<EN"))):
         _reject("token in structural stream field")
     if isinstance(value, dict):
@@ -70,6 +75,8 @@ def _structural(value: Any) -> None:
 
 
 def _usage(value: Any, claude: bool = False) -> None:
+    if _PASSTHROUGH.get():
+        return
     if not claude:
         if not isinstance(value, dict):
             _reject()
@@ -202,7 +209,7 @@ class ProtectedStream:
         if event.is_comment:
             # Upstream comments may contain arbitrary text; relay only a fixed heartbeat.
             return [b": keep-alive\n\n"]
-        if event.id is not None or event.retry is not None:
+        if not _PASSTHROUGH.get() and (event.id is not None or event.retry is not None):
             _reject("unsupported SSE control field")
         if self.protocol == DEEPSEEK_CHAT_PROTOCOL and event.data == "[DONE]":
             if event.event != "message" or not self._choices or not all(self._choices.values()):
@@ -250,35 +257,37 @@ class ProtectedStream:
                 _reject("invalid or completed choice")
             seen.add(index)
             self._choices.setdefault(index, False)
-            if choice.get("logprobs") is not None:
+            if choice.get("logprobs") is not None and not _PASSTHROUGH.get():
                 _reject("unsupported logprobs")
             delta = _object(choice["delta"], {"role", "content", "reasoning_content", "tool_calls",
                                               "name", "audio_content", "reasoning_details"})
             if "role" in delta and delta["role"] not in ("assistant", None):
                 _reject()
             for extra in ("name", "audio_content"):
-                if extra in delta and delta[extra] is not None:
+                if not _PASSTHROUGH.get() and extra in delta and delta[extra] is not None:
                     _string(delta[extra])
             details = delta.get("reasoning_details")
-            if details is not None:
+            if details is not None and (not _PASSTHROUGH.get() or isinstance(details, list)):
                 if not isinstance(details, list) or len(details) > 128:
                     _reject()
                 for detail_index, detail in enumerate(details):
+                    if _PASSTHROUGH.get() and not isinstance(detail, dict):
+                        continue
                     entry = _object(detail, {"type", "id", "format", "index", "text"}, {"type"})
-                    if not isinstance(entry["type"], str):
+                    if not _PASSTHROUGH.get() and not isinstance(entry["type"], str):
                         _reject()
                     for key in ("id", "format"):
-                        if key in entry and entry[key] is not None:
+                        if not _PASSTHROUGH.get() and key in entry and entry[key] is not None:
                             _string(entry[key])
-                    if entry.get("index") is not None:
+                    if not _PASSTHROUGH.get() and entry.get("index") is not None:
                         _int(entry["index"])
-                    if entry.get("text") is not None:
+                    if entry.get("text") is not None and (not _PASSTHROUGH.get() or isinstance(entry['text'], str)):
                         _string(entry["text"])
                         entry["text"] = self.restorer.feed(
                             f"chat:{index}:reasoning_details:{detail_index}:text", entry["text"])
                         self._reasoning_detail_keys.add((index, detail_index))
             for field in ("content", "reasoning_content"):
-                if field in delta and delta[field] is not None:
+                if field in delta and delta[field] is not None and (not _PASSTHROUGH.get() or isinstance(delta[field], str)):
                     _string(delta[field])
                     delta[field] = self.restorer.feed(f"chat:{index}:{field}", delta[field])
             calls = delta.pop("tool_calls", [])
@@ -510,6 +519,94 @@ class ProtectedStream:
         self.state_receipts.clear()
         self._pending_frames.clear()
         self._pending_bytes = 0
+
+
+class PassthroughStream(ProtectedStream):
+    """Restore supported stream text and preserve opaque fields and events."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._opaque_blocks = set()
+        self._opaque_tool_keys = set()
+
+    def _event(self, event):
+        token = _PASSTHROUGH.set(True)
+        try:
+            if self.protocol == DEEPSEEK_CHAT_PROTOCOL and event.event != 'message':
+                lines = [f'event: {event.event}']
+                if event.id is not None: lines.append(f'id: {event.id}')
+                if event.retry is not None: lines.append(f'retry: {event.retry}')
+                lines.extend(f'data: {line}' for line in event.data.split('\n'))
+                return [('\n'.join(lines) + '\n\n').encode('utf-8')]
+            return super()._event(event)
+        finally:
+            _PASSTHROUGH.reset(token)
+
+    def _chat(self, value):
+        data = deepcopy(value)
+        opaque = {}
+        finishes = {}
+        for choice in data.get('choices', []) if isinstance(data, dict) else []:
+            if not isinstance(choice, dict) or not isinstance(choice.get('delta'), dict):
+                continue
+            index = choice.get('index')
+            calls = choice['delta'].get('tool_calls')
+            if isinstance(calls, list):
+                known = []
+                for call in calls:
+                    if not isinstance(call, dict):
+                        opaque.setdefault(index, []).append(call)
+                        continue
+                    key = (index, call.get('index'))
+                    if call.get('type') not in (None, 'function') or key in self._opaque_tool_keys:
+                        self._opaque_tool_keys.add(key)
+                        opaque.setdefault(index, []).append(call)
+                    else:
+                        function = call.get('function')
+                        if isinstance(function, dict) and isinstance(function.get('name'), str):
+                            self.allowed_tools.setdefault(function['name'], {})
+                        known.append(call)
+                choice['delta']['tool_calls'] = known
+            if (choice.get('finish_reason') == 'tool_calls'
+                    and any(branch == index for branch, _ in self._opaque_tool_keys)
+                    and not any(branch == index for branch, _ in self._tool_calls)):
+                finishes[index] = choice['finish_reason']
+                choice['finish_reason'] = 'stop'
+        frames = super()._chat(data)
+        if not opaque and not finishes:
+            return frames
+        output = []
+        for frame in frames:
+            payload = json.loads(frame.decode().split('data: ', 1)[1])
+            for choice in payload.get('choices', []):
+                index = choice['index']
+                if index in opaque:
+                    choice['delta'].setdefault('tool_calls', []).extend(opaque[index])
+                if index in finishes:
+                    choice['finish_reason'] = finishes[index]
+            output.append(_frame(payload))
+        return output
+
+    def _claude(self, value, event_name):
+        if not isinstance(value, dict):
+            return [_frame(value, event_name)]
+        kind = value.get('type')
+        index = value.get('index')
+        if kind == 'content_block_start' and isinstance(value.get('content_block'), dict):
+            block = value['content_block']
+            if block.get('type') == 'tool_use' and isinstance(block.get('name'), str):
+                self.allowed_tools.setdefault(block['name'], {})
+            if value['content_block'].get('type') not in ('text', 'tool_use', 'thinking'):
+                self._opaque_blocks.add(index)
+                return [_frame(value, event_name)]
+        if kind in ('content_block_delta', 'content_block_stop') and index in self._opaque_blocks:
+            if kind == 'content_block_stop':
+                self._opaque_blocks.remove(index)
+                self._closed_blocks.add(index)
+            return [_frame(value, event_name)]
+        if kind not in ('ping', 'message_start', 'content_block_start', 'content_block_delta',
+                        'content_block_stop', 'message_delta', 'message_stop'):
+            return [_frame(value, event_name)]
+        return super()._claude(value, event_name)
 
 
 async def iter_protected_stream(source: AsyncIterable[bytes], stream: ProtectedStream, *,

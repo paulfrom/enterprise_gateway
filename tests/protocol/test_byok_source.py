@@ -35,6 +35,13 @@ class ByokSourceTests(unittest.TestCase):
         api_key = self.source(**{"X-API-Key": "synthetic-key-a"})
         self.assertEqual(bearer.source_id, api_key.source_id)
 
+    def test_matching_dual_credentials_have_same_restricted_source(self):
+        source = self.source(**{"Authorization": "Bearer synthetic-key-a",
+                                "X-API-Key": "synthetic-key-a"})
+        self.assertEqual(self.source().source_id, source.source_id)
+        self.assertEqual(self.source().source_acl, source.source_acl)
+        self.assertFalse(hasattr(source, "roles"))
+
     def test_key_rotation_never_changes_processing_scope_or_grants_ownership(self):
         first = self.source()
         rotated = self.source(**{"authorization": "Bearer synthetic-key-b"})
@@ -48,13 +55,18 @@ class ByokSourceTests(unittest.TestCase):
             {"authorization": "Bearer synthetic-key-a"})
         self.assertNotEqual(self.source().source_id, other.source_id)
 
-    def test_missing_empty_malformed_and_dual_credentials_rejected(self):
+    def test_missing_empty_malformed_and_conflicting_credentials_rejected(self):
         for headers in ({}, {"authorization": ""}, {"x-api-key": ""},
                         {"authorization": "Bearer "}, {"authorization": "Basic abc"},
                         {"authorization": "Bearer  key"}, {"authorization": "Bearer key "},
                         {"authorization": "Bearer key\n"}, {"x-api-key": "has whitespace"},
-                        {"authorization": "Bearer a", "x-api-key": "a"},
+                        {"authorization": "Bearer a", "x-api-key": "b"},
+                        {"authorization": "Basic a", "x-api-key": "a"},
+                        {"authorization": "Bearer a", "x-api-key": ""},
+                        {"authorization": "Bearer ", "x-api-key": "a"},
+                        {"authorization": "Bearer has whitespace", "x-api-key": "has whitespace"},
                         {"Authorization": "Bearer a", "authorization": "Bearer a"},
+                        {"X-API-Key": "a", "x-api-key": "a"},
                         {"authorization": 123}):
             with self.subTest(headers=headers), self.assertRaises(SafetyError):
                 self.authenticator().authenticate(headers)

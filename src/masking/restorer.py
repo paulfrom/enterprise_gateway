@@ -349,6 +349,7 @@ def restore_response(
     allowed_models: frozenset[str] | None = None,
     allowed_tools=None,
     state_validator=None,
+    allow_unsupported: bool = False,
 ) -> DeepSeekChatResponse | ClaudeMessagesResponse:
     """Restore mapped tokens in editable positions of an upstream non-streaming response.
 
@@ -385,6 +386,10 @@ def restore_response(
         payload = raw_response.model_dump(exclude_unset=True, warnings=False)
     else:
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, protocol)
+
+    if allow_unsupported:
+        from protocol.passthrough import restore_passthrough_response
+        return restore_passthrough_response(payload, protocol, context)
 
     # 2. Validate input against protocol contract
     validation_failed = False

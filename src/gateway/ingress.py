@@ -1,15 +1,16 @@
 """Unified ingress validator combining policy (C-01), protocol (C-03), and static exemption (C-04).
 
-Enforces fail-closed input admission: unapproved categories, unsupported protocols,
-extra/unknown fields, non-text inputs (images/files), streaming, and tool calls
-are rejected at the gate. No fields are stripped or quietly bypassed.
+Selects supported text for protection while preserving opaque provider fields.
+An explicit strict parser remains available for offline contract checks.
+Detection and masking apply to user-role and assistant-role message text and
+to tool/MCP results; system prompts, tool definitions and tool arguments pass
+through undetected by design. Results of skill-loading tools are exempt so
+that skill instructions reach the model verbatim.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-from typing import Any
 from protocol.history_state import HistoricalStateAdapter
 
 from infra.errors import SafetyCode, SafetyError
@@ -19,6 +20,8 @@ from protocol.protocols import (
     DEEPSEEK_CHAT_PROTOCOL,
     ClaudeMessagesRequest,
     ClaudeTextBlock,
+    ClaudeToolResultBlock,
+    ClaudeToolUseBlock,
     DeepSeekChatRequest,
     parse_claude_messages,
     parse_deepseek_chat_completion,
@@ -29,6 +32,10 @@ from protocol.static_exemption import (
     StaticExemptionRegistry,
     inspect_static_exemption,
 )
+
+# Tool names whose results carry skill instructions rather than business data;
+# their results bypass detection so masking cannot corrupt instructions.
+SKILL_RESULT_EXEMPT_TOOLS = frozenset({"Skill"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +52,7 @@ class BusinessTextFragment:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedIngressRequest:
-    """A strictly validated request candidate ready for downstream detection & spooling."""
+    """A routed request with supported text paths selected for protection."""
 
     protocol: str
     model: str
@@ -69,6 +76,7 @@ class IngressValidator:
         allowed_models: frozenset[str] | None = None,
         history_adapter: HistoricalStateAdapter | None = None,
         local_collection_only: bool = False,
+        allow_unsupported: bool = True,
     ) -> ValidatedIngressRequest:
         # 1. Enforce egress classification policy (C-01)
         try:
@@ -78,19 +86,39 @@ class IngressValidator:
             raise SafetyError(SafetyCode.POLICY_REJECTED, exc.code.value) from None
 
         # 2. Strict candidate protocol parse (C-03)
-        if protocol == DEEPSEEK_CHAT_PROTOCOL:
+        if allow_unsupported:
+            from protocol.passthrough import parse_passthrough_request, text_fragments
+            parsed = parse_passthrough_request(raw_body, protocol, allowed_models)
+            model_name = parsed.model
+            raw_fragments = list(text_fragments(parsed.model_dump(), protocol, SKILL_RESULT_EXEMPT_TOOLS))
+        elif protocol == DEEPSEEK_CHAT_PROTOCOL:
             try:
                 parsed = parse_deepseek_chat_completion(raw_body, allowed_models=allowed_models)
             except SafetyError as exc:
                 raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, exc.code.value) from None
             model_name = parsed.model
-            raw_fragments = [(f"messages[{i}].content", msg.content) for i, msg in enumerate(parsed.messages) if msg.content is not None]
-            if parsed.stop is not None:
-                if isinstance(parsed.stop, str):
-                    raw_fragments.append(("stop", parsed.stop))
-                elif isinstance(parsed.stop, list):
-                    for k, s in enumerate(parsed.stop):
-                        raw_fragments.append((f"stop[{k}]", s))
+            tool_names = {call.id: call.function.name for msg in parsed.messages
+                          for call in msg.tool_calls or ()}
+            raw_fragments = []
+            for i, msg in enumerate(parsed.messages):
+                if msg.role == 'assistant' and msg.reasoning_content is not None:
+                    raw_fragments.append((f"messages[{i}].reasoning_content", msg.reasoning_content))
+                if msg.role == 'tool':
+                    # Tool/MCP results may carry sensitive file contents and are
+                    # detected, except results of skill-loading tools.
+                    if tool_names.get(msg.tool_call_id) in SKILL_RESULT_EXEMPT_TOOLS:
+                        continue
+                    if isinstance(msg.content, str):
+                        raw_fragments.append((f"messages[{i}].content", msg.content))
+                    elif isinstance(msg.content, list):
+                        for j, block in enumerate(msg.content):
+                            raw_fragments.append((f"messages[{i}].content[{j}].text", block.text))
+                elif msg.role in ('user', 'assistant'):
+                    if isinstance(msg.content, str):
+                        raw_fragments.append((f"messages[{i}].content", msg.content))
+                    elif isinstance(msg.content, list):
+                        for j, block in enumerate(msg.content):
+                            raw_fragments.append((f"messages[{i}].content[{j}].text", block.text))
 
         elif protocol == CLAUDE_MESSAGES_PROTOCOL:
             try:
@@ -98,9 +126,10 @@ class IngressValidator:
             except SafetyError as exc:
                 raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, exc.code.value) from None
             model_name = parsed.model
+            tool_names = {block.id: block.name for msg in parsed.messages
+                          if isinstance(msg.content, list) for block in msg.content
+                          if isinstance(block, ClaudeToolUseBlock)}
             raw_fragments = []
-            if parsed.system is not None:
-                raw_fragments.append(("system", parsed.system))
             for i, msg in enumerate(parsed.messages):
                 if isinstance(msg.content, str):
                     raw_fragments.append((f"messages[{i}].content", msg.content))
@@ -108,41 +137,23 @@ class IngressValidator:
                     for j, block in enumerate(msg.content):
                         if isinstance(block, ClaudeTextBlock):
                             raw_fragments.append((f"messages[{i}].content[{j}].text", block.text))
-            if parsed.stop_sequences is not None:
-                for k, s in enumerate(parsed.stop_sequences):
-                    raw_fragments.append((f"stop_sequences[{k}]", s))
+                        elif isinstance(block, ClaudeToolResultBlock):
+                            if tool_names.get(block.tool_use_id) in SKILL_RESULT_EXEMPT_TOOLS:
+                                continue
+                            raw_fragments.append((f"messages[{i}].content[{j}].content", block.content))
         else:
             raise SafetyError(
                 SafetyCode.UNSUPPORTED_PROTOCOL, f"protocol '{protocol}' is not supported"
             )
 
         payload = parsed.model_dump(exclude_none=True)
-        if history_adapter is not None:
+        if not allow_unsupported and history_adapter is not None:
             history_adapter.validate_message_history(payload['messages'])
-        elif any(isinstance(m.get('content'), list) and any(b.get('type') == 'thinking' for b in m['content']) for m in payload['messages']):
+        elif not allow_unsupported and any(isinstance(m.get('content'), list) and any(b.get('type') == 'thinking' for b in m['content']) for m in payload['messages']):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unverified history')
-        # Enumerate all string values and object keys. Structure is detected too,
-        # but must be rejected rather than rewritten when it contains entities.
-        editable_paths = {p for p, _ in raw_fragments if not p.startswith(('stop', 'stop_sequences'))}
-        def walk(value: Any, path: str):
-            if isinstance(value, str):
-                if path != 'model' and not path.endswith(('.role','.type')):
-                    raw_fragments.append((path, value))
-            elif isinstance(value, list):
-                for i, child in enumerate(value): walk(child, f'{path}[{i}]')
-            elif isinstance(value, dict):
-                for key, child in value.items():
-                    # Field/property names are immutable protocol structure.
-                    if '.properties' in path:
-                        raw_fragments.append((f'{path}.__key__[{key}]', key))
-                    child_path = f'{path}.{key}' if path else key
-                    if key in ('description','arguments') or (key == 'content' and isinstance(child, str) and 'messages[' in child_path) or ('.input.' in child_path and isinstance(child, str)):
-                        editable_paths.add(child_path)
-                    walk(child, child_path)
-        # Existing plain text positions are already present; avoid duplicates.
-        walk(payload, '')
-        raw_fragments = list(dict(raw_fragments).items())
-        tools = (payload.get('tools') or [])
+        # Detection scope is user/assistant message text and tool results;
+        # tools and other structure are validated for shape, never scanned.
+        tools = [] if allow_unsupported else (payload.get('tools') or [])
         names = [t['function']['name'] if protocol == DEEPSEEK_CHAT_PROTOCOL else t['name'] for t in tools]
         if len(names) != len(set(names)):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'duplicate tools')
@@ -169,13 +180,13 @@ class IngressValidator:
             except exceptions.SchemaError: raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid tool schema') from None
             name = tool['function']['name'] if protocol == DEEPSEEK_CHAT_PROTOCOL else tool['name']
             schemas[name] = schema
-        choice=payload.get('tool_choice')
+        choice=None if allow_unsupported else payload.get('tool_choice')
         if choice is not None:
             name=(choice.get('function',{}).get('name') if protocol==DEEPSEEK_CHAT_PROTOCOL else choice.get('name')) if isinstance(choice,dict) else None
             if name is not None and name not in schemas:
                 raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'unknown selected tool')
         from infra.strict_json import parse_strict_json
-        for message in payload['messages']:
+        for message in [] if allow_unsupported else payload['messages']:
             calls = message.get('tool_calls',[]) if protocol == DEEPSEEK_CHAT_PROTOCOL else [b for b in message['content'] if b['type']=='tool_use'] if isinstance(message['content'],list) else []
             for call in calls:
                 name = call['function']['name'] if protocol == DEEPSEEK_CHAT_PROTOCOL else call['name']
@@ -208,8 +219,7 @@ class IngressValidator:
                     content=text,
                     requires_detection=True,
                     matched_template_id=None,
-                    editable=path in editable_paths,
-                    source_kind='model-output' if path.startswith('messages[') and parsed.messages[int(path.split('[')[1].split(']')[0])].role == 'assistant' else 'user-input',
+                    source_kind='model-output' if path.startswith('messages[') and payload['messages'][int(path.split('[')[1].split(']')[0])].get('role') == 'assistant' else 'user-input',
                 )
             )
 

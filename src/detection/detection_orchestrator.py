@@ -41,6 +41,7 @@ from typing import Any, Callable, Iterable
 from presidio_analyzer import EntityRecognizer
 
 from detection.dictionary import CompiledDictionary, analyze_dictionary
+from detection.quick_screen import QuickRiskScreen, QuickScreenConfig
 from infra.errors import SafetyCode, SafetyError
 from detection.inference_executor import InferenceExecutor
 from detection.ner_model import load_model_package
@@ -164,6 +165,7 @@ class DetectionOrchestrator:
         ner_timeout: float = DEFAULT_NER_TIMEOUT,
         window_length: int = DEFAULT_WINDOW_LENGTH,
         stride: int = DEFAULT_STRIDE,
+        quick_screen: QuickScreenConfig | None = None,
     ) -> None:
         if recognizers is None:
             active = default_recognizers()
@@ -203,6 +205,16 @@ class DetectionOrchestrator:
         self._ner_timeout = float(ner_timeout)
         self._window_length = window_length
         self._stride = stride
+        if quick_screen is not None and not isinstance(quick_screen, QuickScreenConfig):
+            raise TypeError("quick_screen must be QuickScreenConfig or None")
+        self._risk_screener = None
+        if quick_screen is not None and dictionary is not None:
+            policy_cues = tuple(value for r in active if type(r).__module__ == 'detection.recognizers'
+                                and vars(r).get('_policy') is not None
+                                for name, values in vars(vars(r)['_policy']).items()
+                                if name.endswith(('contexts', 'prefixes')) for value in values)
+            self._risk_screener = QuickRiskScreen(dictionary, quick_screen, policy_cues=policy_cues,
+                custom_rules=any(type(r).__module__ != 'detection.recognizers' for r in active))
 
     def detect(self, text: str) -> DetectionOutcome:
         return self.detect_many((text,))[0]

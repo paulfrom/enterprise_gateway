@@ -145,6 +145,7 @@ def create_provider_pipeline(
     package_version: str = "runtime-v1",
     transport: httpx.BaseTransport | None = None,
     resolver: Resolver | None = None,
+    detection_failure_mode: str = 'error',
 ) -> ProtectedPipeline:
     """Assemble a fail-closed pipeline bound to the specified provider configuration."""
     if not isinstance(config, ProviderConfig):
@@ -195,6 +196,7 @@ def create_provider_pipeline(
             package_version=package_version,
             request_timeout=config.timeout_seconds,
             evidence_bucket=evidence_bucket,
+              detection_failure_mode=detection_failure_mode,
         )
     except BaseException:
         egress.close()
