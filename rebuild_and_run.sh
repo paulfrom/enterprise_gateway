@@ -12,7 +12,7 @@ export GATEWAY_PUBLISHED_PORT="${GATEWAY_PUBLISHED_PORT:-8080}"
 echo "=================================================="
 echo "1. 正在根据当前源码重新构建 Docker 镜像: ${IMAGE_NAME} ..."
 echo "=================================================="
-docker build -t "${IMAGE_NAME}" "${ROOT_DIR}"
+docker build -t "${IMAGE_NAME}" "${ROOT_DIR}/apps/backend"
 
 echo ""
 echo "=================================================="
@@ -24,8 +24,8 @@ LOCAL_RUN_SCRIPT="${ROOT_DIR}/.runtime_state/local/up.sh"
 if [ -f "${LOCAL_RUN_SCRIPT}" ]; then
   bash "${LOCAL_RUN_SCRIPT}"
 else
-  docker compose down --remove-orphans || true
-  docker compose up -d gateway
+  docker compose -f "${ROOT_DIR}/deploy/compose.yaml" down --remove-orphans || true
+  docker compose -f "${ROOT_DIR}/deploy/compose.yaml" up -d gateway
 fi
 
 echo ""

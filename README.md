@@ -90,6 +90,8 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 
 ## 快速上手与验证
 
+仓库为单 Git 根 monorepo：后端 Python 项目位于 `apps/backend`（源码 `src/`、测试 `tests/`、脚本 `scripts/`、模型资产 `models/` 与启动器均在其中），Compose 部署文件位于 `deploy/compose.yaml`。除特别说明外，本章命令的工作目录均为 `apps/backend`；Compose 命令在仓库根执行。
+
 ### 环境要求
 * Python 3.11 ～ 3.13
 * 依赖管理工具：`uv`
@@ -97,7 +99,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 ### 1. 安装与同步依赖
 ~~~powershell
 git clone git@github.com:paulfrom/enterprise_gateway.git
-cd enterprise_gateway
+cd enterprise_gateway/apps/backend
 uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 ~~~
 
@@ -165,10 +167,10 @@ python start_gateway.py --host 0.0.0.0 --port 8080
 # 配齐受信模块及正式证书后，原生 HTTPS 示例
 python start_gateway.py --host 127.0.0.1 --port 8443 --classifier deployment_classifier:classify --ssl-certfile <certificate.pem> --ssl-keyfile <private-key.pem>
 
-# Compose 使用必填 _FILE 密钥路径与 GATEWAY_OPERATOR_DIR，另准备受限 PG 连接
-docker compose build gateway
-docker compose run --rm --no-deps gateway python start_gateway.py --provision-keys
-docker compose up -d
+# Compose 使用必填 _FILE 密钥路径与 GATEWAY_OPERATOR_DIR，另准备受限 PG 连接（仓库根执行）
+docker compose -f deploy/compose.yaml build gateway
+docker compose -f deploy/compose.yaml run --rm --no-deps gateway python start_gateway.py --provision-keys
+docker compose -f deploy/compose.yaml up -d
 ~~~
 
 启动器调用同一工厂；不创建示例词典、默认获准分类或长期企业身份。受信 Python 集成可调用 `start_gateway.build_app(classifier=approved_classifier)`，CLI/镜像可通过上述运维模块引用装配同一分类器。配置模块引用只解决装配，不提供业务外发批准；无分类器保持503，错误引用、异步/错误签名函数或无效 TLS 证书对安全退出。有效 BYOK、合法协议与可信分类结果已到达时，高敏/禁止外发或未知分类输入可先形成受限加密观察，再拒绝外发；秘密检测/协议/存储失败仍拒绝采集。就绪会检查路由完整版本、分类接入、存储/密钥和真实水位；通过技术就绪仍不代表生产准入。容器探针适配 HTTP/HTTPS，仅表示本机存活；选择 HTTPS 时客户端须校验证书链与服务域名。
