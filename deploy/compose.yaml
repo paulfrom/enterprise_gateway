@@ -1,7 +1,9 @@
+name: enterprise_gateway
+
 services:
   gateway:
     build:
-      context: .
+      context: ../apps/backend
       dockerfile: Dockerfile
     image: enterprise-privacy-gateway:local
     restart: unless-stopped
@@ -42,7 +44,7 @@ services:
       - history_read_key
     volumes:
       - gateway-state:/app/state
-      - ./config/providers.json:/app/config/providers.json:ro
+      - ../apps/backend/config/providers.json:/app/config/providers.json:ro
       - ${GATEWAY_OPERATOR_DIR:?required trusted operator assets directory}:/app/operator:ro
     security_opt:
       - no-new-privileges:true
