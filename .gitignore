@@ -18,6 +18,9 @@ secrets/
 .pgdata/
 .pg-runtime/
 models/
+!apps/backend/models/
+apps/backend/models/*
+!apps/backend/models/.gitkeep
 evidence/
 reports/
 *.log

@@ -1,3 +1,6 @@
+import contextlib
+import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -57,6 +60,27 @@ class ReviewAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(canary, response.text)
             malformed = await client.post("/contract-probe", content='{"content": "truncated')
             self.assertEqual(malformed.status_code, 422)
+
+    async def test_ingress_log_redacts_credentials_and_body(self):
+        credential = "CNRY-ingress-credential-789"
+        secret_body = "CNRY-ingress-body-秘密-789"
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://review") as client:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                response = await client.post(
+                    "/v1/chat/completions?key=CNRY-query-credential-789",
+                    content=secret_body,
+                    headers={"Authorization": f"Bearer {credential}", "X-Api-Key": credential},
+                )
+            output = buffer.getvalue()
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn(credential, output)
+        self.assertNotIn(secret_body, output)
+        self.assertNotIn("CNRY-query-credential-789", output)
+        self.assertIn("POST", output)
+        self.assertIn("/v1/chat/completions", output)
+        self.assertIn("<redacted>", output)
+        self.assertIn(hashlib.sha256(secret_body.encode("utf-8")).hexdigest()[:16], output)
 
     def test_configuration_cannot_enable_unbuilt_features(self):
         for payload in ({"external_egress": True}, {"real_knowledge_capture": True},
