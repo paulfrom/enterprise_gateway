@@ -205,7 +205,7 @@ class HistoryPostgresTests(unittest.TestCase):
         self.assertEqual([first.request_id],[r['request_id'] for r in self.store.list_requests(status='blocked')['items']])
         self.assertEqual([second.request_id],[r['request_id'] for r in self.store.list_requests(model='synthetic-beta')['items']])
         self.assertEqual([first.request_id],[r['request_id'] for r in self.store.list_requests(error_code='SECRET_DETECTED')['items']])
-        self.assertEqual([first.request_id,second.request_id],
+        self.assertEqual(sorted([first.request_id,second.request_id]),
                          sorted(r['request_id'] for r in self.store.list_requests(protocol=PROTOCOL)['items']))
         # Body content is never a filter input; only recorded metadata matches.
         self.assertEqual([],self.store.list_requests(model='synthetic-sensitive-text')['items'])
