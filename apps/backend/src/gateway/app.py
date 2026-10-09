@@ -7,6 +7,7 @@ from starlette.exceptions import HTTPException
 from fastapi.responses import StreamingResponse
 import asyncio
 import anyio
+import hashlib
 import threading
 import time
 import json
@@ -106,16 +107,23 @@ def create_app(
     app.state.history_store = history_store
     app.state.client_profile = client_profile
 
+    sensitive_headers = frozenset(
+        {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
+    )
+
     @app.middleware("http")
     async def log_request_ingress(request: Request, call_next):
         client = f"{request.client.host}:{request.client.port}" if request.client else "unknown"
-        headers_str = "\n".join(f"  {k}: {v}" for k, v in request.headers.items())
+        headers_str = "\n".join(
+            f"  {k}: {'<redacted>' if k.lower() in sensitive_headers else v}"
+            for k, v in request.headers.items()
+        )
         try:
             raw_body = await request.body()
-            try:
-                body_str = raw_body.decode("utf-8")
-            except UnicodeDecodeError:
-                body_str = repr(raw_body)
+            if raw_body:
+                body_str = f"<{len(raw_body)} bytes, sha256={hashlib.sha256(raw_body).hexdigest()[:16]}>"
+            else:
+                body_str = ""
         except Exception as exc:
             body_str = f"<failed to read body: {exc}>"
 
@@ -123,10 +131,10 @@ def create_app(
             f"\n==================== [GATEWAY INGRESS REQUEST] ====================\n"
             f"Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n"
             f"Method: {request.method}\n"
-            f"URL: {request.url}\n"
+            f"URL: {request.url.path}\n"
             f"Client: {client}\n"
             f"Headers:\n{headers_str if headers_str else '  (none)'}\n"
-            f"Body:\n{body_str if body_str else '  (empty)'}\n"
+            f"Body: {body_str if body_str else '(empty)'}\n"
             f"===================================================================\n",
             flush=True,
         )

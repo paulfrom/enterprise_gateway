@@ -55,8 +55,7 @@ if [ "${HEALTH_OK}" -eq 1 ]; then
   if curl -sf -o /dev/null "http://127.0.0.1:${GATEWAY_PUBLISHED_PORT}/history"; then
     echo "    - 历史查询:   http://${PRIMARY_IP}:${GATEWAY_PUBLISHED_PORT}/history"
     if [ -f "${ROOT_DIR}/.runtime_state/local/secrets/history_read.key" ]; then
-      READ_KEY="$(cat "${ROOT_DIR}/.runtime_state/local/secrets/history_read.key" | tr -d '[:space:]')"
-      echo "      (查询 Key: ${READ_KEY})"
+      echo "      (查询 Key 位于 .runtime_state/local/secrets/history_read.key，不回显；请用 cat 自行查看)"
     fi
   fi
 else
