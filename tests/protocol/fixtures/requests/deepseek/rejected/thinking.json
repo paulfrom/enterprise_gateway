@@ -5,5 +5,5 @@
     {"role": "assistant", "content": "回答", "reasoning_content": "签名思考内容"}
   ],
   "thinking": {"type": "enabled"},
-  "reasoning_effort": "high"
+  "reasoning_effort": "unsupported"
 }

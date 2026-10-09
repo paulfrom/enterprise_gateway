@@ -52,7 +52,7 @@ class TestByokAuthentication(unittest.TestCase):
 
     def test_missing_conflicting_or_forged_credentials_rejected(self):
         for headers in ({}, {"Authorization": "Basic synthetic-key"},
-                        {"Authorization": "Bearer key", "x-api-key": "key"},
+                        {"Authorization": "Bearer key", "x-api-key": "other"},
                         {"Authorization": "Bearer key", "x-subject-id": "employee"}):
             with self.subTest(headers=headers), self.assertRaises(SafetyError):
                 authenticator().authenticate(headers)
@@ -110,7 +110,8 @@ class TestMultiProviderRouting(unittest.TestCase):
             self.addCleanup(pipeline.egress_client.close)
         # This category approval exists solely in the controlled synthetic fixture.
         self.client = TestClient(create_app(router=ProviderRouter(pipelines),
-            authenticator=authenticator(), classifier=lambda raw: "STANDARD", hmac_key=HMAC_KEY))
+            authenticator=authenticator(), classifier=lambda raw: "STANDARD", hmac_key=HMAC_KEY,
+            client_profile='strict'))
         self.addCleanup(self.client.close)
 
     def post(self, model, headers, path="/v1/chat/completions"):
@@ -141,7 +142,7 @@ class TestMultiProviderRouting(unittest.TestCase):
         self.assertEqual(len(list(self.evidence.glob("*.json"))), 3)
 
     def test_missing_double_malformed_key_and_unadmitted_model_never_send(self):
-        for headers in ({}, {"Authorization": "Bearer synthetic", "x-api-key": "synthetic"},
+        for headers in ({}, {"Authorization": "Bearer synthetic", "x-api-key": "other"},
                         {"Authorization": "Basic synthetic"}, {"Authorization": "Bearer "},
                         {"x-api-key": ""}):
             with self.subTest(headers=headers):

@@ -28,6 +28,7 @@ import time
 import math
 import pickle
 import marshal
+import logging
 from pathlib import Path
 from dataclasses import asdict
 from collections.abc import Mapping
@@ -102,6 +103,7 @@ class _RouteConfiguration:
     allowed_models: frozenset[str]
     model_mapping: Mapping[str, str]
     request_timeout: float
+    detection_failure_mode: str
 
     def __post_init__(self):
         object.__setattr__(self, 'model_mapping', MappingProxyType(dict(self.model_mapping)))
@@ -132,6 +134,7 @@ class ProtectedPipeline:
         model_mapping: Mapping[str, str] | None = None,
         request_timeout: float = 60.0,
         history_adapter=None,
+        detection_failure_mode: str = 'error',
     ) -> None:
         if protocol not in (DEEPSEEK_CHAT_PROTOCOL, CLAUDE_MESSAGES_PROTOCOL):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unsupported protocol")
@@ -151,8 +154,10 @@ class ProtectedPipeline:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'model mapping')
         if not isinstance(request_timeout,(int,float)) or isinstance(request_timeout,bool) or not math.isfinite(request_timeout) or request_timeout <= 0:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'request deadline')
+        if detection_failure_mode not in ('error', 'passthrough'):
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'detection failure mode')
         self._route = _RouteConfiguration(channel_id, protocol, domain, path,
-            package_version, allowed_models, models, float(request_timeout))
+            package_version, allowed_models, models, float(request_timeout), detection_failure_mode)
         self.body_limit = self.admission_limiter._max_body_bytes
         if self.body_limit is None:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'bounded ingress body required')
@@ -220,7 +225,7 @@ class ProtectedPipeline:
             'provider':validator._provider_verifier.binding_payload}
         return {
             'policy': canonical(self.policy.model_dump(mode='json')),
-            'rules': modules('detection')+canonical([{'class':type(r).__module__+'.'+type(r).__qualname__,'definition':r.to_dict(),'policy':vars(r).get('_policy'),'today':vars(r).get('_today'),'strict':vars(r).get('_strict'),'flags':r.global_regex_flags} for r in self.detector._recognizers]),
+            'rules': canonical({'quick_screen': asdict(self.detector._risk_screener.config) if self.detector._risk_screener is not None else None})+modules('detection')+canonical([{'class':type(r).__module__+'.'+type(r).__qualname__,'definition':r.to_dict(),'policy':vars(r).get('_policy'),'today':vars(r).get('_today'),'strict':vars(r).get('_strict'),'flags':r.global_regex_flags} for r in self.detector._recognizers]),
             'dictionary': (root/'detection/dictionary.py').read_bytes()+canonical({'domain':dictionary.domain,'version':dictionary.version,'entries':[e.model_dump() for e in dictionary.entries]}),
             'ner': canonical({str(p.relative_to(ner_dir)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(ner_dir).rglob('*')) if p.is_file()})+canonical({'timeout':self.detector._ner_timeout,'window':self.detector._window_length,'stride':self.detector._stride,'max_workers':self.detector._executor._max_workers,'max_pending':self.detector._executor._max_pending})+marshal.dumps(self.detector._ner_worker.__code__),
             'mapping': modules('masking'),
@@ -370,20 +375,43 @@ class ProtectedPipeline:
             text_chars=text_chars,
         )
         with self.admission_limiter.acquire():
-            # Gate 4: Three-way Detection Orchestration (D-12)
+            # Gate 4: Bounded risk screening, then full detection for selected fragments
             fragment_spans: dict[str, tuple[ResolvedSpan, ...]] = {}
             detection_fragments = tuple(f for f in validated.fragments if f.requires_detection)
-            outcomes = self.detector.detect_many(tuple(f.content for f in detection_fragments), deadline_at=deadline_at,cancel=cancel)
-            outcome_by_path = dict(zip((f.json_path for f in detection_fragments),outcomes,strict=True))
+            detection_failed = False
+            try:
+                if detection_fragments and self.detector._risk_screener is not None:
+                    try:
+                        assessments = self.detector._risk_screener.assess_many(tuple(f.content for f in detection_fragments))
+                    except Exception:
+                        raise SafetyError(SafetyCode.DETECTION_FAILED, 'screening') from None
+                    detection_fragments = tuple(f for f, assessment in zip(detection_fragments, assessments, strict=True)
+                                                if assessment.requires_detection)
+                    check_deadline()
+                outcomes = self.detector.detect_many(tuple(f.content for f in detection_fragments), deadline_at=deadline_at,cancel=cancel) if detection_fragments else ()
+            except Exception as exc:
+                fault_codes = {SafetyCode.DETECTION_FAILED, SafetyCode.DETECTION_INCOMPLETE,
+                    SafetyCode.NER_MODEL_INVALID, SafetyCode.NER_OFFSET_UNRECOVERABLE,
+                    SafetyCode.INFERENCE_TIMEOUT, SafetyCode.INFERENCE_QUEUE_FULL,
+                    SafetyCode.INVALID_DETECTOR_RESULTS}
+                if (route.detection_failure_mode != 'passthrough'
+                        or isinstance(exc, SafetyError) and exc.code not in fault_codes):
+                    raise
+                check_deadline()
+                detection_failed = True
+                outcomes = ()
+                logging.getLogger(__name__).warning('DETECTION_FAILURE_PASSTHROUGH code=%s',
+                    exc.code.value if isinstance(exc, SafetyError) else SafetyCode.DETECTION_FAILED.value)
+            outcome_by_path = {} if detection_failed else dict(zip((f.json_path for f in detection_fragments),outcomes,strict=True))
             for fragment in validated.fragments:
-                if fragment.requires_detection:
+                if fragment.json_path in outcome_by_path and not detection_failed:
                     outcome = outcome_by_path[fragment.json_path]
                     fragment_spans[fragment.json_path] = outcome.spans
                 else:
                     fragment_spans[fragment.json_path] = ()
 
             # Gate 5: Request Token Replacement (P-05)
-            redacted_request = replace_request(validated, fragment_spans, context)
+            redacted_request = validated.parsed_request if detection_failed else replace_request(validated, fragment_spans, context)
             provider_model = route.model_mapping[validated.model]
             redacted_request = redacted_request.model_copy(update={'model':provider_model})
             check_deadline()
@@ -435,13 +463,6 @@ class ProtectedPipeline:
 
             # Gate 9: Outbound Egress Send (P-17)
             provider_payload=redacted_request.model_dump(exclude_unset=True)
-            if route.protocol == CLAUDE_MESSAGES_PROTOCOL:
-                for message in provider_payload['messages']:
-                    if isinstance(message['content'],list):
-                        for block in message['content']:
-                            if block['type']=='thinking':
-                                # This admission receipt belongs only to the enterprise client.
-                                del block['metadata']
             redacted_payload=json.dumps(provider_payload,ensure_ascii=False).encode('utf-8')
             if history_recorder is not None:
                 history_recorder.write('redacted', redacted_payload)
@@ -512,6 +533,7 @@ class ProtectedPipeline:
                 allowed_models=frozenset(route.allowed_models | {provider_model}),
                 allowed_tools=self.tool_schemas(redacted_request, protocol=route.protocol),
                 state_validator=history_adapter.validator if history_adapter is not None else None,
+                allow_unsupported=True,
             )
             restored_response = restored_response.model_copy(update={'model':validated.model})
             check_deadline()

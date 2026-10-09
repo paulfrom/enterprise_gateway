@@ -136,6 +136,28 @@ class _CountingTransport(httpx.BaseTransport):
 
 
 class ByokCredentialGuardTests(unittest.TestCase):
+    def test_matching_dual_credentials_emit_only_bound_header(self):
+        for credential_header in ('authorization', 'x-api-key'):
+            seen = []
+            binding = BoundUpstream(channel_id='byok', scheme='https', host='supplier.example',
+                port=443, path_prefix='/v1', timeout_seconds=5,
+                credential_header=credential_header, allowed_addresses=frozenset({LOOPBACK}))
+            def respond(request):
+                seen.append(request)
+                return httpx.Response(200, content=b'ok')
+            with BoundEgressClient(binding, transport=httpx.MockTransport(respond), resolver=loopback_resolver) as client:
+                for send in (client.request, client.open_stream):
+                    response = send('POST', '/v1/chat/completions', headers={
+                        'Authorization': 'Bearer synthetic-dual-key', 'X-API-Key': 'synthetic-dual-key'})
+                    response.read()
+                    response.close()
+            self.assertEqual(len(seen), 2)
+            for request in seen:
+                auth = [(name, value) for name, value in request.headers.multi_items()
+                        if name in ('authorization', 'x-api-key')]
+                expected = 'synthetic-dual-key' if credential_header == 'x-api-key' else 'Bearer synthetic-dual-key'
+                self.assertEqual(auth, [(credential_header, expected)])
+
     def test_ipv6_literal_remains_bound_across_relative_redirect(self):
         seen = []
         binding = BoundUpstream(channel_id="ipv6", scheme="http", host="::1",

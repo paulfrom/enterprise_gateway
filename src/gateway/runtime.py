@@ -18,6 +18,7 @@ from audit.audit_watermark import AuditWatermarkGuard, WatermarkPolicy
 from audit.evidence_gate import EvidenceGate
 from detection.detection_orchestrator import DEFAULT_NER_TIMEOUT, DetectionOrchestrator
 from detection.dictionary import CompiledDictionary
+from detection.quick_screen import QuickScreenConfig
 from gateway.app import create_app
 from gateway.provider_router import ProviderRouter, create_provider_pipeline, load_provider_configs
 from infra.egress_client import Resolver
@@ -39,6 +40,9 @@ def create_runtime_app(
     max_body_bytes: int = 1048576, transport: httpx.BaseTransport | None = None,
     resolver: Resolver | None = None,
     history_store=None, history_read_key: bytes | None = None,
+    client_profile: str = 'compatible',
+    detection_failure_mode: str = 'error',
+    quick_screen: QuickScreenConfig | None = None,
 ) -> FastAPI:
     """Assemble real controls; own all HTTP/detector lifecycle resources.
 
@@ -77,7 +81,7 @@ def create_runtime_app(
     pipelines = []
     try:
         detector = DetectionOrchestrator(dictionary=dictionary, ner_package_dir=ner_package_dir,
-                                         ner_timeout=ner_timeout)
+                                         ner_timeout=ner_timeout, quick_screen=quick_screen)
         guard = AuditWatermarkGuard(root, watermark_policy)
         evidence = EvidenceGate(intent_directory=paths["intents"],
                                 evidence_directory=paths["evidence"], kms=kms)
@@ -88,13 +92,14 @@ def create_runtime_app(
             pipeline = create_provider_pipeline(config, domain=domain, policy=policy,
                 detector=detector, admission_limiter=limiter, watermark_guard=guard,
                 evidence_gate=evidence, spool_writer=spool, evidence_bucket=evidence_bucket,
-                package_version=package_version, transport=transport, resolver=resolver)
+                package_version=package_version, transport=transport, resolver=resolver,
+                detection_failure_mode=detection_failure_mode)
             pipelines.append(pipeline)
             by_model.update({model: pipeline for model in config.models})
         router = ProviderRouter(by_model)
         app = create_app(router=router, authenticator=authenticator,
                          classifier=classifier, hmac_key=hmac_key,
-                         history_store=history_store)
+                         history_store=history_store, client_profile=client_profile)
         if history_store is not None:
             from gateway.history_api import install_history_routes
             install_history_routes(app, history_store, history_read_key)

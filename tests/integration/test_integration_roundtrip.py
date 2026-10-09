@@ -48,6 +48,7 @@ from detection.inference_executor import InferenceExecutor
 from knowledge.knowledge_events import ObservationEvent
 from masking.mapping import MappingContext
 from gateway.pipeline import ProtectedPipeline, UpstreamFailure
+from gateway.client_compatibility import compatible_payload
 from policy.policy import (
     CategoryLabel,
     CategoryRule,
@@ -60,6 +61,7 @@ from protocol.protocols import (
     DeepSeekChatRequest,
 )
 from detection.recognizers import default_recognizers
+from detection.quick_screen import QuickRiskScreen, QuickScreenConfig
 from infra.spool import CollectionMode, SpoolWriter
 
 TESTS_DIR = Path(__file__).parent.parent
@@ -297,6 +299,148 @@ class IntegrationRoundtripTests(unittest.TestCase):
         record = parse_record(Path(result.evidence_permit.evidence.path).read_bytes())
         self.assertEqual(decrypt_record(self.kms, record), raw_req.encode("utf-8"))
 
+    def test_agent_multiturn_history_protected_roundtrip(self) -> None:
+        """Growing agent history reaches egress with only redacted business text."""
+        metadata = {'conversationRequestId': 'synthetic-conversation', 'messageId': 'synthetic-message',
+                    'entryId': 'synthetic-entry', 'model': 'client-model', 'requestModelId': 'client-id',
+                    'requestModelName': 'client-model', 'traceId': 'synthetic-trace', 'agent': 'synthetic-agent',
+                    'argumentsDisplayText': 'display-only-secret',
+                    'rawUsage': {'prompt_tokens': 1}, 'usage': {'inputTokens': 1}}
+        body = {'model': 'deepseek-flash', 'reasoning_effort': 'high', 'thinking': {'type': 'enabled'},
+                'tools': [{'type': 'function', 'function': {'name': 'lookup', 'strict': False,
+                    'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}],
+                'messages': [{'role': 'user', 'content': '请查询阿尔法科技的张三',
+                              'startsNewUserRequest': True, 'agent': 'synthetic-agent'}]}
+
+        def upstream_handler(request):
+            payload = json.loads(request.content)
+            self.assertEqual(payload['reasoning_effort'], 'high')
+            self.assertIn('display-only-secret', request.content.decode()) if len(payload['messages']) > 1 else None
+            for message in payload['messages']:
+                if message['role'] in ('assistant', 'tool'):
+                    for key, value in metadata.items(): self.assertEqual(message[key], value)
+                texts = [message.get('reasoning_content', '')]
+                content = message.get('content')
+                texts.extend([content] if isinstance(content, str) else [b['text'] for b in content or []])
+                for text in texts:
+                    self.assertNotIn('阿尔法科技', text)
+                    self.assertNotIn('张三', text)
+            return httpx.Response(200, json={
+                'id': 'chatcmpl-synthetic', 'object': 'chat.completion', 'created': 1727950000,
+                'model': 'deepseek-flash', 'choices': [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': payload['messages'][0]['content']}}],
+                'usage': {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12}})
+
+        spy = UpstreamSpyTransport(upstream_handler)
+        pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
+        for turn in range(3):
+            with self.subTest(turn=turn), MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
+                result = pipeline.process_request(raw_body=json.dumps(compatible_payload(body)),
+                    headers={'Authorization': 'Bearer synthetic-key'}, identity=self.identity,
+                    category='STANDARD', context=ctx)
+                self.assertIn('阿尔法科技', result.response.choices[0].message.content)
+                self.assertIn('张三', result.response.choices[0].message.content)
+                self.assertEqual(result.response.usage.total_tokens, 12)
+            body['messages'].extend([
+                {**metadata, 'role': 'assistant', 'content': [
+                    {'type': 'text', 'text': result.response.choices[0].message.content, 'annotations': []}],
+                 'reasoning': '阿尔法科技的张三', 'reasoning_content': '阿尔法科技的张三',
+                 'tool_calls': [{'id': f'synthetic-call-{turn}', 'type': 'function',
+                                 'function': {'name': 'lookup', 'arguments': '{}'}}]},
+                {**metadata, 'role': 'tool', 'tool_call_id': f'synthetic-call-{turn}',
+                 'content': '阿尔法科技的张三'},
+                {'role': 'user', 'content': '继续查询阿尔法科技'}])
+        self.assertEqual(len(spy.calls), 3)
+
+    def test_detection_fault_defaults_to_error_and_explicitly_allows_passthrough(self):
+        raw = json.dumps({'model': 'deepseek-flash', 'messages': [
+            {'role': 'user', 'content': '阿尔法科技的张三'}], 'opaque': {'vendor': True}})
+        def upstream(request):
+            sent = json.loads(request.content)
+            self.assertEqual(sent, json.loads(raw))
+            return httpx.Response(200, json={'id': 'synthetic-response', 'object': 'chat.completion',
+                'created': 1, 'model': 'deepseek-flash', 'vendor_metadata': {'opaque': True},
+                'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {
+                    'role': 'assistant', 'content': '阿尔法科技的张三'}}]})
+        for mode, code in (('error', SafetyCode.DETECTION_FAILED),
+                           ('passthrough', SafetyCode.DETECTION_FAILED),
+                           ('passthrough', SafetyCode.INFERENCE_TIMEOUT),
+                           ('passthrough', SafetyCode.SECRET_DETECTED)):
+            spy = UpstreamSpyTransport(upstream)
+            pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy, detection_failure_mode=mode)
+            with self.subTest(mode=mode, code=code), MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
+                with patch.object(self.detector, 'detect_many', side_effect=SafetyError(code)):
+                    if mode == 'error' or code == SafetyCode.SECRET_DETECTED:
+                        with self.assertRaises(SafetyError) as raised:
+                            pipeline.process_request(raw_body=raw, headers={'Authorization': 'Bearer synthetic-key'},
+                                identity=self.identity, category='STANDARD', context=ctx)
+                        self.assertEqual(raised.exception.code, code)
+                        self.assertEqual(len(spy.calls), 0)
+                    else:
+                        with self.assertLogs('gateway.pipeline', level='WARNING') as logs:
+                            result = pipeline.process_request(raw_body=raw, headers={'Authorization': 'Bearer synthetic-key'},
+                                identity=self.identity, category='STANDARD', context=ctx)
+                        self.assertIn('DETECTION_FAILURE_PASSTHROUGH', logs.output[0])
+                        self.assertNotIn('阿尔法科技', logs.output[0])
+                        self.assertEqual(len(spy.calls), 1)
+                        self.assertEqual(result.response.model_dump()['vendor_metadata'], {'opaque': True})
+
+    def test_quick_screen_skips_clean_text_and_only_detects_risky_fragments(self):
+        self.detector._risk_screener = QuickRiskScreen(self.detector._dictionary, QuickScreenConfig())
+        for contents in (['你好，请解释递归。'], ['please explain recursion', '阿尔法科技的张三']):
+            body = {'model': 'deepseek-flash', 'messages': [
+                {'role': 'user', 'content': text} for text in contents], 'vendor_metadata': {'opaque': True}}
+            spy = UpstreamSpyTransport(lambda request: httpx.Response(200, json={'model': 'deepseek-flash'}))
+            pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
+            with patch.object(self.detector, 'detect_many', wraps=self.detector.detect_many) as detect:
+                with MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
+                    pipeline.process_request(raw_body=json.dumps(body), headers={'Authorization': 'Bearer synthetic-key'},
+                        identity=self.identity, category='STANDARD', context=ctx)
+            sent = json.loads(spy.calls[0].content)
+            self.assertEqual(sent['messages'][0], body['messages'][0])
+            self.assertEqual(sent['vendor_metadata'], body['vendor_metadata'])
+            if len(contents) == 1:
+                detect.assert_not_called()
+                self.assertEqual(sent, body)
+            else:
+                self.assertEqual(detect.call_args.args[0], ('阿尔法科技的张三',))
+                self.assertNotIn('阿尔法科技', sent['messages'][1]['content'])
+                self.assertNotIn('张三', sent['messages'][1]['content'])
+
+    def test_quick_screen_failure_obeys_detection_failure_configuration(self):
+        self.detector._risk_screener = QuickRiskScreen(self.detector._dictionary, QuickScreenConfig())
+        body = {'model': 'deepseek-flash', 'messages': [{'role': 'user', 'content': 'hello'}]}
+        for mode in ('error', 'passthrough'):
+            spy = UpstreamSpyTransport(lambda request: httpx.Response(200, json={'model': 'deepseek-flash'}))
+            pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy, detection_failure_mode=mode)
+            with patch.object(self.detector._risk_screener, 'assess_many', side_effect=RuntimeError('synthetic failure')):
+                with MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
+                    if mode == 'error':
+                        with self.assertRaises(SafetyError) as raised:
+                            pipeline.process_request(raw_body=json.dumps(body), headers={'Authorization': 'Bearer synthetic-key'},
+                                identity=self.identity, category='STANDARD', context=ctx)
+                        self.assertEqual(raised.exception.code, SafetyCode.DETECTION_FAILED)
+                        self.assertEqual(len(spy.calls), 0)
+                    else:
+                        with self.assertLogs('gateway.pipeline', level='WARNING'):
+                            pipeline.process_request(raw_body=json.dumps(body), headers={'Authorization': 'Bearer synthetic-key'},
+                                identity=self.identity, category='STANDARD', context=ctx)
+                        self.assertEqual(json.loads(spy.calls[0].content), body)
+
+    def test_opaque_only_input_skips_detection(self):
+        body = {'model': 'deepseek-flash', 'messages': [{'role': 'user', 'content': [
+            {'type': 'image_url', 'image_url': {'url': 'synthetic-opaque-url'}}]}]}
+        spy = UpstreamSpyTransport(lambda request: httpx.Response(200, json={
+            'model': 'deepseek-flash', 'vendor_response': True}))
+        pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
+        with patch.object(self.detector, 'detect_many', side_effect=AssertionError('no supported text')) as detect:
+            with MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
+                result = pipeline.process_request(raw_body=json.dumps(body), headers={'Authorization': 'Bearer synthetic-key'},
+                    identity=self.identity, category='STANDARD', context=ctx)
+        detect.assert_not_called()
+        self.assertEqual(json.loads(spy.calls[0].content), body)
+        self.assertTrue(result.response.model_dump()['vendor_response'])
+
     def test_claude_protected_roundtrip_positive(self) -> None:
         """Claude end-to-end positive flow: entities redacted to tokens, upstream receives
 
@@ -455,6 +599,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         self.assertEqual(0, len(spy.calls))
 
     def test_secret_detected_blocks_egress_and_upstream_is_zero(self) -> None:
+        self.detector._risk_screener = QuickRiskScreen(self.detector._dictionary, QuickScreenConfig(threshold=1))
         spy = UpstreamSpyTransport(lambda r: httpx.Response(200))
         pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
 

@@ -47,3 +47,41 @@ class ProtocolContracts(unittest.TestCase):
         with self.assertRaises(SafetyError): self.parse(parse_deepseek_chat_completion,body)
         body['messages'][0]['tool_call_id']='call-1'
         self.assertEqual(self.parse(parse_deepseek_chat_completion,body).messages[0].role,'tool')
+
+    def test_text_blocks_and_typed_controls_are_preserved(self):
+        body = {'model': 'synthetic-model', 'messages': [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'synthetic text'}]}], 'stream': True,
+            'stream_options': {'include_usage': True}, 'thinking': {'type': 'enabled'}}
+        self.assertEqual(self.parse(parse_deepseek_chat_completion, body).model_dump(exclude_unset=True), body)
+
+    def test_unsupported_blocks_and_control_types_fail_closed(self):
+        base = {'model': 'synthetic-model', 'messages': [{'role': 'user', 'content': 'hello'}]}
+        for change in ({'thinking': {'type': 'unknown'}}, {'thinking': {'type': 'enabled', 'unknown': 'secret'}},
+                       {'stream_options': {'include_usage': 'true'}}, {'stream_options': {'unknown': True}},
+                       {'messages': [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {}}]}]},
+                       {'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': 'hello', 'unknown': 'secret'}]}]},
+                       {'messages': [{'role': 'user', 'content': []}]}):
+            with self.subTest(change=change), self.assertRaises(SafetyError):
+                self.parse(parse_deepseek_chat_completion, {**base, **change})
+
+    def test_reasoning_effort_accepts_documented_values_and_preserves_controls(self):
+        base = {'model': 'synthetic-model', 'messages': [{'role': 'user', 'content': 'hello'}],
+                'thinking': {'type': 'enabled'}}
+        for effort in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            with self.subTest(effort=effort):
+                body = {**base, 'reasoning_effort': effort}
+                self.assertEqual(self.parse(parse_deepseek_chat_completion, body).model_dump(exclude_unset=True), body)
+        for effort in ('unknown', '', True, 1, {'level': 'high'}, ['high']):
+            with self.subTest(effort=effort), self.assertRaises(SafetyError):
+                self.parse(parse_deepseek_chat_completion, {**base, 'reasoning_effort': effort})
+
+    def test_assistant_reasoning_history_is_typed_and_role_bound(self):
+        body = {'model': 'synthetic-model', 'messages': [
+            {'role': 'assistant', 'content': 'answer', 'reasoning_content': 'synthetic thought'}]}
+        self.assertEqual(self.parse(parse_deepseek_chat_completion, body).model_dump(exclude_unset=True), body)
+        for role, reasoning in (('user', 'thought'), ('tool', 'thought'), ('assistant', True),
+                                ('assistant', {'text': 'thought'})):
+            message = {'role': role, 'content': 'answer', 'reasoning_content': reasoning}
+            if role == 'tool': message['tool_call_id'] = 'synthetic-call'
+            with self.subTest(role=role, reasoning=reasoning), self.assertRaises(SafetyError):
+                self.parse(parse_deepseek_chat_completion, {**body, 'messages': [message]})

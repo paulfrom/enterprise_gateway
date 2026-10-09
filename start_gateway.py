@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from importlib import import_module
 import inspect
+import math
 import os
 from pathlib import Path
 import re
@@ -140,6 +141,20 @@ def provision_keys() -> None:
             kms.provision(purpose="request-history", bucket=history["bucket"])
 
 
+def _ner_timeout() -> float | None:
+    """Optional operator override; absent keeps the bounded default."""
+    raw = os.environ.get("GATEWAY_NER_TIMEOUT_SECONDS")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "invalid NER timeout") from None
+    if not math.isfinite(value) or value <= 0:
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "invalid NER timeout")
+    return value
+
+
 def build_app(*, providers_config_path: Path | None = None,
               classifier: Callable[[bytes], str] | None = None):
     """One assembly path; policies/dictionary are controlled files, not demos."""
@@ -159,12 +174,25 @@ def build_app(*, providers_config_path: Path | None = None,
     history = _history_spec()
     history_store = None if history is None else _assemble_history(history, kms, state,
                                                                   domain=domain, tenant=tenant)
+    from detection.quick_screen import QuickScreenConfig
+    screen_enabled = os.environ.get('GATEWAY_QUICK_SCREEN_ENABLED', 'true').lower()
+    if screen_enabled not in ('true', 'false'):
+        raise ValueError('GATEWAY_QUICK_SCREEN_ENABLED must be true or false')
+    quick_screen = QuickScreenConfig(enabled=screen_enabled == 'true',
+        threshold=float(os.environ.get('GATEWAY_QUICK_SCREEN_THRESHOLD', '0.35')),
+        budget_ms=float(os.environ.get('GATEWAY_QUICK_SCREEN_BUDGET_MS', '2')))
+    ner_timeout = _ner_timeout()
+    override = {} if ner_timeout is None else {"ner_timeout": ner_timeout}
     return create_runtime_app(provider_config_path=providers, domain=domain, tenant_id=tenant,
         correlation_key=correlation_key, hmac_key=hmac_key, kms=kms,
         dictionary=dictionary, ner_package_dir=Path(_required("GATEWAY_NER_PACKAGE_DIR")),
         state_directory=state, policy=policy, watermark_policy=WatermarkPolicy(),
         evidence_bucket=evidence_bucket, classifier=classifier,
-        history_store=history_store, history_read_key=None if history is None else history["read_key"])
+        client_profile=os.environ.get('GATEWAY_CLIENT_PROFILE') or 'compatible',
+        detection_failure_mode=os.environ.get('GATEWAY_DETECTION_FAILURE_MODE', 'error'),
+        quick_screen=quick_screen,
+        history_store=history_store, history_read_key=None if history is None else history["read_key"],
+        **override)
 
 
 def _load_classifier(reference: str | None) -> Callable[[bytes], str] | None:

@@ -5,12 +5,12 @@
   "signature": null,
   "files": {
     "config.json": {
-      "sha256": "3b07f210408dc2b7f72b18d1f6d08f74c970bd0f0cb1fb23d0d719b125245c89",
-      "bytes": 575
+      "sha256": "cc8c65bbf55495b4891c4bd0512bbe02689b9f25dd3cd2fab12b1620599d99a6",
+      "bytes": 542
     },
     "license-excerpt.json": {
-      "sha256": "80ea8c4d41c948304679b6cd069b2cac048842386bd4706df84e8ddc9ca3effa",
-      "bytes": 172
+      "sha256": "00b8d7a45a85a3bdfa808a7a2486f81ab840024d64ff8874fb673131b6304abd",
+      "bytes": 166
     },
     "model.onnx": {
       "sha256": "b804e101a13b6ea5ce0259a0f2ad07c93c69a6594ed029ada19120127d9d58eb",

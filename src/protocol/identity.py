@@ -288,28 +288,39 @@ class EnterpriseAuthenticator:
         return identity
 
 
-def _request_credential(headers: Mapping[str, str]) -> str:
-    """Select exactly one canonical request credential; never echo secret data."""
-    assert_no_client_header_spoofing(headers)
+def extract_byok_credential(headers: Mapping[str, str]) -> str:
+    """Select one token, accepting matching distinct headers but no duplicates."""
+    if not isinstance(headers, Mapping):
+        raise SafetyError(SafetyCode.INVALID_IDENTITY)
     credentials = [(name.lower(), value) for name, value in headers.items()
                    if isinstance(name, str) and name.lower() in {"authorization", "x-api-key"}]
     if not credentials:
         raise SafetyError(SafetyCode.MISSING_IDENTITY)
-    if len(credentials) != 1:
+    if len(credentials) != len({name for name, _ in credentials}):
         raise SafetyError(SafetyCode.INVALID_IDENTITY)
-    name, value = credentials[0]
-    if not isinstance(value, str):
-        raise SafetyError(SafetyCode.INVALID_IDENTITY)
-    token = value
-    if name == "authorization":
-        if not value.startswith("Bearer "):
+    tokens = []
+    for name, value in credentials:
+        if not isinstance(value, str):
             raise SafetyError(SafetyCode.INVALID_IDENTITY)
-        token = value[7:]
-    if not token:
-        raise SafetyError(SafetyCode.MISSING_IDENTITY)
-    if any(ord(char) < 33 or ord(char) > 126 for char in token):
+        token = value
+        if name == "authorization":
+            if not value.startswith("Bearer "):
+                raise SafetyError(SafetyCode.INVALID_IDENTITY)
+            token = value[7:]
+        if not token:
+            raise SafetyError(SafetyCode.MISSING_IDENTITY)
+        if any(ord(char) < 33 or ord(char) > 126 for char in token):
+            raise SafetyError(SafetyCode.INVALID_IDENTITY)
+        tokens.append(token)
+    if len(tokens) == 2 and not hmac.compare_digest(tokens[0], tokens[1]):
         raise SafetyError(SafetyCode.INVALID_IDENTITY)
-    return token
+    return tokens[0]
+
+
+def _request_credential(headers: Mapping[str, str]) -> str:
+    """Validate ingress identity claims and select the canonical BYOK token."""
+    assert_no_client_header_spoofing(headers)
+    return extract_byok_credential(headers)
 
 
 class ByokAuthenticator:

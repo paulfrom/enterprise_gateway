@@ -41,7 +41,7 @@ from typing import NoReturn
 import httpx
 
 from infra.errors import SafetyCode, SafetyError
-from protocol.identity import FORBIDDEN_CLIENT_IDENTITY_HEADERS
+from protocol.identity import FORBIDDEN_CLIENT_IDENTITY_HEADERS, extract_byok_credential
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _MAX_REDIRECTS = 8
@@ -323,14 +323,12 @@ class BoundEgressClient:
 
     def _filter_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         filtered: dict[str, str] = {}
-        credentials = []
         if headers is not None:
             if not isinstance(headers, Mapping):
                 raise TypeError("headers must be a mapping")
             for name, value in headers.items():
                 lowered = name.lower() if isinstance(name, str) else ""
                 if lowered in ("authorization", "x-api-key"):
-                    credentials.append((lowered, value))
                     continue
                 if lowered not in EGRESS_HEADER_WHITELIST:
                     continue
@@ -338,19 +336,7 @@ class BoundEgressClient:
                     raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "duplicate outbound header")
                 filtered[lowered] = value
 
-        if len(credentials) != 1:
-            raise SafetyError(SafetyCode.INVALID_IDENTITY, "one BYOK required")
-        name, raw = credentials[0]
-        if type(raw) is not str:
-            raise SafetyError(SafetyCode.INVALID_IDENTITY, "invalid BYOK")
-        if name == "authorization":
-            if not raw.startswith("Bearer "):
-                raise SafetyError(SafetyCode.INVALID_IDENTITY, "invalid BYOK")
-            key = raw[7:]
-        else:
-            key = raw
-        if not key or any(ord(char) < 33 or ord(char) > 126 for char in key):
-            raise SafetyError(SafetyCode.INVALID_IDENTITY, "invalid BYOK")
+        key = extract_byok_credential(headers if headers is not None else {})
         if self._binding.credential_header == "x-api-key":
             filtered["x-api-key"] = key
             filtered.setdefault("anthropic-version", "2023-06-01")

@@ -54,17 +54,102 @@ class IngressValidatorTests(unittest.TestCase):
 
         self.assertEqual(validated.protocol, DEEPSEEK_CHAT_PROTOCOL)
         self.assertEqual(validated.model, "deepseek-flash")
-        self.assertEqual(len(validated.fragments), 2)
+        self.assertEqual(len(validated.fragments), 1)
 
-        # Fragment 0 matches tpl-sys-v1 -> exempt!
-        self.assertEqual(validated.fragments[0].content, "You are a helpful assistant.")
-        self.assertFalse(validated.fragments[0].requires_detection)
-        self.assertEqual(validated.fragments[0].matched_template_id, "tpl-sys-v1")
+        # Only the user-role message is a detection fragment; the system prompt
+        # is out of detection scope even when it matches a registered template.
+        self.assertEqual(validated.fragments[0].json_path, "messages[1].content")
+        self.assertEqual(validated.fragments[0].content, "Hello DeepSeek!")
+        self.assertTrue(validated.fragments[0].requires_detection)
+        self.assertIsNone(validated.fragments[0].matched_template_id)
 
-        # Fragment 1 is user content -> requires detection!
-        self.assertEqual(validated.fragments[1].content, "Hello DeepSeek!")
-        self.assertTrue(validated.fragments[1].requires_detection)
-        self.assertIsNone(validated.fragments[1].matched_template_id)
+    def test_system_and_structure_never_produce_fragments(self) -> None:
+        raw = json.dumps({
+            "model": "deepseek-flash",
+            "stop": ["合成停止词"],
+            "messages": [
+                {"role": "system", "content": "系统指令提到张三"},
+                {"role": "assistant", "content": "历史回复含 13900001111"},
+                {"role": "user", "content": "这句也进入检测"},
+            ],
+        }, ensure_ascii=False)
+        validated = IngressValidator.validate_request(
+            raw_body=raw,
+            protocol=DEEPSEEK_CHAT_PROTOCOL,
+            domain="test-domain",
+            category="cat-approved",
+            policy=self.policy,
+            exemption_registry=self.exemption_registry,
+        allowed_models=frozenset({"deepseek-flash"}))
+        self.assertEqual([f.json_path for f in validated.fragments],
+                         ["messages[1].content", "messages[2].content"])
+        self.assertEqual([f.content for f in validated.fragments],
+                         ["历史回复含 13900001111", "这句也进入检测"])
+        self.assertEqual([f.source_kind for f in validated.fragments],
+                         ["model-output", "user-input"])
+
+    def test_tool_results_detected_and_skill_results_exempt(self) -> None:
+        schema = {"type": "object", "properties": {}, "additionalProperties": False}
+        raw = json.dumps({
+            "model": "deepseek-flash",
+            "tools": [
+                {"type": "function", "function": {"name": "Read", "parameters": schema}},
+                {"type": "function", "function": {"name": "Skill", "parameters": schema}},
+            ],
+            "messages": [
+                {"role": "user", "content": "读取配置文件"},
+                {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call-1", "type": "function", "function": {"name": "Read", "arguments": "{}"}},
+                    {"id": "call-2", "type": "function", "function": {"name": "Skill", "arguments": "{}"}},
+                ]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "secret = 13800001111"},
+                {"role": "tool", "tool_call_id": "call-2", "content": "SKILL.md 正文提到张三"},
+            ],
+        }, ensure_ascii=False)
+        validated = IngressValidator.validate_request(
+            raw_body=raw,
+            protocol=DEEPSEEK_CHAT_PROTOCOL,
+            domain="test-domain",
+            category="cat-approved",
+            policy=self.policy,
+        allowed_models=frozenset({"deepseek-flash"}))
+        self.assertEqual(
+            [f.json_path for f in validated.fragments],
+            ["messages[0].content", "messages[2].content"])
+        self.assertEqual(validated.fragments[1].content, "secret = 13800001111")
+
+    def test_claude_tool_result_detected_and_skill_result_exempt(self) -> None:
+        raw = json.dumps({
+            "model": "claude-sonnet-5-5",
+            "max_tokens": 64,
+            "tools": [
+                {"name": "Read", "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+                {"name": "Skill", "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+            ],
+            "messages": [
+                {"role": "user", "content": "读取配置文件"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu-1", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "tu-2", "name": "Skill", "input": {}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu-1", "content": "token = 13900002222"},
+                    {"type": "tool_result", "tool_use_id": "tu-2", "content": "SKILL.md 正文提到李四"},
+                    {"type": "text", "text": "继续"},
+                ]},
+            ],
+        }, ensure_ascii=False)
+        validated = IngressValidator.validate_request(
+            raw_body=raw,
+            protocol=CLAUDE_MESSAGES_PROTOCOL,
+            domain="test-domain",
+            category="cat-approved",
+            policy=self.policy,
+        allowed_models=frozenset({"claude-sonnet-5-5"}))
+        self.assertEqual(
+            [f.json_path for f in validated.fragments],
+            ["messages[0].content", "messages[2].content[0].content", "messages[2].content[2].text"])
+        self.assertEqual(validated.fragments[1].content, "token = 13900002222")
 
     def test_claude_valid_request_admission(self) -> None:
         with open(FIXTURES_DIR / "claude_valid_request.json", "r", encoding="utf-8") as f:
@@ -102,7 +187,7 @@ class IngressValidatorTests(unittest.TestCase):
         result=IngressValidator.validate_request(raw,DEEPSEEK_CHAT_PROTOCOL,'test-domain','cat-approved',self.policy,allowed_models=frozenset({'deepseek-flash'}))
         self.assertTrue(result.parsed_request.stream)
 
-    def test_tools_rejected_at_ingress(self) -> None:
+    def test_tools_rejected_only_in_explicit_strict_parser(self) -> None:
         with open(FIXTURES_DIR / "claude_tools_rejected.json", "r", encoding="utf-8") as f:
             raw_body = f.read()
 
@@ -113,6 +198,7 @@ class IngressValidatorTests(unittest.TestCase):
                 domain="test-domain",
                 category="cat-approved",
                 policy=self.policy,
+                allow_unsupported=False,
             allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
         self.assertEqual(ctx.exception.code, SafetyCode.PROTOCOL_VIOLATION)
 
