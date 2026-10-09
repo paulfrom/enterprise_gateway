@@ -1,0 +1,14 @@
+
+:root{--paper:#f6f4ee;--card:#fffefa;--ink:#183b32;--muted:#758079;--line:#dcded4;--green:#1c5142;--amber:#af7131;--serif:"Songti SC","Noto Serif CJK SC","SimSun",serif;--sans:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif}
+.admin-nav{display:flex;flex-direction:column;gap:4px;margin:-18px 0 26px}
+.nav-label{font-size:10px;letter-spacing:2px;color:#a6b8ad;margin-bottom:6px}
+.nav-link{display:flex;align-items:center;padding:9px 12px;border-radius:5px;color:#d9e2d3;font-size:13px;text-decoration:none;border:1px solid transparent;transition:background .16s,border .16s}
+.nav-link:hover{background:#22473a}
+.nav-link[aria-current="page"]{background:#2d5141;border-color:#83937b;box-shadow:inset 3px 0 0 #d4bc84}
+.session-identity{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:11px;color:#5d6f60}
+.session-identity .actor{font-weight:600;color:#2c4a3a}
+.session-identity code{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#5c7466;overflow-wrap:anywhere}
+.history-actions{display:flex;align-items:center;gap:10px}
+.sidebar-refresh{font-size:10px;color:#b7c6bc;padding:3px 0;border-bottom:1px solid #5a7263}
+.sidebar-refresh:hover:not(:disabled){color:#f3f2e7}
+@media(max-width:620px){.admin-nav{margin:-8px 0 18px}.nav-link{font-size:12px;padding:8px 10px}.session-identity{gap:8px;font-size:10px}.session-identity code{font-size:9px}}

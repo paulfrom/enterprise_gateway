@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>管理员登录 · 企业隐私网关</title>
+  <link rel="stylesheet" href="/login/assets/login.css">
+  <script src="/login/assets/login.js" defer></script>
+</head>
+<body>
+<main class="login-main">
+  <section class="login-panel" aria-labelledby="login-title">
+    <div class="brand"><svg class="brand-mark" viewBox="0 0 34 40" fill="none" aria-hidden="true"><path d="M17 2 31 8v11c0 8-5 14-14 19C8 33 3 27 3 19V8L17 2Z" stroke="currentColor" stroke-width="1.2"/><path d="M10 18h14M10 23h9M12 12h10" stroke="currentColor" stroke-width="1.2"/></svg><div><div class="brand-name">企业隐私网关</div><div class="brand-sub">ENTERPRISE GATEWAY</div></div></div>
+    <div class="login-kicker">ADMIN CONSOLE</div>
+    <h1 id="login-title">管理员登录</h1>
+    <p class="login-sub">使用管理员账号进入管理控制台。</p>
+    <form id="login-form" novalidate>
+      <label for="login-username">用户名</label>
+      <input id="login-username" name="username" type="text" autocomplete="off" spellcheck="false" required>
+      <label for="login-password">密码</label>
+      <input id="login-password" name="password" type="password" autocomplete="off" required>
+      <button type="submit" id="login-submit">登录</button>
+    </form>
+    <p id="login-error" class="login-error" role="alert" hidden></p>
+    <p class="login-note">凭据仅用于本次登录校验，页面不会保存密码；会话标识仅保留在页面内存中。</p>
+  </section>
+</main>
+</body>
+</html>

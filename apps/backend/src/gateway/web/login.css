@@ -1,0 +1,20 @@
+
+:root{--paper:#f6f4ee;--card:#fffefa;--ink:#183b32;--muted:#758079;--line:#dcded4;--green:#1c5142;--amber:#af7131;--serif:"Songti SC","Noto Serif CJK SC","SimSun",serif;--sans:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.65 var(--sans)}button,input{font:inherit}button{cursor:pointer;color:inherit}button:disabled{cursor:not-allowed;opacity:.43}button:focus-visible,input:focus-visible{outline:3px solid #d7a356;outline-offset:4px}button{border:0;background:none}::selection{background:#e4c995;color:#17382e}
+.login-main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px}
+.login-panel{width:100%;max-width:430px;background:var(--card);border:1px solid #d9ddd1;border-radius:5px;padding:44px 42px 36px;animation:appear .3s ease-out}
+.brand{display:flex;gap:12px;align-items:center;margin-bottom:30px}.brand-mark{width:33px;height:37px;color:#8a6f3e}.brand-name{font:22px/1.1 var(--serif);letter-spacing:3px;color:#17382e}.brand-sub{font-size:9px;letter-spacing:2.6px;color:#93a194;margin-top:7px}
+.login-kicker{font-size:9px;letter-spacing:2px;color:#a08961;margin-bottom:13px}
+.login-panel h1{font:27px/1.5 var(--serif);font-weight:400;margin:0 0 9px;letter-spacing:1px}
+.login-sub{font-size:12px;color:#7d8979;margin:0 0 27px}
+.login-panel form label{font-size:11px;color:#63755d;display:block;margin:0 0 8px}
+.login-panel form input{width:100%;min-width:0;padding:12px 14px;border:1px solid #cbd3bf;border-radius:3px;background:#f9faf4;color:#193b30;font-size:13px;margin-bottom:16px}
+.login-panel form input::placeholder{color:#a2aa99;font-size:11px}
+.login-panel form button{width:100%;background:#204b3b;color:#fffbee;padding:12px 18px;border-radius:3px;font-size:13px;margin-top:6px}
+.login-panel form button:hover:not(:disabled){background:#143c2e}
+.login-error{font-size:11px;color:#985b46;margin:14px 0 0}
+.login-note{font-size:10px;color:#98a08e;margin:22px 0 0;line-height:1.9;border-top:1px solid var(--line);padding-top:16px}
+@keyframes appear{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:620px){.login-main{padding:18px;align-items:flex-start}.login-panel{padding:30px 22px 26px;margin-top:24px}.login-panel h1{font-size:23px}.brand{margin-bottom:22px}.brand-name{font-size:20px}.brand-mark{height:31px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+[hidden]{display:none!important}
