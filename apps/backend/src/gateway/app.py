@@ -16,6 +16,8 @@ from infra.config import ReviewSettings
 from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext
 from protocol.identity import ByokAuthenticator
+from gateway.admin_api import ADMIN_ERROR_CODES
+from gateway.admin_auth import AdminAuthService
 from gateway.provider_router import ProviderRouter
 from gateway.pipeline import ProtectedPipeline
 from gateway.client_compatibility import compatible_headers, compatible_payload
@@ -91,11 +93,14 @@ def create_app(
     classifier: Callable[[bytes], str] | None = None,
     hmac_key: bytes | None = None,
     history_store=None,
+    admin_service=None,
     client_profile: str = 'compatible',
 ) -> FastAPI:
     """BYOK ingress. Classification is supplied only by trusted server integration."""
     if client_profile not in ('compatible', 'strict'):
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unknown client profile')
+    if admin_service is not None and not isinstance(admin_service, AdminAuthService):
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'explicit admin authentication service')
     settings = settings or ReviewSettings()
     app = FastAPI(title="Enterprise Privacy Gateway", docs_url=None,
                   redoc_url=None, openapi_url=None)
@@ -105,7 +110,14 @@ def create_app(
     app.state.classifier = classifier
     app.state.hmac_key = hmac_key
     app.state.history_store = history_store
+    app.state.admin_service = admin_service
     app.state.client_profile = client_profile
+    if admin_service is not None:
+        from gateway.admin_api import install_admin_routes
+        install_admin_routes(app, admin_service)
+        if history_store is not None:
+            from gateway.history_api import install_history_routes
+            install_history_routes(app, history_store, admin_service)
 
     sensitive_headers = frozenset(
         {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
@@ -415,6 +427,9 @@ def create_app(
 
     @app.exception_handler(HTTPException)
     async def route_error(_request: Request, exc: HTTPException) -> JSONResponse:
+        if isinstance(exc.detail, str) and exc.detail in ADMIN_ERROR_CODES:
+            return JSONResponse(status_code=exc.status_code,
+                                content={"error": {"code": exc.detail}})
         return JSONResponse(status_code=exc.status_code, content={"error": {
             "code": "UNSUPPORTED_ENDPOINT", "message": "该端点或方法未获准。",
         }})
