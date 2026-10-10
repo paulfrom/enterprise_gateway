@@ -16,7 +16,7 @@ from infra.config import ReviewSettings
 from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext
 from protocol.identity import ByokAuthenticator
-from gateway.admin_api import ADMIN_ERROR_CODES
+from gateway.admin_api import ADMIN_ERROR_CODES, CSRF_HEADER
 from gateway.admin_auth import AdminAuthService
 from gateway.provider_router import ProviderRouter
 from gateway.pipeline import ProtectedPipeline
@@ -125,7 +125,7 @@ def create_app(
             install_history_routes(app, history_store, admin_service)
 
     sensitive_headers = frozenset(
-        {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
+        {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization", CSRF_HEADER}
     )
 
     @app.middleware("http")
