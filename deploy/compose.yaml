@@ -32,6 +32,7 @@ services:
       GATEWAY_POLICY_FILE: /app/operator/policy.json
       GATEWAY_NER_PACKAGE_DIR: /app/models/bert4ner-base-chinese-onnx
       GATEWAY_NER_TIMEOUT_SECONDS: ${GATEWAY_NER_TIMEOUT_SECONDS:-120}
+      GATEWAY_ADMIN_KNOWLEDGE_PG_DSN_FILE: /run/secrets/admin_knowledge_pg_dsn
       GATEWAY_HISTORY_PG_DSN_FILE: /run/secrets/history_pg_dsn
       GATEWAY_HISTORY_RETENTION_DAYS: ${GATEWAY_HISTORY_RETENTION_DAYS:?required explicit history retention days}
       GATEWAY_HISTORY_BUCKET: ${GATEWAY_HISTORY_BUCKET:?required history key bucket}
@@ -40,6 +41,7 @@ services:
       - source_correlation_key
       - kms_master_key
       - history_pg_dsn
+      - admin_knowledge_pg_dsn
     volumes:
       - gateway-state:/app/state
       - gateway-admin-state:/app/state/admin
@@ -96,3 +98,6 @@ secrets:
     file: ${GATEWAY_KNOWLEDGE_PG_DSN_FILE:?required restricted PG connection file}
   history_pg_dsn:
     file: ${GATEWAY_HISTORY_PG_DSN_FILE:?required restricted history PG connection file}
+  # Empty optional secret keeps only knowledge management unavailable.
+  admin_knowledge_pg_dsn:
+    file: ${GATEWAY_ADMIN_KNOWLEDGE_PG_DSN_FILE:-/dev/null}

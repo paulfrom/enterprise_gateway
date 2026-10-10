@@ -1,1 +1,1 @@
-"""Knowledge package: controlled enterprise entities, relationships, approvals, and observation events."""
+"""Knowledge package: controlled enterprise entities, relationships, governance actions, and observation events."""

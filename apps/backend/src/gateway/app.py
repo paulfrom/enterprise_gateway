@@ -16,7 +16,7 @@ from infra.config import ReviewSettings
 from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext
 from protocol.identity import ByokAuthenticator
-from gateway.admin_api import ADMIN_ERROR_CODES
+from gateway.admin_api import ADMIN_ERROR_CODES, CSRF_HEADER
 from gateway.admin_auth import AdminAuthService
 from gateway.provider_router import ProviderRouter
 from gateway.pipeline import ProtectedPipeline
@@ -94,6 +94,7 @@ def create_app(
     hmac_key: bytes | None = None,
     history_store=None,
     admin_service=None,
+    knowledge_governance=None, audit_reader=None, audit_builder=None,
     client_profile: str = 'compatible',
 ) -> FastAPI:
     """BYOK ingress. Classification is supplied only by trusted server integration."""
@@ -115,12 +116,16 @@ def create_app(
     if admin_service is not None:
         from gateway.admin_api import install_admin_routes
         install_admin_routes(app, admin_service)
+        from gateway.admin_knowledge_api import install_knowledge_admin_routes
+        from gateway.admin_audit_api import install_audit_admin_routes
+        install_knowledge_admin_routes(app, admin_service, knowledge_governance)
+        install_audit_admin_routes(app, admin_service, audit_reader, audit_builder)
         if history_store is not None:
             from gateway.history_api import install_history_routes
             install_history_routes(app, history_store, admin_service)
 
     sensitive_headers = frozenset(
-        {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"}
+        {"authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization", CSRF_HEADER}
     )
 
     @app.middleware("http")
@@ -420,6 +425,8 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, _exc: RequestValidationError) -> JSONResponse:
+        if _request.url.path.startswith("/api/admin/"):
+            return JSONResponse(status_code=422, content={"error": {"code": "ADMIN_REQUEST_INVALID"}})
         # Default FastAPI validation responses embed the submitted input; never echo it.
         return JSONResponse(status_code=422, content={"error": {
             "code": "INVALID_REQUEST", "message": "请求不符合契约，已拒绝。",

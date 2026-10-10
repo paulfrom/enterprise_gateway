@@ -91,6 +91,123 @@ def _history_spec() -> dict | None:
             "retention_days": int(days), "bucket": _required("GATEWAY_HISTORY_BUCKET")}
 
 
+
+def _admin_knowledge_spec() -> dict | None:
+    name = 'GATEWAY_ADMIN_KNOWLEDGE_PG_DSN'
+    if not os.environ.get(name) and not os.environ.get(name + '_FILE'):
+        return None
+    return {'connection_uri': _load_text_secret(name)}
+
+
+def _assemble_admin_knowledge(spec, *, tenant, domain):
+    """A two-connection management pool, never used by model detection/admission."""
+    from contextlib import contextmanager
+    import queue
+    import psycopg
+    from psycopg import sql
+    from knowledge.storage import PostgresKnowledgeStorage
+    from knowledge.governance import KnowledgeGovernanceService
+    from knowledge.database_security import assert_restricted_application_role
+
+    def assert_no_owned_objects(connection):
+        # Ownership is not part of the v2 fingerprint. Every protected object's
+        # owner, including schema/functions/sequences, must remain unreachable.
+        owner_path = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM ("
+            " SELECT relowner AS owner FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
+            " UNION SELECT proowner FROM pg_proc WHERE pronamespace=current_schema()::regnamespace"
+            " UNION SELECT nspowner FROM pg_namespace WHERE oid=current_schema()::regnamespace"
+            ") owners WHERE pg_has_role(current_user,owner,'MEMBER'))").fetchone()[0]
+        if owner_path:
+            raise ValueError('management role must not reach protected object owners')
+
+    def connect():
+        # Keep DSN options (notably search_path) intact; timeouts are session GUCs.
+        connection = psycopg.connect(spec['connection_uri'], connect_timeout=5)
+        try:
+            assert_restricted_application_role(connection)
+            role = connection.execute('SELECT current_user').fetchone()[0]
+            assert_no_owned_objects(connection)
+            connection.rollback()
+            for setting in ('statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'):
+                connection.execute("SELECT set_config(%s,'5000',false)", (setting,))
+            connection.commit()
+            return connection, role
+        except BaseException:
+            connection.close()
+            raise
+
+    class AdminStorage(PostgresKnowledgeStorage):
+        def __init__(self):
+            self._pool = queue.Queue(maxsize=2)
+            self._closed = False
+            connections = []
+            try:
+                for _ in range(2):
+                    connection, role = connect()
+                    connections.append(connection)
+                    self._pool.put(connection)
+                super().__init__(spec['connection_uri'], tenant_id=tenant, domain=domain,
+                    admin_dsn=spec['connection_uri'], admin_role=role)
+                with self.admin_transaction(tenant_id=tenant, domain=domain):
+                    pass
+            except BaseException:
+                for connection in connections:
+                    connection.close()
+                raise
+
+        @contextmanager
+        def admin_transaction(self, *, tenant_id, domain):
+            if self._closed:
+                raise RuntimeError('management pool closed')
+            connection = self._pool.get(timeout=5)
+            try:
+                if connection.closed or connection.broken:
+                    connection, role = connect()
+                    if role != self.admin_role:
+                        connection.close()
+                        raise ValueError('management role changed')
+                assert_restricted_application_role(connection, expected_role=self.admin_role)
+                assert_no_owned_objects(connection)
+                connection.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.admin_role)))
+                connection.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
+                connection.execute("SELECT set_config('app.domain',%s,true)", (domain,))
+                connection.execute("SELECT set_config('app.admin_context','true',true)")
+                self.verify_schema(connection)
+                yield connection
+                connection.commit()
+            except BaseException:
+                if not connection.closed:
+                    connection.rollback()
+                raise
+            finally:
+                if self._closed:
+                    connection.close()
+                else:
+                    self._pool.put(connection)
+
+        def close(self):
+            self._closed = True
+            while not self._pool.empty():
+                self._pool.get_nowait().close()
+
+    return KnowledgeGovernanceService(tenant_id=tenant, domain=domain, storage=AdminStorage())
+
+
+def _assemble_admin_audit(kms, state):
+    from audit.catalog import AuditCatalogBuilder
+    from audit.admin_reader import AdminReviewService
+    from gateway.admin_audit_api import revalidate_audit_session
+    def no_legacy_lifecycle(record_id):
+        # Only trusted lifecycle metadata submitted with new intents is eligible.
+        raise ValueError('legacy record has no lifecycle basis')
+    builder = AuditCatalogBuilder(intent_root=state / 'intents', evidence_root=state / 'evidence',
+        catalog_directory=state / 'audit-catalog', lifecycle=no_legacy_lifecycle, batch_limit=200)
+    reader = AdminReviewService(catalog_directory=state / 'audit-catalog', evidence_root=state / 'evidence',
+        kms=kms, revalidate=revalidate_audit_session, review_purpose='model-query',
+        access_log_directory=state / 'audit-access')
+    return reader, builder
+
 def _assemble_history(spec, kms, state: Path, *, domain: str, tenant: str):
     from request_history.storage import PostgresHistoryStore
     audit = state / "history-audit"
@@ -180,6 +297,22 @@ def build_app(*, providers_config_path: Path | None = None,
     from gateway.admin_storage import AdminStateStore
     admin_service = AdminAuthService(AdminStateStore(state / "admin"),
                                      scope=f"{tenant}/{domain}")
+    from knowledge.storage import KnowledgeSchemaError
+    governance = None
+    try:
+        knowledge_spec = _admin_knowledge_spec()
+        if knowledge_spec is not None:
+            governance = _assemble_admin_knowledge(knowledge_spec, tenant=tenant, domain=domain)
+    except KnowledgeSchemaError as exc:
+        governance = exc
+    except Exception:
+        # Optional capability refusal never disables the protected model path.
+        pass
+    reader = builder = None
+    try:
+        reader, builder = _assemble_admin_audit(kms, state)
+    except Exception:
+        pass
     from detection.quick_screen import QuickScreenConfig
     screen_enabled = os.environ.get('GATEWAY_QUICK_SCREEN_ENABLED', 'true').lower()
     if screen_enabled not in ('true', 'false'):
@@ -198,6 +331,7 @@ def build_app(*, providers_config_path: Path | None = None,
         detection_failure_mode=os.environ.get('GATEWAY_DETECTION_FAILURE_MODE', 'error'),
         quick_screen=quick_screen,
         history_store=history_store, admin_service=admin_service,
+        knowledge_governance=governance, audit_reader=reader, audit_builder=builder,
         **override)
 
 

@@ -1,24 +1,26 @@
 """PostgreSQL storage adapter for enterprise knowledge domain (K-04, K-12, K-14).
 
 Provides relational persistence for knowledge sources, entities, claims,
-evidence, review workflows, transactional outbox events, and consumer receipts.
+evidence, transactional outbox events, and consumer receipts.
 Enforces foreign key integrity, cross-domain isolation, and PostgreSQL Row-Level
-Security (RLS).
+Security (RLS). Schema v2 binds every governance mutation to a recorded
+single-admin action and pins the deployed structure with a normalized fingerprint.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
 import json
-from typing import Any
+from typing import Any, Iterator
 from uuid import UUID, uuid4
-from dataclasses import replace
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from infra.errors import SafetyCode, SafetyError
 from knowledge.knowledge import (
-    Approval,
     Candidate,
     CandidateState,
     Claim,
@@ -35,6 +37,79 @@ from knowledge.knowledge import (
     Tombstone,
     TrustedActor,
 )
+
+SCHEMA_VERSION = 2
+# Locked to the measured metadata fingerprint of SCHEMA_SQL v2 (see
+# tests.knowledge.test_storage.TestSchemaFingerprint); any structural drift
+# must update this constant in the same change.
+SCHEMA_FINGERPRINT_V2 = '808ff8d8afb5cbf8a5d9b019f57a38721d5bb5f302b630f8b34985e1e24d8ed0'
+
+
+class KnowledgeSchemaError(RuntimeError):
+    """The deployed knowledge schema does not match the supported v2 contract."""
+
+    code = 'KNOWLEDGE_SCHEMA_INCOMPATIBLE'
+
+    def __init__(self, detail: str = 'knowledge schema metadata does not match the supported v2 contract'):
+        super().__init__(f'{self.code}: {detail}')
+
+
+def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> str:
+    """Normalized sha256 over the schema's table/column/constraint/index/trigger/function/policy metadata.
+
+    OIDs, the schema name and deployment-specific role-name literals are stripped
+    so independently deployed v2 namespaces fingerprint identically.
+    """
+    schema = conn.execute('SELECT current_schema()').fetchone()[0]
+
+    def norm(value: Any) -> Any:
+        if isinstance(value, str):
+            if admin_role:
+                value = value.replace(admin_role, '<ADMIN_ROLE>')
+            return value.replace(schema, '<SCHEMA>')
+        if isinstance(value, (list, tuple)):
+            return [norm(item) for item in value]
+        return value
+
+    tables = conn.execute(
+        "SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname=current_schema() AND c.relkind='r' ORDER BY c.relname").fetchall()
+    columns = conn.execute(
+        "SELECT table_name,column_name,ordinal_position,data_type,is_nullable,column_default "
+        "FROM information_schema.columns WHERE table_schema=current_schema() "
+        "ORDER BY table_name,ordinal_position").fetchall()
+    constraints = conn.execute(
+        "SELECT conrelid::regclass::text,conname,contype,condeferrable,condeferred,"
+        "pg_get_constraintdef(c.oid) FROM pg_constraint c "
+        "WHERE c.connamespace=current_schema()::regnamespace ORDER BY conname").fetchall()
+    indexes = conn.execute(
+        "SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+        "ORDER BY indexname").fetchall()
+    triggers = conn.execute(
+        "SELECT tgrelid::regclass::text,tgname,pg_get_triggerdef(t.oid) FROM pg_trigger t "
+        "WHERE NOT t.tgisinternal AND t.tgrelid IN (SELECT c.oid FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema()) "
+        "ORDER BY tgname").fetchall()
+    functions = conn.execute(
+        "SELECT p.proname,pg_get_function_identity_arguments(p.oid),p.prosecdef,p.proconfig,p.prosrc "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "WHERE n.nspname=current_schema() ORDER BY p.proname").fetchall()
+    policies = conn.execute(
+        "SELECT tablename,policyname,cmd,roles,qual,with_check FROM pg_policies "
+        "WHERE schemaname=current_schema() ORDER BY policyname,tablename").fetchall()
+    canonical = {
+        'tables': norm(tables),
+        'columns': norm(columns),
+        'constraints': norm(constraints),
+        'indexes': norm(indexes),
+        'triggers': norm(triggers),
+        'functions': norm(functions),
+        'policies': norm(policies),
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
 
 SCHEMA_SQL = """
 CREATE TABLE knowledge_sources (
@@ -65,6 +140,7 @@ CREATE TABLE knowledge_claims (
 CREATE TABLE knowledge_candidates (
  candidate_id UUID PRIMARY KEY,claim_id UUID NOT NULL,tenant_id TEXT NOT NULL,domain TEXT NOT NULL,
  acl TEXT[] NOT NULL,purpose TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'proposed',rejection_reason TEXT,
+ candidate_version INTEGER NOT NULL DEFAULT 1,derived_from UUID,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(tenant_id,domain,claim_id) REFERENCES knowledge_claims(tenant_id,domain,claim_id),
  UNIQUE(tenant_id,domain,candidate_id));
@@ -73,20 +149,64 @@ CREATE TABLE candidate_evidence_links (
  acl TEXT[] NOT NULL,purpose TEXT NOT NULL,PRIMARY KEY(candidate_id,evidence_id),
  FOREIGN KEY(tenant_id,domain,candidate_id) REFERENCES knowledge_candidates(tenant_id,domain,candidate_id),
  FOREIGN KEY(tenant_id,domain,evidence_id) REFERENCES knowledge_evidence(tenant_id,domain,evidence_id));
-CREATE TABLE knowledge_approvals (
- approval_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),candidate_id UUID NOT NULL,
- tenant_id TEXT NOT NULL,domain TEXT NOT NULL,acl TEXT[] NOT NULL,purpose TEXT NOT NULL,
- reviewer_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('security_reviewer','business_reviewer')),
- verification_ref TEXT NOT NULL CHECK(length(trim(verification_ref))>0),approved_at TIMESTAMPTZ NOT NULL,
- FOREIGN KEY(tenant_id,domain,candidate_id) REFERENCES knowledge_candidates(tenant_id,domain,candidate_id),
- UNIQUE(candidate_id,reviewer_id),UNIQUE(candidate_id,role));
+CREATE TABLE knowledge_admin_actions (
+    admin_action_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    session_digest TEXT NOT NULL,
+    action_type TEXT NOT NULL CHECK (action_type IN ('governance_confirm','publish','reject','revise','withdraw','revoke')),
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    object_version TEXT,
+    rationale TEXT NOT NULL,
+    intended_use TEXT,
+    consumer_audiences TEXT[],
+    result TEXT NOT NULL CHECK (result IN ('succeeded','failed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TABLE knowledge_governance_versions (
+    governance_version_id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    admin_action_id UUID NOT NULL REFERENCES knowledge_admin_actions(admin_action_id),
+    ownership_confirmed BOOLEAN NOT NULL,
+    intended_use TEXT NOT NULL,
+    consumer_audiences TEXT[] NOT NULL,
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    valid_until TIMESTAMPTZ NOT NULL,
+    rationale TEXT NOT NULL,
+    supersedes_version_id UUID REFERENCES knowledge_governance_versions(governance_version_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (tenant_id, domain, source_id, source_version, governance_version_id)
+);
 CREATE TABLE knowledge_publications (
  publication_id UUID PRIMARY KEY,candidate_id UUID NOT NULL,claim_id UUID NOT NULL,
  tenant_id TEXT NOT NULL,domain TEXT NOT NULL,acl TEXT[] NOT NULL,purpose TEXT NOT NULL,
+ candidate_version INTEGER NOT NULL,
+ intended_use TEXT NOT NULL,consumer_audiences TEXT[] NOT NULL CHECK(cardinality(consumer_audiences)>0),
  published_at TIMESTAMPTZ NOT NULL,valid_until TIMESTAMPTZ NOT NULL,
+ admin_action_id UUID NOT NULL,idempotency_key TEXT,
  FOREIGN KEY(tenant_id,domain,candidate_id) REFERENCES knowledge_candidates(tenant_id,domain,candidate_id),
  FOREIGN KEY(tenant_id,domain,claim_id) REFERENCES knowledge_claims(tenant_id,domain,claim_id),
- UNIQUE(candidate_id),UNIQUE(tenant_id,domain,publication_id));
+ UNIQUE(tenant_id,domain,candidate_id,candidate_version),
+ UNIQUE(tenant_id,domain,publication_id));
+CREATE UNIQUE INDEX knowledge_publications_idempotency
+    ON knowledge_publications(candidate_id, candidate_version, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE TABLE knowledge_publication_sources (
+    publication_id UUID NOT NULL REFERENCES knowledge_publications(publication_id) DEFERRABLE INITIALLY DEFERRED,
+    tenant_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    governance_version_id UUID NOT NULL,
+    PRIMARY KEY (publication_id, source_id, source_version),
+    FOREIGN KEY (tenant_id, domain, source_id, source_version, governance_version_id)
+      REFERENCES knowledge_governance_versions(tenant_id, domain, source_id, source_version, governance_version_id)
+);
 CREATE TABLE knowledge_tombstones (
  tombstone_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),publication_id UUID NOT NULL,candidate_id UUID NOT NULL,
  tenant_id TEXT NOT NULL,domain TEXT NOT NULL,acl TEXT[] NOT NULL,purpose TEXT NOT NULL,reason TEXT NOT NULL,
@@ -102,11 +222,14 @@ CREATE TABLE consumer_receipts (
  receipt_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),consumer_id TEXT NOT NULL,event_id UUID NOT NULL,
  tenant_id TEXT NOT NULL,domain TEXT NOT NULL,acl TEXT[] NOT NULL,purpose TEXT NOT NULL,
  action TEXT NOT NULL,received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,status TEXT NOT NULL,
+ delivery_result TEXT,last_error_code TEXT,
  FOREIGN KEY(tenant_id,domain,event_id) REFERENCES knowledge_outbox(tenant_id,domain,outbox_id),
  UNIQUE(consumer_id,event_id,action));
 CREATE TABLE knowledge_consumer_assets (
  consumer_id TEXT NOT NULL,publication_id UUID NOT NULL,tenant_id TEXT NOT NULL,domain TEXT NOT NULL,
  acl TEXT[] NOT NULL,purpose TEXT NOT NULL,active BOOLEAN NOT NULL,
+ asset_version INTEGER NOT NULL DEFAULT 1,asset_kind TEXT NOT NULL,intended_use TEXT NOT NULL,
+ lineage JSONB NOT NULL DEFAULT '{}',
  PRIMARY KEY(consumer_id,publication_id),
  FOREIGN KEY(tenant_id,domain,publication_id) REFERENCES knowledge_publications(tenant_id,domain,publication_id));
 CREATE TABLE knowledge_observations (
@@ -117,51 +240,120 @@ CREATE TABLE knowledge_observations (
  FOREIGN KEY(tenant_id,domain,source_id,source_version) REFERENCES knowledge_sources(tenant_id,domain,source_id,version));
 
 CREATE FUNCTION enforce_publication_admission() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE candidate_state TEXT; fact_modality TEXT; fact_predicate TEXT; approval_count INT;
-        source_count INT; admitted_sources INT; earliest_deadline TIMESTAMPTZ;
-        candidate_acl TEXT[]; candidate_purpose TEXT;
+DECLARE
+    v_src RECORD;
+    v_s_withdrawn BOOLEAN;
+    v_s_retention TIMESTAMPTZ;
+    v_g_use TEXT;
+    v_g_audiences TEXT[];
+    v_g_until TIMESTAMPTZ;
+    v_first BOOLEAN := true;
+    v_audience_intersection TEXT[];
+    v_bound_until TIMESTAMPTZ := NULL;
 BEGIN
- IF NOT ('publisher'=ANY(COALESCE(nullif(current_setting('app.roles',true),'')::text[],ARRAY[]::text[]))) THEN
-   RAISE EXCEPTION 'authenticated publisher required' USING ERRCODE='42501';
- END IF;
- SELECT c.state,k.modality,k.predicate,c.acl,c.purpose INTO candidate_state,fact_modality,fact_predicate,candidate_acl,candidate_purpose
- FROM knowledge_candidates c JOIN knowledge_claims k USING(claim_id)
- WHERE (c.tenant_id,c.domain,c.candidate_id,c.claim_id)=(NEW.tenant_id,NEW.domain,NEW.candidate_id,NEW.claim_id);
- SELECT count(*) INTO approval_count FROM knowledge_approvals WHERE candidate_id=NEW.candidate_id AND approved_at<=NEW.published_at;
- SELECT count(*) INTO source_count FROM candidate_evidence_links WHERE candidate_id=NEW.candidate_id;
- SELECT count(*),min(s.retention_until) INTO admitted_sources,earliest_deadline
- FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id) JOIN knowledge_sources s
- ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
- WHERE l.candidate_id=NEW.candidate_id AND NOT s.withdrawn AND s.observed_at<=NEW.published_at
- AND s.retention_until>NEW.published_at;
- IF candidate_state IS NULL OR candidate_state NOT IN ('approved','published') OR fact_modality IS DISTINCT FROM 'asserted' OR fact_predicate='co_occurs_with'
- OR approval_count<>2 OR source_count=0 OR source_count<>admitted_sources
- OR NEW.valid_until>earliest_deadline OR NEW.valid_until<=NEW.published_at
- OR NOT (NEW.acl<@candidate_acl) OR NEW.purpose IS DISTINCT FROM candidate_purpose THEN
-   RAISE EXCEPTION 'verified active fact required' USING ERRCODE='23514';
- END IF;
- IF NOT EXISTS (SELECT 1 FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
- JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
- WHERE l.candidate_id=NEW.candidate_id AND s.source_kind<>'model_output') THEN
-   RAISE EXCEPTION 'model-only evidence cannot publish' USING ERRCODE='23514';
- END IF;
- RETURN NEW;
+    IF current_user <> __ADMIN_ROLE__ THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLISHER_REQUIRED';
+    END IF;
+    IF nullif(current_setting('app.admin_context',true),'') IS DISTINCT FROM 'true' THEN
+        RAISE EXCEPTION 'KNOWLEDGE_ADMIN_CONTEXT_REQUIRED';
+    END IF;
+    IF NEW.valid_until <= clock_timestamp() THEN
+        RAISE EXCEPTION 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE';
+    END IF;
+    IF NEW.consumer_audiences IS NULL OR cardinality(NEW.consumer_audiences) = 0 THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM knowledge_admin_actions a
+        WHERE a.admin_action_id = NEW.admin_action_id
+          AND a.action_type='publish' AND a.result='succeeded'
+          AND a.object_type='candidate' AND a.object_id = NEW.candidate_id::text
+          AND (a.object_version IS NULL OR a.object_version = NEW.candidate_version::text)
+          AND a.tenant_id = NEW.tenant_id AND a.domain = NEW.domain) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_ADMIN_ACTION_REQUIRED';
+    END IF;
+    PERFORM 1 FROM knowledge_candidates
+     WHERE candidate_id=NEW.candidate_id AND candidate_version=NEW.candidate_version FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'KNOWLEDGE_CANDIDATE_VERSION_NOT_FOUND'; END IF;
+    -- Every contributing source of the candidate (candidate_evidence_links ->
+    -- knowledge_evidence source references) must be bound in this publication.
+    IF EXISTS (
+        SELECT 1 FROM (
+            SELECT DISTINCT e.source_id, e.version AS source_version
+            FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
+            WHERE l.candidate_id=NEW.candidate_id AND (e.tenant_id,e.domain)=(NEW.tenant_id,NEW.domain)
+        ) csl WHERE NOT EXISTS (
+        SELECT 1 FROM knowledge_publication_sources ps
+         WHERE ps.publication_id=NEW.publication_id
+           AND ps.source_id=csl.source_id AND ps.source_version=csl.source_version)) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_SOURCE_MISSING';
+    END IF;
+    -- Fixed lock order: sources ordered by (source_id, source_version), then governance versions.
+    FOR v_src IN SELECT source_id, source_version, governance_version_id
+        FROM knowledge_publication_sources
+       WHERE publication_id=NEW.publication_id
+       ORDER BY source_id, source_version FOR UPDATE LOOP
+        SELECT s.withdrawn, s.retention_until INTO v_s_withdrawn, v_s_retention
+          FROM knowledge_sources s
+         WHERE s.tenant_id=NEW.tenant_id AND s.domain=NEW.domain
+           AND s.source_id=v_src.source_id AND s.version=v_src.source_version
+           FOR SHARE;
+        IF NOT FOUND OR v_s_withdrawn THEN
+            RAISE EXCEPTION 'KNOWLEDGE_SOURCE_WITHDRAWN';
+        END IF;
+        IF v_s_retention <= clock_timestamp() THEN
+            RAISE EXCEPTION 'KNOWLEDGE_SOURCE_EXPIRED';
+        END IF;
+
+        SELECT g.intended_use, g.consumer_audiences, g.valid_until
+          INTO v_g_use, v_g_audiences, v_g_until
+          FROM knowledge_governance_versions g
+         WHERE g.tenant_id=NEW.tenant_id AND g.domain=NEW.domain
+           AND g.source_id=v_src.source_id AND g.source_version=v_src.source_version
+           AND g.governance_version_id=v_src.governance_version_id
+           AND g.valid_from <= clock_timestamp() AND g.valid_until > clock_timestamp()
+           AND NOT EXISTS (SELECT 1 FROM knowledge_governance_versions n
+                            WHERE n.supersedes_version_id=g.governance_version_id)
+           FOR SHARE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'KNOWLEDGE_GOVERNANCE_VERSION_INVALID';
+        END IF;
+
+        IF v_g_use IS DISTINCT FROM NEW.intended_use THEN
+            RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_PURPOSE_DENIED';
+        END IF;
+
+        IF NOT (NEW.consumer_audiences <@ v_g_audiences) THEN
+            RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED';
+        END IF;
+
+        IF v_first THEN
+            v_audience_intersection := v_g_audiences;
+            v_first := false;
+        ELSE
+            SELECT array_agg(x) INTO v_audience_intersection
+              FROM (SELECT unnest(v_audience_intersection) INTERSECT SELECT unnest(v_g_audiences)) t(x);
+        END IF;
+
+        v_bound_until := LEAST(COALESCE(v_bound_until, v_g_until), v_g_until, v_s_retention);
+    END LOOP;
+
+    IF v_first THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_SOURCE_MISSING';
+    END IF;
+
+    IF v_audience_intersection IS NULL OR cardinality(v_audience_intersection) = 0
+       OR NOT (NEW.consumer_audiences <@ v_audience_intersection) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED';
+    END IF;
+
+    IF NEW.valid_until > v_bound_until THEN
+        RAISE EXCEPTION 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE';
+    END IF;
+
+    RETURN NEW;
 END $$;
 CREATE TRIGGER enforce_publication_admission BEFORE INSERT ON knowledge_publications
  FOR EACH ROW EXECUTE FUNCTION enforce_publication_admission();
-CREATE FUNCTION enforce_reviewer_identity() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
- IF NEW.reviewer_id IS DISTINCT FROM current_setting('app.subject',true)
- OR NOT (NEW.role=ANY(COALESCE(nullif(current_setting('app.roles',true),'')::text[],ARRAY[]::text[]))) THEN
-   RAISE EXCEPTION 'authenticated reviewer required' USING ERRCODE='42501';
- END IF;
- IF NOT EXISTS(SELECT 1 FROM knowledge_candidates WHERE candidate_id=NEW.candidate_id AND state='proposed') THEN
-   RAISE EXCEPTION 'proposed candidate required' USING ERRCODE='23514';
- END IF;
- RETURN NEW;
-END $$;
-CREATE TRIGGER enforce_reviewer_identity BEFORE INSERT ON knowledge_approvals
- FOR EACH ROW EXECUTE FUNCTION enforce_reviewer_identity();
 
 CREATE FUNCTION invalidate_knowledge_source(p_source_id TEXT,p_version TEXT,p_reason TEXT,p_effective TIMESTAMPTZ)
 RETURNS TABLE(out_publication_id UUID,out_candidate_id UUID) LANGUAGE plpgsql SECURITY DEFINER
@@ -201,32 +393,15 @@ BEGIN
    UPDATE knowledge_consumer_assets SET active=false WHERE publication_id=pub_row.publication_id;
    out_publication_id:=pub_row.publication_id;out_candidate_id:=pub_row.candidate_id; RETURN NEXT;
  END LOOP;
- UPDATE knowledge_candidates SET state='withdrawn',acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_claims k SET acl=COALESCE((SELECT array_agg(token) FROM (
-   SELECT token FROM knowledge_candidates c CROSS JOIN LATERAL unnest(c.acl) token
-   WHERE c.claim_id=k.claim_id AND c.state NOT IN ('withdrawn','rejected') AND token=ANY(k.acl) GROUP BY token
-   HAVING count(DISTINCT c.candidate_id)=(SELECT count(*) FROM knowledge_candidates c2 WHERE c2.claim_id=k.claim_id
-                                          AND c2.state NOT IN ('withdrawn','rejected'))) permitted),ARRAY[]::text[])
- WHERE k.claim_id=ANY(claim_ids);
- UPDATE knowledge_entities entity SET acl=COALESCE((SELECT array_agg(token) FROM (
-   SELECT token FROM knowledge_claims k CROSS JOIN LATERAL unnest(k.acl) token
-   WHERE entity.entity_id IN (k.subject_id,k.object_id) AND cardinality(k.acl)>0 AND token=ANY(entity.acl) GROUP BY token
-   HAVING count(DISTINCT k.claim_id)=(SELECT count(*) FROM knowledge_claims k2 WHERE entity.entity_id IN (k2.subject_id,k2.object_id)
-                                      AND cardinality(k2.acl)>0)) permitted),ARRAY[]::text[])
- WHERE entity.entity_id=ANY(entity_ids);
- UPDATE candidate_evidence_links SET acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_approvals SET acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_publications SET acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_evidence SET acl=ARRAY[]::text[] WHERE (tenant_id,domain,source_id,version)=(caller_tenant,caller_domain,p_source_id,p_version);
- UPDATE knowledge_observations SET acl=ARRAY[]::text[] WHERE (tenant_id,domain,source_id,source_version)=(caller_tenant,caller_domain,p_source_id,p_version);
+ UPDATE knowledge_candidates SET state='withdrawn' WHERE candidate_id=ANY(candidate_ids);
  UPDATE knowledge_sources SET withdrawn=true WHERE (tenant_id,domain,source_id,version)=(caller_tenant,caller_domain,p_source_id,p_version);
 END $$;
 REVOKE ALL ON FUNCTION invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ) FROM PUBLIC;
 
 CREATE FUNCTION read_authorized_knowledge_candidate(p_candidate_id UUID) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,__GOVERNANCE_SCHEMA__ AS $$
-DECLARE candidate_row RECORD; claim_row RECORD; subject_row RECORD; object_row RECORD;
-        linked_count INT; admitted_count INT; evidence_payload JSONB; approval_payload JSONB;
+DECLARE candidate_row RECORD; pub_row RECORD; claim_row RECORD; subject_row RECORD; object_row RECORD;
+        linked_count INT; admitted_count INT; bound_count INT; valid_count INT; evidence_payload JSONB;
         caller_tenant TEXT:=current_setting('app.tenant',true); caller_domain TEXT:=current_setting('app.domain',true);
         caller_subjects TEXT[]:=COALESCE(nullif(current_setting('app.subjects',true),'')::text[],ARRAY[]::text[]);
         caller_purposes TEXT[]:=COALESCE(nullif(current_setting('app.purposes',true),'')::text[],ARRAY[]::text[]);
@@ -238,6 +413,7 @@ BEGIN
    AND (token IS DISTINCT FROM caller_domain||':restricted-candidate' OR NOT ('knowledge_processor'=ANY(caller_roles)))) THEN
    RAISE EXCEPTION 'authenticated subject or processing scope invalid' USING ERRCODE='42501';
  END IF;
+
  -- Lock every actual source before reading candidate state or checking ACLs.
  -- FOR SHARE conflicts with withdrawal's FOR UPDATE and stays held until the
  -- caller transaction ends, including after this function returns. Stable
@@ -248,23 +424,55 @@ BEGIN
    WHERE l.candidate_id=p_candidate_id
    AND (e.tenant_id,e.domain,e.source_id,e.version)=(s.tenant_id,s.domain,s.source_id,s.version))
  ORDER BY s.tenant_id,s.domain,s.source_id,s.version FOR SHARE OF s;
+
  SELECT * INTO candidate_row FROM knowledge_candidates c WHERE c.candidate_id=p_candidate_id
  AND (c.tenant_id,c.domain)=(caller_tenant,caller_domain);
- IF candidate_row IS NULL OR NOT (candidate_row.acl && caller_subjects)
- OR NOT (candidate_row.purpose=ANY(caller_purposes)) THEN
+ IF candidate_row IS NULL THEN
    RAISE EXCEPTION 'candidate context access denied' USING ERRCODE='42501';
  END IF;
- SELECT count(*) INTO linked_count FROM candidate_evidence_links l WHERE l.candidate_id=p_candidate_id;
- SELECT count(*) INTO admitted_count FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
- JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
- WHERE l.candidate_id=p_candidate_id AND (s.tenant_id,s.domain)=(caller_tenant,caller_domain)
- AND s.purpose=candidate_row.purpose AND e.purpose=candidate_row.purpose AND l.purpose=candidate_row.purpose
- AND s.acl && caller_subjects AND e.acl && caller_subjects AND l.acl && caller_subjects
- AND candidate_row.acl<@s.acl AND candidate_row.acl<@e.acl AND candidate_row.acl<@l.acl
- AND NOT s.withdrawn AND s.observed_at<=CURRENT_TIMESTAMP AND s.retention_until>CURRENT_TIMESTAMP;
- IF linked_count=0 OR linked_count<>admitted_count THEN
-   RAISE EXCEPTION 'candidate source access denied or source inactive' USING ERRCODE='42501';
+
+ IF candidate_row.acl && caller_subjects AND candidate_row.purpose=ANY(caller_purposes) THEN
+   SELECT count(*) INTO linked_count FROM candidate_evidence_links l WHERE l.candidate_id=p_candidate_id;
+   SELECT count(*) INTO admitted_count FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
+   JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
+   WHERE l.candidate_id=p_candidate_id AND (s.tenant_id,s.domain)=(caller_tenant,caller_domain)
+   AND s.purpose=candidate_row.purpose AND e.purpose=candidate_row.purpose AND l.purpose=candidate_row.purpose
+   AND s.acl && caller_subjects AND e.acl && caller_subjects AND l.acl && caller_subjects
+   AND candidate_row.acl<@s.acl AND candidate_row.acl<@e.acl AND candidate_row.acl<@l.acl
+   AND NOT s.withdrawn AND s.observed_at<=CURRENT_TIMESTAMP AND s.retention_until>CURRENT_TIMESTAMP;
+   IF linked_count=0 OR linked_count<>admitted_count THEN
+     RAISE EXCEPTION 'candidate source access denied or source inactive' USING ERRCODE='42501';
+   END IF;
+ ELSE
+   SELECT * INTO pub_row FROM knowledge_publications p
+   WHERE (p.tenant_id,p.domain,p.candidate_id)=(caller_tenant,caller_domain,p_candidate_id)
+     AND p.candidate_version=candidate_row.candidate_version
+   ORDER BY p.published_at DESC, p.publication_id DESC LIMIT 1;
+
+   IF pub_row IS NULL
+   OR EXISTS(SELECT 1 FROM knowledge_tombstones t WHERE (t.tenant_id,t.domain,t.publication_id)=(caller_tenant,caller_domain,pub_row.publication_id))
+   OR pub_row.valid_until<=CURRENT_TIMESTAMP
+   OR NOT (caller_subject=ANY(pub_row.consumer_audiences))
+   OR NOT (pub_row.intended_use=ANY(caller_purposes)) THEN
+     RAISE EXCEPTION 'candidate context access denied' USING ERRCODE='42501';
+   END IF;
+
+   SELECT count(*) INTO bound_count FROM knowledge_publication_sources ps WHERE ps.publication_id=pub_row.publication_id;
+   SELECT count(*) INTO valid_count FROM knowledge_publication_sources ps
+   JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(ps.tenant_id,ps.domain,ps.source_id,ps.source_version)
+   JOIN knowledge_governance_versions g ON (g.tenant_id,g.domain,g.source_id,g.source_version,g.governance_version_id)=
+                                          (ps.tenant_id,ps.domain,ps.source_id,ps.source_version,ps.governance_version_id)
+   WHERE ps.publication_id=pub_row.publication_id
+     AND (s.tenant_id,s.domain)=(caller_tenant,caller_domain)
+     AND NOT s.withdrawn AND s.observed_at<=CURRENT_TIMESTAMP AND s.retention_until>CURRENT_TIMESTAMP
+     AND g.valid_from<=CURRENT_TIMESTAMP AND g.valid_until>CURRENT_TIMESTAMP
+     AND NOT EXISTS (SELECT 1 FROM knowledge_governance_versions n WHERE n.supersedes_version_id=g.governance_version_id);
+
+   IF bound_count=0 OR bound_count<>valid_count THEN
+     RAISE EXCEPTION 'candidate source access denied or source inactive' USING ERRCODE='42501';
+   END IF;
  END IF;
+
  SELECT * INTO claim_row FROM knowledge_claims k WHERE k.claim_id=candidate_row.claim_id
  AND (k.tenant_id,k.domain)=(caller_tenant,caller_domain);
  SELECT * INTO subject_row FROM knowledge_entities e WHERE e.entity_id=claim_row.subject_id
@@ -283,10 +491,6 @@ BEGIN
  FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id) JOIN knowledge_sources s
  ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
  WHERE l.candidate_id=p_candidate_id;
- SELECT COALESCE(jsonb_agg(jsonb_build_object('reviewer_id',a.reviewer_id,'role',a.role,
-   'verification_ref',a.verification_ref,'approved_at',a.approved_at)
-   ORDER BY CASE a.role WHEN 'security_reviewer' THEN 0 ELSE 1 END),'[]'::jsonb) INTO approval_payload
- FROM knowledge_approvals a WHERE a.candidate_id=p_candidate_id;
  RETURN jsonb_build_object('candidate_id',candidate_row.candidate_id,'state',candidate_row.state,
    'acl',candidate_row.acl,'purpose',candidate_row.purpose,'rejection_reason',candidate_row.rejection_reason,
    'claim',jsonb_build_object('predicate',claim_row.predicate,'polarity',claim_row.polarity,'modality',claim_row.modality,
@@ -294,42 +498,105 @@ BEGIN
        'entity_type',subject_row.entity_type,'name',subject_row.name),
      'object',jsonb_build_object('entity_id',object_row.entity_id,'tenant_id',object_row.tenant_id,'domain',object_row.domain,
        'entity_type',object_row.entity_type,'name',object_row.name)),
-   'evidence',evidence_payload,'approvals',approval_payload);
+   'evidence',evidence_payload);
 END $$;
 REVOKE ALL ON FUNCTION read_authorized_knowledge_candidate(UUID) FROM PUBLIC;
 """
 
 _ASSET_TABLES = ('knowledge_sources','knowledge_entities','knowledge_evidence','knowledge_claims',
- 'knowledge_candidates','candidate_evidence_links','knowledge_approvals','knowledge_publications',
- 'knowledge_tombstones','knowledge_outbox','consumer_receipts','knowledge_observations','knowledge_consumer_assets')
+ 'knowledge_candidates','candidate_evidence_links','knowledge_publications',
+ 'knowledge_tombstones','knowledge_outbox','consumer_receipts','knowledge_observations',
+ 'knowledge_consumer_assets')
+_ADMIN_TABLES = ('knowledge_admin_actions','knowledge_governance_versions','knowledge_publication_sources')
 _SCOPE_POLICY = """tenant_id = nullif(current_setting('app.tenant',true),'')
  AND domain = nullif(current_setting('app.domain',true),'')
  AND acl && COALESCE(nullif(current_setting('app.subjects',true),'')::text[], ARRAY[]::text[])
  AND purpose = ANY(COALESCE(nullif(current_setting('app.purposes',true),'')::text[], ARRAY[]::text[]))"""
+_ADMIN_POLICY = ("current_user = __ADMIN_ROLE__ "
+ "AND nullif(current_setting('app.admin_context',true),'') = 'true' "
+ "AND tenant_id = nullif(current_setting('app.tenant',true),'') "
+ "AND domain = nullif(current_setting('app.domain',true),'')")
 RLS_SETUP_SQL = '\n'.join(
- f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; '
- f'CREATE POLICY governed_access ON {table} USING ({_SCOPE_POLICY}) WITH CHECK ({_SCOPE_POLICY});'
- for table in _ASSET_TABLES)
+ [f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; '
+  f'CREATE POLICY governed_access ON {table} USING ({_SCOPE_POLICY}) WITH CHECK ({_SCOPE_POLICY}); '
+  f'CREATE POLICY admin_access ON {table} USING ({_ADMIN_POLICY}) WITH CHECK ({_ADMIN_POLICY});'
+  for table in _ASSET_TABLES]
+ + [f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; '
+    f'CREATE POLICY admin_access ON {table} USING ({_ADMIN_POLICY}) WITH CHECK ({_ADMIN_POLICY});'
+    for table in _ADMIN_TABLES])
 
 
 class PostgresKnowledgeStorage:
     """Relational knowledge repository implementing K-04, K-12, K-14."""
 
-    def __init__(self, connection_uri: str) -> None:
+    def __init__(self, connection_uri: str, *, tenant_id: str | None = None, domain: str | None = None,
+                 admin_dsn: str | None = None, admin_role: str | None = None) -> None:
         self.connection_uri = connection_uri
+        self.tenant_id = tenant_id
+        self.domain = domain
+        self.admin_dsn = admin_dsn
+        self.admin_role = admin_role
 
-    def init_database(self, enable_rls: bool = True) -> None:
-        """Create tables and optionally set up Row Level Security."""
+    def init_database(self, *, enable_rls: bool = True, application_role: str | None = None,
+                      admin_role: str | None = None) -> str:
+        """Create the v2 schema objects and optionally set up Row Level Security.
+
+        Returns the measured schema fingerprint of the freshly deployed namespace.
+        Grants for the schema-bound application and dedicated admin roles are
+        applied when the corresponding role names are supplied.
+        """
+        admin_role = admin_role or self.admin_role
         with psycopg.connect(self.connection_uri, autocommit=True) as conn:
             with conn.cursor() as cur:
-                from psycopg import sql
                 owner=cur.execute('SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
                 if not owner or not owner[0]:
                     raise KnowledgeError('fixed governed functions require a controlled RLS-bypassing owner; application roles must not bypass')
                 schema=cur.execute('SELECT current_schema()').fetchone()[0]
-                cur.execute(SCHEMA_SQL.replace('__GOVERNANCE_SCHEMA__',sql.Identifier(schema).as_string(conn)))
+                admin_literal = sql.Literal(admin_role).as_string(conn) if admin_role else "''"
+                cur.execute(SCHEMA_SQL.replace('__GOVERNANCE_SCHEMA__',sql.Identifier(schema).as_string(conn))
+                                        .replace('__ADMIN_ROLE__',admin_literal))
                 if enable_rls:
-                    cur.execute(RLS_SETUP_SQL)
+                    cur.execute(RLS_SETUP_SQL.replace('__ADMIN_ROLE__',admin_literal))
+                if application_role:
+                    cur.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
+                    cur.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
+                    cur.execute(sql.SQL('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
+                    for function in ("invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ)", "read_authorized_knowledge_candidate(UUID)"):
+                        cur.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.' + function + ' TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
+                return compute_schema_fingerprint(conn, admin_role=admin_role or '')
+
+    def verify_schema(self, conn: psycopg.Connection) -> None:
+        """Refuse to run against a schema whose metadata fingerprint drifted from v2."""
+        actual = compute_schema_fingerprint(conn, admin_role=self.admin_role or '')
+        if actual != SCHEMA_FINGERPRINT_V2:
+            raise KnowledgeSchemaError(
+                f'schema fingerprint mismatch: expected {SCHEMA_FINGERPRINT_V2}, measured {actual}')
+
+    @contextmanager
+    def admin_transaction(self, *, tenant_id: str, domain: str) -> Iterator[psycopg.Connection]:
+        """One governed admin transaction on the dedicated admin connection.
+
+        The connection adopts the dedicated admin role and binds the transaction
+        local app.tenant/app.domain/app.admin_context='true' GUCs; the v2 schema
+        fingerprint is verified before the transaction body runs.
+        """
+        if not self.admin_dsn:
+            raise KnowledgeError('admin transactions require a configured admin_dsn')
+        conn = psycopg.connect(self.admin_dsn)
+        try:
+            if self.admin_role:
+                conn.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.admin_role)))
+            conn.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
+            conn.execute("SELECT set_config('app.domain',%s,true)", (domain,))
+            conn.execute("SELECT set_config('app.admin_context','true',true)")
+            self.verify_schema(conn)
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def set_session_identity(self, conn: psycopg.Connection, actor: TrustedActor,
                              *, processing_acl: tuple[str, ...] = ()) -> None:
@@ -505,115 +772,108 @@ class PostgresKnowledgeStorage:
                     )
         return claim_id
 
-    def save_approval(
-        self,
-        conn: psycopg.Connection,
-        candidate_id: UUID,
-        approval: Approval,
-    ) -> None:
-        """Record an approval signature."""
-        with conn.cursor() as cur:
-            current = cur.execute("SELECT current_setting('app.subject',true),current_setting('app.roles',true)::text[]").fetchone()
-            if not current or current[0] != approval.reviewer_id or approval.role.value not in current[1] or not approval.verification_ref.strip():
-                raise KnowledgeError('approval requires authenticated reviewer and verification')
-            cur.execute(
-                """
-                INSERT INTO knowledge_approvals (
-                    candidate_id, reviewer_id, role, verification_ref, approved_at,tenant_id,domain,acl,purpose
-                ) SELECT %s,%s,%s,%s,%s,tenant_id,domain,acl,purpose FROM knowledge_candidates WHERE candidate_id=%s
-                """,
-                (
-                    candidate_id,
-                    approval.reviewer_id,
-                    approval.role.value,
-                    approval.verification_ref,
-                    approval.approved_at, candidate_id,
-                ),
-            )
-            if cur.rowcount != 1:
-                raise KnowledgeError('unknown or unauthorized candidate')
-            cur.execute("""UPDATE knowledge_candidates SET state='approved' WHERE candidate_id=%s
-                AND state='proposed' AND (SELECT count(*) FROM knowledge_approvals WHERE candidate_id=%s)=2""",
-                (candidate_id,candidate_id))
-
     def publish_transactional(
         self,
-        conn: psycopg.Connection,
-        publication: Publication,
-        claim_id: UUID,
-    ) -> None:
-        """Publish a candidate and insert an outbox event in ONE atomic transaction (K-12)."""
+        *,
+        candidate_id: UUID,
+        candidate_version: int,
+        intended_use: str,
+        consumer_audiences: list[str] | tuple[str, ...],
+        valid_until: Any,
+        admin_action_id: UUID,
+        idempotency_key: str | None,
+        source_bindings: list[tuple[str, str, UUID]] | tuple[tuple[str, str, UUID], ...],
+    ) -> str:
+        """Publish one candidate version bound to a succeeded publish admin action.
+
+        The publication row, every contributing-source governance binding and the
+        KNOWNLEDGE_PUBLISHED outbox event commit atomically through the dedicated
+        admin connection. Retrying with the same idempotency key returns the
+        committed publication_id without producing a duplicate outbox event.
+        """
+        if not (self.admin_dsn and self.admin_role and self.tenant_id and self.domain):
+            raise KnowledgeError('publication requires a bound admin connection, admin role and tenant/domain scope')
+        try:
+            with self.admin_transaction(tenant_id=self.tenant_id, domain=self.domain) as conn:
+                return self.publish_in_transaction(
+                    conn, candidate_id=candidate_id, candidate_version=candidate_version,
+                    intended_use=intended_use, consumer_audiences=consumer_audiences,
+                    valid_until=valid_until, admin_action_id=admin_action_id,
+                    idempotency_key=idempotency_key, source_bindings=source_bindings)
+        except psycopg.errors.UniqueViolation:
+            if idempotency_key is None:
+                raise
+        # A concurrent retry of the same idempotent request won the unique index;
+        # return the already-committed publication instead of raising.
+        with self.admin_transaction(tenant_id=self.tenant_id, domain=self.domain) as conn:
+            row = conn.execute(
+                'SELECT publication_id FROM knowledge_publications '
+                'WHERE candidate_id=%s AND candidate_version=%s AND idempotency_key=%s',
+                (candidate_id, candidate_version, idempotency_key)).fetchone()
+        if row is None:
+            raise KnowledgeError('publication idempotency conflict without a committed publication')
+        return str(row[0])
+
+    def publish_in_transaction(
+        self, conn: psycopg.Connection, *, candidate_id: UUID, candidate_version: int,
+        intended_use: str, consumer_audiences: list[str] | tuple[str, ...],
+        valid_until: Any, admin_action_id: UUID, idempotency_key: str | None,
+        source_bindings: list[tuple[str, str, UUID]] | tuple[tuple[str, str, UUID], ...],
+    ) -> str:
+        """Write publication, bindings and outbox in the caller's admin transaction.
+
+        The caller owns locking, admission and the action record. No commit or
+        exception recovery may split those writes from this publication.
+        """
+        if not (self.admin_dsn and self.admin_role and self.tenant_id and self.domain):
+            raise KnowledgeError('publication requires a bound admin connection, admin role and tenant/domain scope')
+        bindings = [tuple(binding) for binding in source_bindings]
         with conn.cursor() as cur:
-            role_row = cur.execute("SELECT current_setting('app.roles',true)::text[]").fetchone()
-            if not role_row or Role.PUBLISHER.value not in (role_row[0] or []):
-                raise KnowledgeError('publication requires authenticated publisher')
-            check = cur.execute("""SELECT c.state,k.modality,k.predicate,
-                (SELECT count(*) FROM knowledge_approvals a WHERE a.candidate_id=c.candidate_id),
-                (SELECT min(s.retention_until) FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
-                 JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
-                 WHERE l.candidate_id=c.candidate_id AND NOT s.withdrawn)
-                FROM knowledge_candidates c JOIN knowledge_claims k USING(claim_id)
-                WHERE c.candidate_id=%s AND c.claim_id=%s FOR UPDATE OF c""",
-                (publication.candidate_id,claim_id)).fetchone()
-            if not check or check[0]!='approved' or check[1]!='asserted' or check[2]=='co_occurs_with' or check[3]!=2 or not check[4] or publication.valid_until>check[4]:
-                raise KnowledgeError('publication requires verified active facts and bounded retention')
-            # 1. Update candidate state to published
+            if idempotency_key is not None:
+                row = cur.execute(
+                    'SELECT publication_id FROM knowledge_publications '
+                    'WHERE candidate_id=%s AND candidate_version=%s AND idempotency_key=%s',
+                    (candidate_id, candidate_version, idempotency_key)).fetchone()
+                if row is not None:
+                    return str(row[0])
+            publication_id = uuid4()
+            for source_id, source_version, governance_version_id in bindings:
+                cur.execute(
+                    'INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,'
+                    'source_id,source_version,governance_version_id) VALUES(%s,%s,%s,%s,%s,%s)',
+                    (publication_id, self.tenant_id, self.domain, source_id, source_version,
+                     governance_version_id))
             cur.execute(
-                """
-                UPDATE knowledge_candidates
-                SET state = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE candidate_id = %s
-                """,
-                (CandidateState.PUBLISHED.value, publication.candidate_id),
-            )
-            # 2. Insert publication
-            cur.execute(
-                """
-                INSERT INTO knowledge_publications (
-                    publication_id, candidate_id, claim_id, tenant_id,
-                    domain, acl, purpose, published_at, valid_until
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    publication.publication_id,
-                    publication.candidate_id,
-                    claim_id,
-                    publication.claim.subject.tenant_id,
-                    publication.claim.subject.domain,
-                    list(publication.acl),
-                    publication.purpose,
-                    publication.published_at,
-                    publication.valid_until,
-                ),
-            )
-            # 3. Insert transactional outbox record (K-12)
-            outbox_payload = {
-                "publication_id": str(publication.publication_id),
-                "candidate_id": str(publication.candidate_id),
-                "subject": publication.claim.subject.name,
-                "predicate": publication.claim.predicate.value,
-                "object": publication.claim.object.name,
-                "published_at": publication.published_at.isoformat(),
-                "valid_until": publication.valid_until.isoformat(),
-                "acl": list(publication.acl),
+                'INSERT INTO knowledge_publications(publication_id,candidate_id,claim_id,tenant_id,'
+                'domain,acl,purpose,candidate_version,intended_use,consumer_audiences,published_at,'
+                'valid_until,admin_action_id,idempotency_key) '
+                'SELECT %s,c.candidate_id,c.claim_id,c.tenant_id,c.domain,%s,%s,%s,%s,%s,'
+                'clock_timestamp(),%s,%s,%s FROM knowledge_candidates c WHERE c.candidate_id=%s',
+                (publication_id, list(consumer_audiences), intended_use, candidate_version,
+                 intended_use, list(consumer_audiences), valid_until, admin_action_id,
+                 idempotency_key, candidate_id))
+            if cur.rowcount != 1:
+                raise KnowledgeError('publication candidate version unavailable')
+            payload = {
+                'publication_id': str(publication_id),
+                'candidate_id': str(candidate_id),
+                'candidate_version': candidate_version,
+                'intended_use': intended_use,
+                'consumer_audiences': list(consumer_audiences),
+                'governance_version_ids': [str(binding[2]) for binding in bindings],
+                'asset_lineage': {
+                    'source_bindings': [
+                        {'source_id': str(source_id), 'source_version': str(source_version),
+                         'governance_version_id': str(governance_version_id)}
+                        for source_id, source_version, governance_version_id in bindings]},
+                'valid_until': valid_until.isoformat(),
             }
             cur.execute(
-                """
-                INSERT INTO knowledge_outbox (
-                    event_type, aggregate_type, aggregate_id, tenant_id,
-                    domain, payload, status,acl,purpose
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s)
-                """,
-                (
-                    "KNOWLEDGE_PUBLISHED",
-                    "Publication",
-                    publication.publication_id,
-                    publication.claim.subject.tenant_id,
-                    publication.claim.subject.domain,
-                    json.dumps(outbox_payload),
-                    "pending", list(publication.acl),publication.purpose,
-                ),
-            )
+                'INSERT INTO knowledge_outbox(event_type,aggregate_type,aggregate_id,tenant_id,domain,'
+                'acl,purpose,payload,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                ('KNOWLEDGE_PUBLISHED', 'Publication', publication_id, self.tenant_id, self.domain,
+                 list(consumer_audiences), intended_use, json.dumps(payload), 'pending'))
+            return str(publication_id)
 
     def revoke_transactional(
         self,
@@ -752,19 +1012,14 @@ class PostgresKnowledgeStorage:
                     SourceKind(source['source_kind']),frozenset(source['acl']),source['purpose'],
                     datetime.fromisoformat(source['observed_at']),datetime.fromisoformat(source['retention_until']),
                     source['independence_verified']),item['content_sha256'],item['start'],item['end']))
-            approvals=tuple(Approval(a['reviewer_id'],Role(a['role']),a['verification_ref'],datetime.fromisoformat(a['approved_at']))
-                            for a in payload['approvals'])
             return Candidate(UUID(payload['candidate_id']),claim,tuple(evidence),frozenset(payload['acl']),payload['purpose'],
-                             CandidateState(payload['state']),approvals,payload['rejection_reason'])
+                             CandidateState(payload['state']),rejection_reason=payload['rejection_reason'])
         except (ValueError,TypeError,KeyError):
             raise KnowledgeError('invalid authoritative candidate contract') from None
 
     def reject_transactional(self, conn: psycopg.Connection, candidate_id: UUID, reason: str) -> None:
         if not reason.strip():
             raise KnowledgeError('rejection requires reason')
-        roles=conn.execute("SELECT current_setting('app.roles',true)::text[]").fetchone()[0] or []
-        if Role.BUSINESS_REVIEWER.value not in roles:
-            raise KnowledgeError('rejection requires authenticated business reviewer')
         row=conn.execute("UPDATE knowledge_candidates SET state='rejected',rejection_reason=%s,updated_at=CURRENT_TIMESTAMP WHERE candidate_id=%s AND state='proposed' RETURNING candidate_id",
                          (reason,candidate_id)).fetchone()
         if row is None:

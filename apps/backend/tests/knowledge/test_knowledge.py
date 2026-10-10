@@ -33,21 +33,12 @@ class KnowledgeTests(unittest.TestCase):
     def proposed(self, claim=None, evidence=None):
         return self.ledger.propose(claim or self.claim, evidence or (self.evidence,), self.now)
 
-    def approved(self, candidate):
-        self.ledger.approve(candidate.candidate_id,
-                            self.actor("security", Role.SECURITY_REVIEWER),
-                            Role.SECURITY_REVIEWER, "review/security/1", self.now)
-        return self.ledger.approve(candidate.candidate_id,
-                                   self.actor("business", Role.BUSINESS_REVIEWER),
-                                   Role.BUSINESS_REVIEWER, "review/business/1", self.now)
-
     def publish(self, candidate):
         return self.ledger.publish(candidate.candidate_id, self.actor("publisher", Role.PUBLISHER), self.now)
 
-    def test_synthetic_approval_publish_read_and_withdraw_loop(self):
+    def test_synthetic_publish_read_and_withdraw_loop(self):
         candidate = self.proposed()
         self.assertEqual(CandidateState.PROPOSED, candidate.state)
-        self.assertEqual(CandidateState.APPROVED, self.approved(candidate).state)
         publication = self.publish(candidate)
         self.assertEqual("合成供应商甲", publication.claim.subject.name)
         self.assertEqual(publication, self.ledger.read_publication(publication.publication_id,
@@ -86,7 +77,6 @@ class KnowledgeTests(unittest.TestCase):
         candidate = self.proposed(evidence=(self.evidence, replace(self.evidence, source=narrower)))
         self.assertEqual(self.acl - {"reader"}, candidate.acl)
         self.assertEqual(2, candidate.independent_source_count)
-        self.approved(candidate)
         publication = self.publish(candidate)
         with self.assertRaises(KnowledgeError):
             self.ledger.read_publication(publication.publication_id, self.actor("reader"), self.now)
@@ -101,31 +91,23 @@ class KnowledgeTests(unittest.TestCase):
         with self.assertRaises(KnowledgeError):
             Claim(self.supplier, Predicate.SUPPLIES, replace(self.customer, tenant_id="tenant-b"))
 
-    def test_publish_requires_two_distinct_reviewers(self):
+    def test_unreviewed_candidate_cannot_publish_as_verified_fact(self):
         candidate = self.proposed()
+        actor = self.actor("security", Role.SECURITY_REVIEWER)
         with self.assertRaises(KnowledgeError):
-            self.publish(candidate)
-        actor = self.actor("security", Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER)
-        self.ledger.approve(candidate.candidate_id, actor, Role.SECURITY_REVIEWER, "verified", self.now)
-        with self.assertRaises(KnowledgeError):
-            self.ledger.approve(candidate.candidate_id, actor, Role.BUSINESS_REVIEWER, "verified", self.now)
-        with self.assertRaises(KnowledgeError):
-            self.publish(candidate)
+            self.ledger.publish(candidate.candidate_id, actor, self.now)
 
     def test_roles_purpose_and_actor_scope_are_enforced(self):
         candidate = self.proposed()
-        actor = self.actor("security", Role.SECURITY_REVIEWER)
-        for invalid in (replace(actor, roles=frozenset()), replace(actor, purposes=frozenset()),
-                        replace(actor, tenant_id="tenant-b"), replace(actor, domain="finance"),
-                        replace(actor, subject_id="outsider")):
+        publisher = self.actor("publisher", Role.PUBLISHER)
+        for invalid in (replace(publisher, roles=frozenset()), replace(publisher, purposes=frozenset()),
+                        replace(publisher, tenant_id="tenant-b"), replace(publisher, domain="finance"),
+                        replace(publisher, subject_id="outsider")):
             with self.subTest(actor=invalid), self.assertRaises(KnowledgeError):
-                self.ledger.approve(candidate.candidate_id, invalid, Role.SECURITY_REVIEWER, "verified", self.now)
-        with self.assertRaises(KnowledgeError):
-            self.ledger.approve(candidate.candidate_id, actor, Role.SECURITY_REVIEWER, "", self.now)
+                self.ledger.publish(candidate.candidate_id, invalid, self.now)
 
     def test_reader_and_publisher_cannot_cross_purpose_or_scope(self):
         candidate = self.proposed()
-        self.approved(candidate)
         with self.assertRaises(KnowledgeError):
             self.ledger.publish(candidate.candidate_id, self.actor("publisher"), self.now)
         publication = self.publish(candidate)
@@ -152,18 +134,15 @@ class KnowledgeTests(unittest.TestCase):
             with self.subTest(claim=claim):
                 self.ledger = KnowledgeLedger()
                 candidate = self.proposed(claim, evidence)
-                self.approved(candidate)
                 with self.assertRaises(KnowledgeError):
                     self.publish(candidate)
 
     def test_negated_claim_stays_explicitly_negative(self):
         candidate = self.proposed(replace(self.claim, polarity=Polarity.NEGATIVE))
-        self.approved(candidate)
         self.assertEqual(Polarity.NEGATIVE, self.publish(candidate).claim.polarity)
 
     def test_expiry_denies_reads_and_emits_tombstone_once(self):
         candidate = self.proposed()
-        self.approved(candidate)
         publication = self.publish(candidate)
         expiry = self.source.retention_until
         with self.assertRaises(KnowledgeError):
@@ -171,14 +150,14 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(1, len(self.ledger.expire(expiry)))
         self.assertEqual((), self.ledger.expire(expiry))
 
-    def test_expired_evidence_blocks_proposal_and_approval(self):
+    def test_expired_evidence_blocks_proposal_and_publish(self):
         candidate = self.proposed()
         expiry = self.source.retention_until
         with self.assertRaises(KnowledgeError):
             self.ledger.propose(self.claim, (self.evidence,), expiry)
         with self.assertRaises(KnowledgeError):
-            self.ledger.approve(candidate.candidate_id, self.actor("security", Role.SECURITY_REVIEWER),
-                                Role.SECURITY_REVIEWER, "verified", expiry)
+            self.ledger.publish(candidate.candidate_id,
+                                self.actor("publisher", Role.PUBLISHER), expiry)
 
     def test_rejection_prevents_publication(self):
         candidate = self.proposed()
@@ -192,8 +171,6 @@ class KnowledgeTests(unittest.TestCase):
     def test_unknown_ids_raise_controlled_errors(self):
         unknown = UUID(int=999)
         operations = (
-            lambda: self.ledger.approve(unknown, self.actor("security", Role.SECURITY_REVIEWER),
-                                        Role.SECURITY_REVIEWER, "ref", self.now),
             lambda: self.ledger.reject(unknown, self.actor("business", Role.BUSINESS_REVIEWER), "reason", self.now),
             lambda: self.ledger.publish(unknown, self.actor("publisher", Role.PUBLISHER), self.now),
             lambda: self.ledger.read_publication(unknown, self.actor("reader"), self.now),

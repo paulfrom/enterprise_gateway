@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import json
 import re
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -104,7 +105,10 @@ class GovernedConsumer:
     """Durable, idempotent consumer; receipt follows application in the same PG transaction.
 
     Applications receive authorized publication IDs. Readable facts are fetched from
-    active governed rows, so tombstones/expiry prevent stale snapshot re-use.
+    active governed rows, so tombstones/expiry prevent stale snapshot re-use. Consumer
+    authorization is the publication-bound effective governance grant (design §1.2):
+    outbox rows are visible to a consumer only while the publication's consumer
+    audiences and intended use cover the authenticated consumer scope.
     """
     def __init__(self, storage: PostgresKnowledgeStorage, actor: TrustedActor):
         self.storage, self.actor = storage, actor
@@ -118,40 +122,70 @@ class GovernedConsumer:
                     ORDER BY o.created_at,o.outbox_id LIMIT 100''',(self.actor.subject_id,)).fetchall()
             for event in events:
                 action = 'tombstone_applied' if event['event_type']=='KNOWLEDGE_REVOKED' else 'publication_applied'
-                # Application is durable in consumer_assets and therefore atomic with receipt.
-                conn.execute('''INSERT INTO knowledge_consumer_assets
-                    (consumer_id,publication_id,tenant_id,domain,acl,purpose,active)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT(consumer_id,publication_id) DO UPDATE SET active=EXCLUDED.active''',
-                    (self.actor.subject_id,event['aggregate_id'],event['tenant_id'],event['domain'],
-                     [self.actor.subject_id],event['purpose'],action=='publication_applied'))
+                if action == 'publication_applied':
+                    self._apply_publication(conn, event)
+                else:
+                    self._apply_revocation(conn, event)
                 if fail_after_apply:
                     raise RuntimeError('injected consumer crash before receipt')
                 self.storage.record_consumer_receipt(conn,self.actor.subject_id,event['outbox_id'],event['domain'],action)
                 self.storage.mark_outbox_processed(conn,[event['outbox_id']])
             return len(events)
 
+    def _apply_publication(self, conn, event):
+        # Application is durable in consumer_assets and therefore atomic with receipt;
+        # the persisted lineage ties the asset to its publication and governance versions.
+        payload = event['payload'] if isinstance(event['payload'], dict) else json.loads(event['payload'])
+        lineage = {
+            'publication_id': str(event['aggregate_id']),
+            'source_bindings': payload.get('asset_lineage', {}).get('source_bindings', []),
+            'governance_version_ids': payload.get('governance_version_ids', []),
+        }
+        conn.execute('''INSERT INTO knowledge_consumer_assets
+            (consumer_id,publication_id,tenant_id,domain,acl,purpose,active,asset_version,asset_kind,intended_use,lineage)
+            SELECT %s,%s,%s,%s,%s,%s,
+                   (NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id=%s)
+                    AND (SELECT p.valid_until FROM knowledge_publications p WHERE p.publication_id=%s) > clock_timestamp()),
+                   1,'knowledge_publication',%s,%s
+            ON CONFLICT(consumer_id,publication_id) DO UPDATE SET active=EXCLUDED.active
+            WHERE knowledge_consumer_assets.active=true
+              AND NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id=EXCLUDED.publication_id)
+              AND (SELECT p.valid_until FROM knowledge_publications p WHERE p.publication_id=EXCLUDED.publication_id) > clock_timestamp()''',
+            (self.actor.subject_id,event['aggregate_id'],event['tenant_id'],event['domain'],
+             [self.actor.subject_id],event['purpose'],event['aggregate_id'],event['aggregate_id'],
+             event['purpose'],json.dumps(lineage)))
+
+    def _apply_revocation(self, conn, event):
+        # Deactivate this consumer's applied asset; consumers without an applied
+        # asset only record the tombstone receipt, never a fabricated asset row.
+        conn.execute('UPDATE knowledge_consumer_assets SET active=false'
+                     ' WHERE consumer_id=%s AND publication_id=%s',
+                     (self.actor.subject_id, event['aggregate_id']))
+
     def active_publication_ids(self, now: datetime | None = None) -> tuple[UUID, ...]:
         now = now or datetime.now(timezone.utc)
         with psycopg.connect(self.storage.connection_uri) as conn:
             self.storage.set_session_identity(conn,self.actor)
-            rows = conn.execute('''SELECT a.publication_id,p.candidate_id FROM knowledge_consumer_assets a
+            # v2 semantics: the consumer's own active assets joined to publications
+            # that are not revoked (no tombstone) and not expired. Authoritative
+            # source and governance invalidations are reflected via tombstones and
+            # asset deactivations committed by the governance service.
+            rows = conn.execute('''SELECT p.publication_id FROM knowledge_consumer_assets a
                 JOIN knowledge_publications p ON (p.tenant_id,p.domain,p.publication_id)=(a.tenant_id,a.domain,a.publication_id)
-                JOIN knowledge_candidates c ON c.candidate_id=p.candidate_id
-                WHERE a.consumer_id=%s AND a.active AND p.valid_until>%s AND c.state='published'
+                WHERE a.consumer_id=%s AND a.active AND p.valid_until>%s
                 AND NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id=p.publication_id)
-                AND NOT EXISTS (SELECT 1 FROM candidate_evidence_links l JOIN knowledge_evidence e ON e.evidence_id=l.evidence_id
-                    JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
-                    WHERE l.candidate_id=p.candidate_id AND (s.withdrawn OR s.retention_until<=%s))''',
-                (self.actor.subject_id,now,now)).fetchall()
+                ORDER BY p.publication_id''',(self.actor.subject_id,now)).fetchall()
             admitted=[]
-            for publication_id,candidate_id in rows:
+            for (publication_id,) in rows:
                 try:
                     with conn.transaction():
-                        self.storage.load_candidate(conn,candidate_id)
-                except KnowledgeError:
-                    # Read denial aborts the current SQL transaction. A savepoint
-                    # keeps subsequent independent authorized assets inspectable.
+                        # Row lock + savepoint keep per-row inspection independent.
+                        locked = conn.execute(
+                            'SELECT 1 FROM knowledge_publications WHERE publication_id=%s FOR SHARE',
+                            (publication_id,)).fetchone()
+                        if locked is not None:
+                            admitted.append(publication_id)
+                except psycopg.Error:
+                    # A failed row must not hide other independent authorized assets.
                     continue
-                admitted.append(publication_id)
             return tuple(admitted)

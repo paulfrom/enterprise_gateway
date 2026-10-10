@@ -35,6 +35,28 @@ MAX_LOGIN_BODY_BYTES = 4096
 ADMIN_ERROR_CODES = frozenset({
     "ADMIN_SESSION_INVALID", "ADMIN_STORAGE_UNAVAILABLE",
     "ADMIN_ORIGIN_REJECTED", "ADMIN_CSRF_INVALID",
+    "KNOWLEDGE_SCHEMA_INCOMPATIBLE",
+    "KNOWLEDGE_SOURCE_NOT_FOUND",
+    "KNOWLEDGE_SOURCE_WITHDRAWN",
+    "KNOWLEDGE_SOURCE_EXPIRED",
+    "KNOWLEDGE_GOVERNANCE_VERSION_CONFLICT",
+    "KNOWLEDGE_GOVERNANCE_VERSION_INVALID",
+    "KNOWLEDGE_CANDIDATE_NOT_FOUND",
+    "KNOWLEDGE_CANDIDATE_VERSION_CONFLICT",
+    "KNOWLEDGE_PUBLICATION_NOT_FOUND",
+    "KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED",
+    "KNOWLEDGE_PUBLICATION_PURPOSE_DENIED",
+    "KNOWLEDGE_PUBLISH_REJECTED",
+    "KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE",
+    "KNOWLEDGE_ADMIN_UNAVAILABLE",
+    "AUDIT_RECORD_NOT_FOUND",
+    "AUDIT_RECORD_UNAVAILABLE",
+    "AUDIT_EVIDENCE_CORRUPTED",
+    "AUDIT_ACCESS_REJECTED",
+    "AUDIT_WRITE_FAILED",
+    "ADMIN_AUDIT_UNAVAILABLE",
+    "ADMIN_REQUEST_INVALID",
+
 })
 
 _LOGIN_ASSETS = frozenset({"login.css", "login.js"})
@@ -126,7 +148,7 @@ def _page_dependency(service: AdminAuthService):
     return dependency
 
 
-def _write_dependency(service: AdminAuthService):
+def write_dependency(service: AdminAuthService):
     authenticate = service.require_admin()
 
     async def dependency(request: Request) -> AdminContext:
@@ -170,7 +192,7 @@ def install_admin_routes(app: FastAPI, auth_service: AdminAuthService) -> None:
         raise TypeError("auth_service must be an AdminAuthService")
     assets = Path(__file__).with_name("web")
     require_page = _page_dependency(auth_service)
-    require_write = _write_dependency(auth_service)
+    require_write = write_dependency(auth_service)
     require_poll = auth_service.require_admin_poll()
 
     @app.middleware("http")

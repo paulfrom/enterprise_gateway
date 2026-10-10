@@ -97,6 +97,31 @@ class ApplicationRoleBoundaryTests(unittest.TestCase):
 
 
 class DatabasePreparationCliTests(unittest.TestCase):
+    def test_admin_role_is_optional_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = dict(schema="gw_test_cli", application_role="synthetic-role",
+                        admin_dsn="unused", app_dsn="unused")
+            for label, admin_role, expected in (
+                    ("absent", None, None),
+                    ("valid", "gw_admin_role", "gw_admin_role"),
+                    ("uppercase", "Gw_Admin", "invalid_admin_role"),
+                    ("pg_reserved", "pg_monitor", "reserved_admin_role"),
+                    ("non_string", 42, "invalid_admin_role")):
+                with self.subTest(label=label):
+                    config = Path(directory) / f"input-{label}.json"
+                    payload = dict(base)
+                    if admin_role is not None:
+                        payload["admin_role"] = admin_role
+                    config.write_text(json.dumps(payload), encoding="utf-8")
+                    if expected is None or expected == "invalid_admin_role" or expected == "reserved_admin_role":
+                        if expected is None:
+                            self.assertNotIn("admin_role", load_configuration(config))
+                        else:
+                            with self.assertRaisesRegex(DatabasePreparationError, expected):
+                                load_configuration(config)
+                    else:
+                        self.assertEqual(expected, load_configuration(config)["admin_role"])
+
     def test_connection_error_redacted_and_own_empty_reservation_removed(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "input.json"
