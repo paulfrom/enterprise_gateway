@@ -397,6 +397,41 @@ class AdminKnowledgeApiTests(unittest.TestCase):
                 self.assertEqual(response.json()["error"]["code"], "ADMIN_REQUEST_INVALID")
         self.assertEqual(self.governance.calls, [])
 
+    def test_revocation_during_query_prevents_metadata_release(self):
+        original = self.governance.list_sources
+        def revoke(**kwargs):
+            rows = original(**kwargs)
+            self.fixture.store.revoke_session(self.fixture.digest)
+            return rows
+        with patch.object(self.governance, 'list_sources', side_effect=revoke):
+            response = self.client.get('/api/admin/sources', headers=self.auth_headers())
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {'error': {'code': 'ADMIN_SESSION_INVALID'}})
+        self.assertNotIn(SOURCE_ROW['source_id'], response.text)
+        self.assertEqual([name for name, _ in self.governance.calls], ['list_sources'])
+
+    def test_revocation_after_accepted_write_refuses_result_without_undoing_action(self):
+        original = self.governance.reject_candidate
+        def revoke(candidate_id, **kwargs):
+            original(candidate_id, **kwargs)
+            self.fixture.store.revoke_session(self.fixture.digest)
+        with patch.object(self.governance, 'reject_candidate', side_effect=revoke):
+            response = self.client.post(f'/api/admin/candidates/{CANDIDATE_ID}/reject',
+                headers=self.auth_headers(), json={'basis': 'reject verified candidate'})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {'error': {'code': 'ADMIN_SESSION_INVALID'}})
+        self.assertEqual([name for name, _ in self.governance.calls], ['reject_candidate'])
+        self.assertEqual(len(self.governance.action_contexts), 1)
+
+    def test_final_session_storage_failure_keeps_auth_error_domain(self):
+        from gateway.admin_storage import AdminStorageUnavailable
+        from unittest.mock import AsyncMock
+        with patch.object(self.fixture.service, 'revalidate', new=AsyncMock(side_effect=AdminStorageUnavailable())):
+            response = self.client.get('/api/admin/sources', headers=self.auth_headers())
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'error': {'code': 'ADMIN_STORAGE_UNAVAILABLE'}})
+        self.assertNotIn(SOURCE_ROW['source_id'], response.text)
+
     def test_duplicate_json_and_oversized_body_refuse_before_governance(self):
         for body in ('{"basis":"first","basis":"second"}', '{"basis":"' + 'x'*16384 + '"}'):
             response = self.client.post(f'/api/admin/candidates/{CANDIDATE_ID}/reject',

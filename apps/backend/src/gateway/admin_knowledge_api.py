@@ -4,6 +4,7 @@ from dataclasses import asdict
 from functools import partial
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
+import asyncio
 import threading
 
 from fastapi import Depends, HTTPException, Query, Request
@@ -13,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from psycopg.rows import dict_row
 
 from gateway.admin_api import ADMIN_ERROR_CODES, write_dependency
-from gateway.history_api import _error
+from gateway.history_api import _error, _source
+from gateway.admin_storage import AdminStorageUnavailable, SessionInvalid
 from knowledge.governance import AdminActionContext, GovernanceError
 from knowledge.storage import KnowledgeSchemaError
 from knowledge.knowledge import KnowledgeError
@@ -150,7 +152,7 @@ def install_knowledge_admin_routes(app, auth_service, governance):
     app.state.admin_knowledge_executor = executor
     app.router.add_event_handler("shutdown", partial(executor.shutdown, wait=False, cancel_futures=True))
 
-    def respond(call):
+    def respond(context, request, call):
         if governance is None or not slots.acquire(blocking=False):
             return _error('KNOWLEDGE_ADMIN_UNAVAILABLE', 503)
         def work():
@@ -164,7 +166,13 @@ def install_knowledge_admin_routes(app, auth_service, governance):
             slots.release()
             return _error('KNOWLEDGE_ADMIN_UNAVAILABLE', 503)
         try:
-            return future.result(timeout=_PG_ACQUIRE_TIMEOUT)
+            result = future.result(timeout=_PG_ACQUIRE_TIMEOUT)
+            asyncio.run(auth_service.revalidate(context, source=_source(request)))
+            return result
+        except SessionInvalid:
+            return _error("ADMIN_SESSION_INVALID", 401)
+        except AdminStorageUnavailable:
+            return _error("ADMIN_STORAGE_UNAVAILABLE", 503)
         except Exception as exc:
             return _failure(exc)
 
@@ -209,60 +217,60 @@ def install_knowledge_admin_routes(app, auth_service, governance):
         return response(result)
 
     @app.get('/api/admin/sources')
-    def sources(status: str | None = None, use: str | None = None, audience: str | None = None,
+    def sources(request: Request, status: str | None = None, use: str | None = None, audience: str | None = None,
                 limit: _Limit = 50, cursor: _Cursor = None, context=Depends(require)):
-        return respond(lambda: listing('list_sources', status=status, use=use, audience=audience, limit=limit, cursor=cursor))
+        return respond(context, request, lambda: listing('list_sources', status=status, use=use, audience=audience, limit=limit, cursor=cursor))
 
     @app.get('/api/admin/sources/{source_id}')
-    def source(source_id: str, version: str | None = None, context=Depends(require)):
-        return respond(lambda: detail('knowledge_sources', 'source_id', source_id, 'KNOWLEDGE_SOURCE_NOT_FOUND', version=version))
+    def source(request: Request, source_id: str, version: str | None = None, context=Depends(require)):
+        return respond(context, request, lambda: detail('knowledge_sources', 'source_id', source_id, 'KNOWLEDGE_SOURCE_NOT_FOUND', version=version))
 
     @app.get('/api/admin/candidates')
-    def candidates(state: str | None = None, source_id: str | None = None, limit: _Limit = 50,
+    def candidates(request: Request, state: str | None = None, source_id: str | None = None, limit: _Limit = 50,
                    cursor: _Cursor = None, consumer: str | None = None, use: str | None = None, context=Depends(require)):
-        return respond(lambda: listing('list_candidates', 'candidate', consumer, use, state=state, source_id=source_id, limit=limit, cursor=cursor))
+        return respond(context, request, lambda: listing('list_candidates', 'candidate', consumer, use, state=state, source_id=source_id, limit=limit, cursor=cursor))
 
     @app.get('/api/admin/candidates/{candidate_id}')
-    def candidate(candidate_id: str, consumer: str | None = None, use: str | None = None, context=Depends(require)):
-        return respond(lambda: detail('knowledge_candidates', 'candidate_id', candidate_id, 'KNOWLEDGE_CANDIDATE_NOT_FOUND', kind='candidate', consumer=consumer, use=use))
+    def candidate(request: Request, candidate_id: str, consumer: str | None = None, use: str | None = None, context=Depends(require)):
+        return respond(context, request, lambda: detail('knowledge_candidates', 'candidate_id', candidate_id, 'KNOWLEDGE_CANDIDATE_NOT_FOUND', kind='candidate', consumer=consumer, use=use))
 
     @app.get('/api/admin/publications')
-    def publications(limit: _Limit = 50, cursor: _Cursor = None, consumer: str | None = None,
+    def publications(request: Request, limit: _Limit = 50, cursor: _Cursor = None, consumer: str | None = None,
                      use: str | None = None, context=Depends(require)):
-        return respond(lambda: listing('list_publications', 'publication', consumer, use, limit=limit, cursor=cursor))
+        return respond(context, request, lambda: listing('list_publications', 'publication', consumer, use, limit=limit, cursor=cursor))
 
     @app.get('/api/admin/publications/{publication_id}')
-    def publication(publication_id: str, consumer: str | None = None, use: str | None = None, context=Depends(require)):
-        return respond(lambda: detail('knowledge_publications', 'publication_id', publication_id, 'KNOWLEDGE_PUBLICATION_NOT_FOUND', kind='publication', consumer=consumer, use=use))
+    def publication(request: Request, publication_id: str, consumer: str | None = None, use: str | None = None, context=Depends(require)):
+        return respond(context, request, lambda: detail('knowledge_publications', 'publication_id', publication_id, 'KNOWLEDGE_PUBLICATION_NOT_FOUND', kind='publication', consumer=consumer, use=use))
 
     @app.get('/api/admin/observations')
-    def observations(limit: _Limit = 50, cursor: _Cursor = None, context=Depends(require)):
-        return respond(lambda: listing('list_observations', limit=limit, cursor=cursor))
+    def observations(request: Request, limit: _Limit = 50, cursor: _Cursor = None, context=Depends(require)):
+        return respond(context, request, lambda: listing('list_observations', limit=limit, cursor=cursor))
 
     @app.get('/api/admin/observations/{observation_id}')
-    def observation(observation_id: str, context=Depends(require)):
-        return respond(lambda: detail('knowledge_observations', 'dedup_key', observation_id, 'KNOWLEDGE_SOURCE_NOT_FOUND'))
+    def observation(request: Request, observation_id: str, context=Depends(require)):
+        return respond(context, request, lambda: detail('knowledge_observations', 'dedup_key', observation_id, 'KNOWLEDGE_SOURCE_NOT_FOUND'))
 
     @app.post('/api/admin/sources/{source_id}/governance')
-    def confirm(source_id: str, body: Governance, context=Depends(write)):
-        return respond(lambda: action('confirm_source_governance', source_id, body, context, lambda result: {'governance_version_id': result}))
+    def confirm(request: Request, source_id: str, body: Governance, context=Depends(write)):
+        return respond(context, request, lambda: action('confirm_source_governance', source_id, body, context, lambda result: {'governance_version_id': result}))
 
     @app.post('/api/admin/sources/{source_id}/withdraw')
-    def withdraw(source_id: str, body: Withdraw, context=Depends(write)):
-        return respond(lambda: action('withdraw_source', source_id, body, context, lambda result: {'source_version': body.source_version, 'withdrawn': True}))
+    def withdraw(request: Request, source_id: str, body: Withdraw, context=Depends(write)):
+        return respond(context, request, lambda: action('withdraw_source', source_id, body, context, lambda result: {'source_version': body.source_version, 'withdrawn': True}))
 
     @app.post('/api/admin/candidates/{candidate_id}/publish')
-    def publish(candidate_id: str, body: Publish, context=Depends(write)):
-        return respond(lambda: action('publish_candidate', candidate_id, body, context, lambda result: {'publication_id': result}))
+    def publish(request: Request, candidate_id: str, body: Publish, context=Depends(write)):
+        return respond(context, request, lambda: action('publish_candidate', candidate_id, body, context, lambda result: {'publication_id': result}))
 
     @app.post('/api/admin/candidates/{candidate_id}/reject')
-    def reject(candidate_id: str, body: Basis, context=Depends(write)):
-        return respond(lambda: action('reject_candidate', candidate_id, body, context, lambda result: {'rejected': True}))
+    def reject(request: Request, candidate_id: str, body: Basis, context=Depends(write)):
+        return respond(context, request, lambda: action('reject_candidate', candidate_id, body, context, lambda result: {'rejected': True}))
 
     @app.post('/api/admin/candidates/{candidate_id}/revise')
-    def revise(candidate_id: str, body: Revise, context=Depends(write)):
-        return respond(lambda: action('revise_candidate', candidate_id, body, context, lambda result: {'candidate_id': result}))
+    def revise(request: Request, candidate_id: str, body: Revise, context=Depends(write)):
+        return respond(context, request, lambda: action('revise_candidate', candidate_id, body, context, lambda result: {'candidate_id': result}))
 
     @app.post('/api/admin/publications/{publication_id}/revoke')
-    def revoke(publication_id: str, body: Basis, context=Depends(write)):
-        return respond(lambda: action('revoke_publication', publication_id, body, context, lambda result: {'revoked': True}))
+    def revoke(request: Request, publication_id: str, body: Basis, context=Depends(write)):
+        return respond(context, request, lambda: action('revoke_publication', publication_id, body, context, lambda result: {'revoked': True}))
