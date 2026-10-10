@@ -7,7 +7,7 @@
    * **请求级精确伪名替换**：基于 HMAC 机制在请求内存中建立临时原值映射，在受支持文本字段内精确恢复已知令牌；不保证检测零漏检或模型语义正确。
    * **全链路安全防护**：涵盖上游错误正文丢弃、异常断链防泄露、AES-GCM 信封加密落盘重放（Spool）、以及持久密钥认证包封与明确销毁边界。
 2. **企业受控知识资产沉淀**：
-   * 当前完成来源可追溯的受限观察与候选沉淀，知识归属保持待定；员工 SSO、所有者分配与发布审批不作为沉淀前置。已有可信 ACL 保留，未知权限限制到服务端处理域。代码包含本地关系抽取、PostgreSQL/RLS、审批、Outbox、授权消费与撤回组件，后续发布仍须验证。
+   * 已实现来源可追溯的受限观察与候选沉淀，以及单管理员来源治理、直接发布、修订、拒绝和撤回。未知权限限制到服务端处理域；消费授权通过版本化治理显式确认，并取全部贡献来源的授权交集。原始 ACL 与未验证来源身份保留，PostgreSQL/RLS、Outbox 和授权读取执行实际权限边界。
 
 已支持 Chat Completions 与 Messages 的文本选择性处理的受保护 HTTP 非流式、SSE、工具与多轮往返，以及加密采集产物到独立 worker、PostgreSQL、审批、授权消费、词典和撤回/到期的本地闭环。技术验证使用合成上游与业务身份，不能代表实际客户端、供应商或生产基础设施准入；未装配默认服务保持503。
 
@@ -84,7 +84,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 | `src/detection` | 隐私检测：混合检测编排器、Presidio 正则识别器、企业词典匹配、本地 ONNX NER 推理及长文本分窗 |
 | `src/masking` | 脱敏与映射：请求级 HMAC 伪名映射生成、正向敏感文本替换与反向响应原值还原 |
 | `src/audit` | 审计与质检：释放意图台账、审计存储容量水位、质量评价口径与外发留证门禁 |
-| `src/knowledge` | 受控知识域：知识实体与关系模型、多方授权审批流、版本快照与失效 Tombstone 状态机 |
+| `src/knowledge` | 受控知识域：实体与关系模型、单管理员版本化治理、多来源授权交集、消费回执与失效 Tombstone |
 
 ---
 
@@ -124,7 +124,7 @@ uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unitte
 
 DeepSeek响应恢复支持普通 `content`、`reasoning_content`、`reasoning_details` 文本和可解析的工具参数中的已知映射令牌；未知字段、用量明细和 `logprobs` 保持原值。无法恢复的保留令牌仍报告恢复错误。
 
-`audit.record_review.RecordReviewService`提供受控单记录审阅：限时工单绑定请求者、租户、域及精确加密记录，由两名不同角色审批者批准，持久化一次性消费标记并审计后才解密交付。记录与租户的关联须由可信存储提供；模块没有公开HTTP或批量审阅接口。生产身份、KMS及审计卷政策由部署方接入。
+`audit.admin_reader.AdminReviewService` 提供单管理员直接审阅。后台构建器从可信释放意图与加密证据建立目录，管理员通过 `/api/admin/audit/records` 查询元数据，并读取指定记录。读取校验精确关联、摘要、AAD、会话、期限和密钥状态；访问尝试与结果可靠留痕失败时不释放明文。审计目录和知识治理使用独立资源，不能接收任意密文或文件路径。
 
 ### 3. 启动网关服务 (本地与 Docker)
 
@@ -177,9 +177,9 @@ docker compose -f deploy/compose.yaml up -d
 
 独立 `start_knowledge_worker.py`读取相同状态卷、主密钥、处理域和租户，将受限 spool 幂等提交到现有 PostgreSQL 表。另外显式配置 `GATEWAY_KNOWLEDGE_PG_DSN` 或 `_FILE`，以及服务端 `GATEWAY_KNOWLEDGE_WORKER_SUBJECT`；连接角色须非表 owner、非超级用户、无 BYPASSRLS，现有 schema/RLS 必须先部署。worker 不初始化数据库、不创建密钥、不批准或发布知识；可用 `--once` 执行单次重放。Compose 的 worker 连接部署方既有 PG，镜像不内置生产数据库。当前观察沿用30天技术留存和 `standard-retention` 桶，具体真实留存政策仍需业务核准。
 
-数据库初始化与 worker 启动共享最小权限检查：应用角色不能具有创建数据库/角色、复制能力、切换到特权角色或直接/间接成为 PostgreSQL `pg_*` 全局预定义角色的成员。登录用户、会话用户与当前 SQL 用户须一致，不接受管理连接降级成应用角色。worker 对当前定义的全部13张资产表检查 forced RLS，且应用角色不能拥有表或成为表 owner 的成员。单次执行 `--once` 在提交失败或隔离异常时返回非零；成功提交或幂等跳过返回0，失败记录仍保留以便重放。
+数据库初始化与 worker 启动共享最小权限检查：应用角色不能具有创建数据库/角色、复制能力、切换到特权角色或直接/间接成为 PostgreSQL `pg_*` 全局预定义角色的成员。登录用户、会话用户与当前 SQL 用户须一致，不接受管理连接降级成应用角色。worker 对全部资产表检查 forced RLS，且应用角色不能拥有表或成为表 owner 的成员。单次执行 `--once` 在提交失败或隔离异常时返回非零；成功提交或幂等跳过返回0，失败记录仍保留以便重放。
 
-首次部署 PostgreSQL 时，管理方使用受控 JSON 文件（`schema`、`application_role`、`admin_dsn`、`app_dsn` 四个字段）显式初始化一个尚不存在的 schema：
+首次部署 PostgreSQL 时，管理方使用受控 JSON 文件（`schema`、`application_role`、`admin_role`、`admin_dsn`、`app_dsn`；`admin_role` 为预建专用受限角色）显式初始化一个尚不存在的 v2 schema：
 
 ~~~powershell
 .\.venv\Scripts\python.exe scripts/prepare_knowledge_database.py --config <private-input.json> --output-config <new-private-bound-config.json>
@@ -222,6 +222,18 @@ docker compose -f deploy/compose.yaml up -d
 历史配置完成后，首次显式执行 `start_gateway.py --provision-keys` 初始化用途密钥，再正常启动。已有历史（包括过期但未删除的记录）而密钥丢失时拒绝补建。查询 API 是 `GET /api/admin/requests?limit=50&status=&cursor=` 和 `GET /api/admin/requests/{request_id}`，仅接受同源管理员会话 Cookie，管理写操作另需会话绑定的 `X-Admin-CSRF` 头；旧 `/history`、`/api/requests` 入口已删除。模型调用返回 `x-request-id`。筛选仅针对元数据，不索引正文。
 
 启用历史后，持久化失败会停止模型外发或正文释放。流式保存实际供应商字节及网关输出片段，断连可显示部分记录；`completed`表示完整生成和留存，不能证明客户端已收到。过期记录不可查询，使用 `scripts/purge_request_history.py --config <private-purge.json>` 定期物理删除；配置字段及密钥输入见工具 `--help`。在线删除不证明备份和复制密钥已销毁。HTTP 不加密会话 Cookie 和正文，远端访问应依据数据敏感度选择受验证的HTTPS；生产数据库TLS、目录权限、备份/删除、性能和真实客户端/供应商仍须验证。
+
+## 知识治理与审计管理 API
+
+知识管理 API 已支持来源、候选、发布和观察的全状态查询，以及来源治理、候选直接发布/拒绝/修订、来源撤回和发布撤销。所有接口使用管理员会话；写请求需同源校验与 `X-Admin-CSRF`。发布校验候选版本、全部来源的当前治理版本、消费受众交集、用途及有效期限，返回真实发布标识；幂等重试不会产生重复发布或 Outbox 事件。
+
+启用知识管理时配置 `GATEWAY_ADMIN_KNOWLEDGE_PG_DSN` 或 `_FILE`，只能设置其中一个。它指向 DDL v2 knowledge schema，`search_path` 必须绑定该 schema，数据库登录身份是预建的专用受限 `admin_role`。初始化使用的 `admin_dsn` 是 DDL 属主连接，不能作为网关管理应用连接。管理登录角色不得拥有或可切换到 schema、表、序列或函数的属主身份，也不得具有特权或全局预定义角色成员关系。每次管理事务绑定服务端租户/域和 `app.admin_context='true'`，并核对结构指纹；旧结构不会自动迁移或修复。
+
+审计管理使用同一 FileKMS 和受控证据根，后台构建批量上限 200、间隔 5 秒。新证据的服务端默认保留策略为 30 天（`model-query-retention-30d-v1`），不为缺少可信关联和生命周期元数据的旧证据补造目录。`GET /api/admin/audit/records` 返回元数据和目录积压，`GET /api/admin/audit/records/{record_id}` 返回获准单条正文，`GET /api/admin/audit/events` 返回访问事件；最终会话、期限或可靠留痕检查失败时不返回正文。
+
+知识 PG 池最多 2 条连接，获取和 SQL 超时均为 5 秒；知识与审计各使用独立的 4 并发执行器，管理操作预算 5 秒。目录和访问事件各有 64 MiB 配额，扫描上限 20,000 条。知识连接缺失、权限不符或指纹不符仅拒绝知识管理能力；审计资源不可用仅拒绝审计能力。新增治理与目录能力不成为模型请求准入条件，既有加密留证和 Spool 门禁仍执行。
+
+授权消费、导出和词典编译已在服务层实现；正常部署的消费执行器、导出/编译管理作业及完整治理网页尚待装配。发布知识不会自动改变在线词典、保护包或模型外发政策。字段、固定原因码与后续复用接口见 [管理控制台契约](docs/contracts/admin-console.md)。
 
 ## 生产部署与安全边界声明
 
