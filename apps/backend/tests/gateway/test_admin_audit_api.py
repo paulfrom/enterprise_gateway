@@ -148,6 +148,66 @@ class AdminAuditApiTests(unittest.TestCase):
             finally:
                 release.set()
 
+    def test_final_revalidation_crossing_budget_never_releases_body(self):
+        import asyncio
+        original = self.fixture.service.revalidate
+        calls = 0
+        async def delayed(context, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = await original(context, **kwargs)
+            if calls == 5:
+                await asyncio.sleep(0.2)
+            return result
+        with patch.object(self.fixture.service, 'revalidate', side_effect=delayed), \
+                patch('gateway.admin_audit_api._AUDIT_BUDGET', 0.1):
+            response = self.client.get(ROUTES[1], headers=self.headers)
+        self.assertEqual(calls, 5)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json(), {'error': {'code': 'AUDIT_ACCESS_REJECTED'}})
+        self.assertNotIn(CANARY.decode(), response.text)
+
+    def test_metadata_final_revalidation_also_obeys_budget(self):
+        import asyncio
+        original = self.fixture.service.revalidate
+        calls = 0
+        async def delayed(context, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = await original(context, **kwargs)
+            if calls == 3:
+                await asyncio.sleep(0.2)
+            return result
+        with patch.object(self.fixture.service, 'revalidate', side_effect=delayed), \
+                patch('gateway.admin_audit_api._AUDIT_BUDGET', 0.1):
+            response = self.client.get(ROUTES[0], headers=self.headers)
+        self.assertEqual(calls, 3)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json(), {'error': {'code': 'AUDIT_ACCESS_REJECTED'}})
+        self.assertNotIn('ev-admin', response.text)
+
+    def test_retention_crossing_final_revalidation_never_releases_body(self):
+        from unittest.mock import Mock
+        original = self.fixture.service.revalidate
+        calls = 0
+        clock = Mock(return_value=datetime(2029, 12, 31, tzinfo=timezone.utc))
+        async def expires(context, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = await original(context, **kwargs)
+            if calls == 5:
+                clock.return_value = datetime(2030, 1, 1, tzinfo=timezone.utc)
+            return result
+        with patch.object(self.fixture.service, 'revalidate', side_effect=expires), \
+                patch('gateway.admin_audit_api._utcnow', clock):
+            response = self.client.get(ROUTES[1], headers=self.headers)
+        self.assertEqual(calls, 5)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json(), {'error': {'code': 'AUDIT_RECORD_UNAVAILABLE'}})
+        self.assertNotIn(CANARY.decode(), response.text)
+        # The successful reader result is held locally; no third catalog scan.
+        clock.assert_called_once()
+
     def test_bad_pagination_is_sanitized(self):
         for query in ('limit=0', 'limit=101', 'cursor=../secret'):
             response = self.client.get(ROUTES[0]+'?'+query, headers=self.headers)

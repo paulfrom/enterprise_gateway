@@ -8,6 +8,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextvars import ContextVar
 from dataclasses import asdict
+from datetime import datetime, timezone
 from functools import partial
 import threading
 import time
@@ -19,11 +20,15 @@ from typing import Annotated
 from audit.admin_reader import AdminAuditContext
 from gateway.admin_storage import SessionInvalid, AdminStorageUnavailable
 from gateway.history_api import _error, _source
-from infra.errors import SafetyError
+from infra.errors import SafetyCode, SafetyError
 
 _AUDIT_BUDGET = 5.0
 _OPS_LIMIT = 4
 _checkpoint = ContextVar('admin_audit_checkpoint', default=None)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
 
 
 def revalidate_audit_session():
@@ -46,15 +51,17 @@ def install_audit_admin_routes(app, auth_service, reader, builder):
         tenant, domain = context.scope.split('/', 1)
         return tenant, domain
 
-    def run(context, request, call):
+    def run(context, request, call, release_check=None):
         if reader is None or not slots.acquire(blocking=False):
             return _error('ADMIN_AUDIT_UNAVAILABLE', 503)
         deadline = time.monotonic() + _AUDIT_BUDGET
 
         def checkpoint():
             if time.monotonic() >= deadline:
-                raise TimeoutError()
+                raise SafetyError(SafetyCode.AUDIT_ACCESS_REJECTED)
             asyncio.run(auth_service.revalidate(context, source=_source(request)))
+            if time.monotonic() >= deadline:
+                raise SafetyError(SafetyCode.AUDIT_ACCESS_REJECTED)
 
         def work():
             token = _checkpoint.set(checkpoint)
@@ -74,6 +81,8 @@ def install_audit_admin_routes(app, auth_service, reader, builder):
         try:
             result = future.result(timeout=max(0.001, deadline - time.monotonic()))
             checkpoint()  # Revalidate in the route immediately before HTTP body release.
+            if release_check is not None:
+                release_check()
             return result
         except HTTPException:
             raise
@@ -108,13 +117,19 @@ def install_audit_admin_routes(app, auth_service, reader, builder):
     @app.get('/api/admin/audit/records/{record_id}')
     def record(request: Request, record_id: str, context=Depends(require)):
         tenant, domain = scope(context)
+        release_entry = None
         def read(deadline):
+            nonlocal release_entry
             entry = reader.get_record(record_id, tenant_id=tenant, domain=domain)
             plaintext = reader.read_plaintext(record_id, context=AdminAuditContext(
                 actor_id='admin', session_digest=context.session_reference,
                 tenant_id=tenant, domain=domain, deadline=deadline))
+            release_entry = entry
             return {'item': asdict(entry), 'plaintext': plaintext.decode('utf-8')}
-        return run(context, request, read)
+        def check_lifecycle():
+            if release_entry.status != 'available' or _utcnow() >= release_entry.retention_until:
+                raise SafetyError(SafetyCode.AUDIT_RECORD_UNAVAILABLE)
+        return run(context, request, read, release_check=check_lifecycle)
 
     @app.get('/api/admin/audit/events')
     def events(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 50,
