@@ -32,6 +32,7 @@ header on every read instead of trusting ``status == "available"``.
 from __future__ import annotations
 
 import hashlib
+from itertools import islice
 import json
 import re
 from collections.abc import Callable
@@ -268,11 +269,9 @@ class AuditCatalogBuilder:
         committed = 0
         with self._catalog.locked():
             cataloged = self._cataloged_ids()
-            scanned = 0
-            for intent_path in sorted(self._intent_root.glob("*.intent.json")):
-                if committed >= self._batch_limit or scanned >= MAX_CATALOG_SCAN:
+            for intent_path in self._scan_paths(self._intent_root, "*.intent.json"):
+                if committed >= self._batch_limit:
                     break
-                scanned += 1
                 entry = self._trusted_entry(intent_path)
                 if entry is None or entry.record_id in cataloged:
                     continue
@@ -297,26 +296,27 @@ class AuditCatalogBuilder:
         pending = 0
         with self._catalog.locked():
             cataloged = self._cataloged_ids()
-            scanned = 0
-            for intent_path in sorted(self._intent_root.glob("*.intent.json")):
-                if scanned >= MAX_CATALOG_SCAN:
-                    break
-                scanned += 1
+            for intent_path in self._scan_paths(self._intent_root, "*.intent.json"):
                 entry = self._trusted_entry(intent_path)
                 if entry is not None and entry.record_id not in cataloged:
                     pending += 1
         return pending
 
-    def _cataloged_ids(self) -> set[str]:
-        cataloged: set[str] = set()
+    @staticmethod
+    def _scan_paths(root: Path, pattern: str) -> list[Path]:
+        """Refuse an incomplete scan instead of reporting false freshness."""
         scan_failed = False
         try:
-            paths = sorted(self._catalog.path.glob("*.catalog.json"))
+            paths = list(islice(root.glob(pattern), MAX_CATALOG_SCAN + 1))
         except OSError:
             scan_failed = True
-        if scan_failed:
+        if scan_failed or len(paths) > MAX_CATALOG_SCAN:
             raise SafetyError(SafetyCode.AUDIT_WRITE_FAILED) from None
-        for path in paths[:MAX_CATALOG_SCAN]:
+        return sorted(paths)
+
+    def _cataloged_ids(self) -> set[str]:
+        cataloged: set[str] = set()
+        for path in self._scan_paths(self._catalog.path, "*.catalog.json"):
             if not _CATALOG_NAME_RE.fullmatch(path.name) or path.is_symlink():
                 continue
             raw = read_capped(path, MAX_CATALOG_ENTRY_BYTES)

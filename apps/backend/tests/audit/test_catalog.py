@@ -119,6 +119,32 @@ def read_catalog_entry(catalog_dir, record_id: str) -> dict:
 
 
 class BuilderPositiveTests(unittest.TestCase):
+    def test_scan_overflow_refuses_false_zero_backlog_and_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            intent_dir, evidence_dir, catalog_dir = prepare_roots(tmp)
+            kms = StaticTestKmsProvider()
+            make_intent(intent_dir)
+            write_evidence(evidence_dir, kms)
+            builder = make_builder(tmp)
+            self.assertEqual(builder.build_once(), 1)
+            make_intent(intent_dir, intent_id="intent-b2-0002", record_id="ev-b2-0002")
+            write_evidence(evidence_dir, kms, record_id="ev-b2-0002")
+            with mock.patch("audit.catalog.MAX_CATALOG_SCAN", 1):
+                for operation in (builder.build_once, builder.backlog):
+                    with self.assertRaises(SafetyError) as raised:
+                        operation()
+                    self.assertEqual(raised.exception.code, SafetyCode.AUDIT_WRITE_FAILED)
+            self.assertFalse((catalog_dir / "ev-b2-0002.catalog.json").exists())
+            self.assertEqual(builder.backlog(), 1)
+            self.assertEqual(builder.build_once(), 1)
+            # Catalog overflow also refuses even when all intents are indexed.
+            with mock.patch("audit.catalog.MAX_CATALOG_SCAN", 1):
+                for operation in (builder.build_once, builder.backlog):
+                    with self.assertRaises(SafetyError):
+                        operation()
+            self.assertEqual(builder.backlog(), 0)
+            self.assertEqual(builder.build_once(), 0)
+
     def test_builder_idempotent_rescan(self):
         with tempfile.TemporaryDirectory() as tmp:
             intent_dir, evidence_dir, _ = prepare_roots(tmp)
