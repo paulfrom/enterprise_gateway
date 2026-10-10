@@ -134,7 +134,7 @@ class TestM2BKnowledgeIntegration(unittest.TestCase):
             service.confirm_source_governance(source_key[2],source_version=source_key[3],
                 expected_governance_version=None,ownership='confirmed',use='knowledge',
                 audiences=('reader',),valid_until=valid_until,basis='verified governance',context=context)
-        with patch.object(storage,'publish_transactional',side_effect=RuntimeError('injected publication crash before commit')):
+        with patch.object(storage,'publish_in_transaction',side_effect=RuntimeError('injected publication crash before commit')):
             with self.assertRaises(RuntimeError):
                 service.publish_candidate(str(c.candidate_id),expected_version=1,use='knowledge',
                     audiences=('reader',),valid_until=valid_until,
@@ -143,6 +143,9 @@ class TestM2BKnowledgeIntegration(unittest.TestCase):
             self.storage.set_session_identity(conn,self.actor('worker'))
             self.assertEqual(0,conn.execute('SELECT count(*) FROM knowledge_publications WHERE candidate_id=%s',(c.candidate_id,)).fetchone()[0])
             self.assertEqual([],self.storage.fetch_pending_outbox(conn))
+        with storage.admin_transaction(tenant_id='tenant-a', domain=self.domain) as conn:
+            self.assertEqual('proposed', conn.execute('SELECT state FROM knowledge_candidates WHERE candidate_id=%s', (c.candidate_id,)).fetchone()[0])
+            self.assertEqual([('failed',)], conn.execute("SELECT result FROM knowledge_admin_actions WHERE action_type='publish'").fetchall())
         publication_id=service.publish_candidate(str(c.candidate_id),expected_version=1,use='knowledge',
             audiences=('reader',),valid_until=valid_until,idempotency_key='crash-1',basis='publish',context=context)
         self.assertTrue(service.export_versioned_jsonl([publication_id],self.actor('reader'),'v1',datetime.now(timezone.utc)))
@@ -285,3 +288,21 @@ class TestM2BKnowledgeIntegration(unittest.TestCase):
                          (self.now-timedelta(hours=2),self.now-timedelta(hours=1),c.evidence[0].source.source_id))
         # Authoritative metadata changes invalidate old snapshots immediately.
         self.assertEqual('',self.governance().export_versioned_jsonl([publication_id2],self.actor('reader'),'v2',datetime.now(timezone.utc)))
+
+    def test_expiry_preserves_worker_observation_acl_and_encrypted_source_fragment(self):
+        event=self.observe()
+        self.writer.collect(event,mode=CollectionMode.REQUIRED)
+        self.assertEqual(1,self.worker.run_once().submitted)
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('worker'))
+            before=conn.execute('SELECT acl,encrypted_observation FROM knowledge_observations WHERE dedup_key=%s',(compute_dedup_key(event),)).fetchone()
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('steward',Role.DATA_STEWARD))
+            self.storage.expire_sources(conn,event.retention_until+timedelta(seconds=1))
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.storage.set_session_identity(conn,self.actor('worker'))
+            after=conn.execute('SELECT acl,encrypted_observation FROM knowledge_observations WHERE dedup_key=%s',(compute_dedup_key(event),)).fetchone()
+            self.assertTrue(conn.execute('SELECT withdrawn FROM knowledge_sources WHERE source_id=%s',(event.source_id,)).fetchone()[0])
+        self.assertEqual(before,after)
+        self.assertEqual(set(event.acl),set(after[0]))
+        self.assertNotIn(event.evidence_text.encode(),bytes(after[1]))

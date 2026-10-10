@@ -603,6 +603,8 @@ class KnowledgeGovernanceService:
         §3.1). Retrying with the same idempotency key returns the committed
         publication without duplicate side effects.
         """
+        from knowledge.storage import KnowledgeSchemaError
+
         storage = self._require_storage()
         self._check_context(context)
         basis = self._require_basis(basis)
@@ -630,27 +632,25 @@ class KnowledgeGovernanceService:
         action_type = 'publish'
         object_id = str(candidate_uuid)
         object_version = str(expected_version)
-        # Idempotent retry short-circuit: the exact request already committed.
-        if idempotency_key is not None:
-            with storage.admin_transaction(tenant_id=self._tenant_id,
-                                           domain=self._domain) as conn:
-                row = conn.execute(
-                    "SELECT publication_id FROM knowledge_publications"
-                    " WHERE (tenant_id,domain,candidate_id,candidate_version,idempotency_key)"
-                    "=(%s,%s,%s,%s,%s)",
-                    (self._tenant_id, self._domain, candidate_uuid, expected_version,
-                     idempotency_key)).fetchone()
-            if row is not None:
-                return str(row[0])
         action_id = uuid4()
         try:
-            # Validation and the succeeded action record commit atomically;
-            # the publication itself then commits atomically with its source
-            # bindings and outbox event inside publish_transactional (T1-frozen
-            # storage contract), which requires the action row to be visible.
             with storage.admin_transaction(tenant_id=self._tenant_id,
                                            domain=self._domain) as conn:
                 with conn.transaction():
+                    # Serialize retries before checking their committed result.
+                    conn.execute(
+                        "SELECT candidate_id FROM knowledge_candidates"
+                        " WHERE (tenant_id,domain,candidate_id)=(%s,%s,%s) FOR UPDATE",
+                        (self._tenant_id, self._domain, candidate_uuid)).fetchone()
+                    if idempotency_key is not None:
+                        row = conn.execute(
+                            "SELECT publication_id FROM knowledge_publications"
+                            " WHERE (tenant_id,domain,candidate_id,candidate_version,idempotency_key)"
+                            "=(%s,%s,%s,%s,%s)",
+                            (self._tenant_id, self._domain, candidate_uuid, expected_version,
+                             idempotency_key)).fetchone()
+                        if row is not None:
+                            return str(row[0])
                     self._insert_action(conn, action_id, context=context,
                                         action_type=action_type, object_type='candidate',
                                         object_id=object_id, object_version=object_version,
@@ -660,13 +660,13 @@ class KnowledgeGovernanceService:
                                                      expected_version=expected_version,
                                                      use=use, audiences=audience_set,
                                                      valid_until=valid_until, now=now)
-            return storage.publish_transactional(
-                candidate_id=candidate_uuid, candidate_version=expected_version,
-                intended_use=use, consumer_audiences=list(audience_set),
-                valid_until=valid_until, admin_action_id=action_id,
-                idempotency_key=idempotency_key,
-                source_bindings=[(binding['source_id'], binding['source_version'],
-                                  binding['governance_version_id']) for binding in bindings])
+                    return storage.publish_in_transaction(
+                        conn, candidate_id=candidate_uuid, candidate_version=expected_version,
+                        intended_use=use, consumer_audiences=list(audience_set),
+                        valid_until=valid_until, admin_action_id=action_id,
+                        idempotency_key=idempotency_key,
+                        source_bindings=[(binding['source_id'], binding['source_version'],
+                                          binding['governance_version_id']) for binding in bindings])
         except GovernanceError as exc:
             self._record_failed_action(context=context, action_type=action_type,
                                        object_type='candidate', object_id=object_id,
@@ -676,6 +676,10 @@ class KnowledgeGovernanceService:
         except psycopg.errors.Error as exc:
             mapped = self._map_publish_race(exc)
             if mapped is None:
+                self._record_failed_action(context=context, action_type=action_type,
+                                           object_type='candidate', object_id=object_id,
+                                           object_version=object_version, rationale=basis,
+                                           code=ADMIN_UNAVAILABLE)
                 raise
             self._record_failed_action(context=context, action_type=action_type,
                                        object_type='candidate', object_id=object_id,
@@ -683,6 +687,16 @@ class KnowledgeGovernanceService:
                                        code=mapped.code,
                                        blocking_reasons=mapped.blocking_reasons)
             raise mapped
+
+        except KnowledgeSchemaError:
+            # An incompatible repository cannot accept either business or action writes.
+            raise
+        except Exception:
+            self._record_failed_action(context=context, action_type=action_type,
+                                       object_type='candidate', object_id=object_id,
+                                       object_version=object_version, rationale=basis,
+                                       code=ADMIN_UNAVAILABLE)
+            raise
 
     def _admission_check(self, conn: Connection, candidate_uuid: UUID, *,
                          expected_version: int, use: str, audiences: tuple[str, ...],

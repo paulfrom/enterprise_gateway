@@ -42,7 +42,7 @@ SCHEMA_VERSION = 2
 # Locked to the measured metadata fingerprint of SCHEMA_SQL v2 (see
 # tests.knowledge.test_storage.TestSchemaFingerprint); any structural drift
 # must update this constant in the same change.
-SCHEMA_FINGERPRINT_V2 = 'd367e79a2a88312fa69e6edb487e5fe54c194e61fd2c10954a206ec9284a27fc'
+SCHEMA_FINGERPRINT_V2 = '242c7c91491e5df0964c4ad1825dc4a298d8a76a61b1acecfafbc01714cc7ab2'
 
 
 class KnowledgeSchemaError(RuntimeError):
@@ -335,23 +335,7 @@ BEGIN
    UPDATE knowledge_consumer_assets SET active=false WHERE publication_id=pub_row.publication_id;
    out_publication_id:=pub_row.publication_id;out_candidate_id:=pub_row.candidate_id; RETURN NEXT;
  END LOOP;
- UPDATE knowledge_candidates SET state='withdrawn',acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_claims k SET acl=COALESCE((SELECT array_agg(token) FROM (
-   SELECT token FROM knowledge_candidates c CROSS JOIN LATERAL unnest(c.acl) token
-   WHERE c.claim_id=k.claim_id AND c.state NOT IN ('withdrawn','rejected') AND token=ANY(k.acl) GROUP BY token
-   HAVING count(DISTINCT c.candidate_id)=(SELECT count(*) FROM knowledge_candidates c2 WHERE c2.claim_id=k.claim_id
-                                          AND c2.state NOT IN ('withdrawn','rejected'))) permitted),ARRAY[]::text[])
- WHERE k.claim_id=ANY(claim_ids);
- UPDATE knowledge_entities entity SET acl=COALESCE((SELECT array_agg(token) FROM (
-   SELECT token FROM knowledge_claims k CROSS JOIN LATERAL unnest(k.acl) token
-   WHERE entity.entity_id IN (k.subject_id,k.object_id) AND cardinality(k.acl)>0 AND token=ANY(entity.acl) GROUP BY token
-   HAVING count(DISTINCT k.claim_id)=(SELECT count(*) FROM knowledge_claims k2 WHERE entity.entity_id IN (k2.subject_id,k2.object_id)
-                                      AND cardinality(k2.acl)>0)) permitted),ARRAY[]::text[])
- WHERE entity.entity_id=ANY(entity_ids);
- UPDATE candidate_evidence_links SET acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_publications SET acl=ARRAY[]::text[] WHERE candidate_id=ANY(candidate_ids);
- UPDATE knowledge_evidence SET acl=ARRAY[]::text[] WHERE (tenant_id,domain,source_id,version)=(caller_tenant,caller_domain,p_source_id,p_version);
- UPDATE knowledge_observations SET acl=ARRAY[]::text[] WHERE (tenant_id,domain,source_id,source_version)=(caller_tenant,caller_domain,p_source_id,p_version);
+ UPDATE knowledge_candidates SET state='withdrawn' WHERE candidate_id=ANY(candidate_ids);
  UPDATE knowledge_sources SET withdrawn=true WHERE (tenant_id,domain,source_id,version)=(caller_tenant,caller_domain,p_source_id,p_version);
 END $$;
 REVOKE ALL ON FUNCTION invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ) FROM PUBLIC;
@@ -718,55 +702,13 @@ class PostgresKnowledgeStorage:
         """
         if not (self.admin_dsn and self.admin_role and self.tenant_id and self.domain):
             raise KnowledgeError('publication requires a bound admin connection, admin role and tenant/domain scope')
-        bindings = [tuple(binding) for binding in source_bindings]
         try:
             with self.admin_transaction(tenant_id=self.tenant_id, domain=self.domain) as conn:
-                with conn.cursor() as cur:
-                    if idempotency_key is not None:
-                        row = cur.execute(
-                            'SELECT publication_id FROM knowledge_publications '
-                            'WHERE candidate_id=%s AND candidate_version=%s AND idempotency_key=%s',
-                            (candidate_id, candidate_version, idempotency_key)).fetchone()
-                        if row is not None:
-                            return str(row[0])
-                    publication_id = uuid4()
-                    for source_id, source_version, governance_version_id in bindings:
-                        cur.execute(
-                            'INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,'
-                            'source_id,source_version,governance_version_id) VALUES(%s,%s,%s,%s,%s,%s)',
-                            (publication_id, self.tenant_id, self.domain, source_id, source_version,
-                             governance_version_id))
-                    cur.execute(
-                        'INSERT INTO knowledge_publications(publication_id,candidate_id,claim_id,tenant_id,'
-                        'domain,acl,purpose,candidate_version,intended_use,consumer_audiences,published_at,'
-                        'valid_until,admin_action_id,idempotency_key) '
-                        'SELECT %s,c.candidate_id,c.claim_id,c.tenant_id,c.domain,%s,%s,%s,%s,%s,'
-                        'clock_timestamp(),%s,%s,%s FROM knowledge_candidates c WHERE c.candidate_id=%s',
-                        (publication_id, list(consumer_audiences), intended_use, candidate_version,
-                         intended_use, list(consumer_audiences), valid_until, admin_action_id,
-                         idempotency_key, candidate_id))
-                    if cur.rowcount != 1:
-                        raise KnowledgeError('publication candidate version unavailable')
-                    payload = {
-                        'publication_id': str(publication_id),
-                        'candidate_id': str(candidate_id),
-                        'candidate_version': candidate_version,
-                        'intended_use': intended_use,
-                        'consumer_audiences': list(consumer_audiences),
-                        'governance_version_ids': [str(binding[2]) for binding in bindings],
-                        'asset_lineage': {
-                            'source_bindings': [
-                                {'source_id': str(source_id), 'source_version': str(source_version),
-                                 'governance_version_id': str(governance_version_id)}
-                                for source_id, source_version, governance_version_id in bindings]},
-                        'valid_until': valid_until.isoformat(),
-                    }
-                    cur.execute(
-                        'INSERT INTO knowledge_outbox(event_type,aggregate_type,aggregate_id,tenant_id,domain,'
-                        'acl,purpose,payload,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
-                        ('KNOWLEDGE_PUBLISHED', 'Publication', publication_id, self.tenant_id, self.domain,
-                         list(consumer_audiences), intended_use, json.dumps(payload), 'pending'))
-                    return str(publication_id)
+                return self.publish_in_transaction(
+                    conn, candidate_id=candidate_id, candidate_version=candidate_version,
+                    intended_use=intended_use, consumer_audiences=consumer_audiences,
+                    valid_until=valid_until, admin_action_id=admin_action_id,
+                    idempotency_key=idempotency_key, source_bindings=source_bindings)
         except psycopg.errors.UniqueViolation:
             if idempotency_key is None:
                 raise
@@ -780,6 +722,67 @@ class PostgresKnowledgeStorage:
         if row is None:
             raise KnowledgeError('publication idempotency conflict without a committed publication')
         return str(row[0])
+
+    def publish_in_transaction(
+        self, conn: psycopg.Connection, *, candidate_id: UUID, candidate_version: int,
+        intended_use: str, consumer_audiences: list[str] | tuple[str, ...],
+        valid_until: Any, admin_action_id: UUID, idempotency_key: str | None,
+        source_bindings: list[tuple[str, str, UUID]] | tuple[tuple[str, str, UUID], ...],
+    ) -> str:
+        """Write publication, bindings and outbox in the caller's admin transaction.
+
+        The caller owns locking, admission and the action record. No commit or
+        exception recovery may split those writes from this publication.
+        """
+        if not (self.admin_dsn and self.admin_role and self.tenant_id and self.domain):
+            raise KnowledgeError('publication requires a bound admin connection, admin role and tenant/domain scope')
+        bindings = [tuple(binding) for binding in source_bindings]
+        with conn.cursor() as cur:
+            if idempotency_key is not None:
+                row = cur.execute(
+                    'SELECT publication_id FROM knowledge_publications '
+                    'WHERE candidate_id=%s AND candidate_version=%s AND idempotency_key=%s',
+                    (candidate_id, candidate_version, idempotency_key)).fetchone()
+                if row is not None:
+                    return str(row[0])
+            publication_id = uuid4()
+            for source_id, source_version, governance_version_id in bindings:
+                cur.execute(
+                    'INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,'
+                    'source_id,source_version,governance_version_id) VALUES(%s,%s,%s,%s,%s,%s)',
+                    (publication_id, self.tenant_id, self.domain, source_id, source_version,
+                     governance_version_id))
+            cur.execute(
+                'INSERT INTO knowledge_publications(publication_id,candidate_id,claim_id,tenant_id,'
+                'domain,acl,purpose,candidate_version,intended_use,consumer_audiences,published_at,'
+                'valid_until,admin_action_id,idempotency_key) '
+                'SELECT %s,c.candidate_id,c.claim_id,c.tenant_id,c.domain,%s,%s,%s,%s,%s,'
+                'clock_timestamp(),%s,%s,%s FROM knowledge_candidates c WHERE c.candidate_id=%s',
+                (publication_id, list(consumer_audiences), intended_use, candidate_version,
+                 intended_use, list(consumer_audiences), valid_until, admin_action_id,
+                 idempotency_key, candidate_id))
+            if cur.rowcount != 1:
+                raise KnowledgeError('publication candidate version unavailable')
+            payload = {
+                'publication_id': str(publication_id),
+                'candidate_id': str(candidate_id),
+                'candidate_version': candidate_version,
+                'intended_use': intended_use,
+                'consumer_audiences': list(consumer_audiences),
+                'governance_version_ids': [str(binding[2]) for binding in bindings],
+                'asset_lineage': {
+                    'source_bindings': [
+                        {'source_id': str(source_id), 'source_version': str(source_version),
+                         'governance_version_id': str(governance_version_id)}
+                        for source_id, source_version, governance_version_id in bindings]},
+                'valid_until': valid_until.isoformat(),
+            }
+            cur.execute(
+                'INSERT INTO knowledge_outbox(event_type,aggregate_type,aggregate_id,tenant_id,domain,'
+                'acl,purpose,payload,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                ('KNOWLEDGE_PUBLISHED', 'Publication', publication_id, self.tenant_id, self.domain,
+                 list(consumer_audiences), intended_use, json.dumps(payload), 'pending'))
+            return str(publication_id)
 
     def revoke_transactional(
         self,

@@ -660,7 +660,7 @@ class TestSingleAdminGovernance(GovernancePgTestCase):
             self.seed_source(conn, 'src-a')
             candidate_id = self.seed_candidate(conn, 'src-a', acl=('legal',))
         self.confirm('src-a')
-        with patch.object(self.storage, 'publish_transactional',
+        with patch.object(self.storage, 'publish_in_transaction',
                           side_effect=RuntimeError('injected crash before commit')):
             with self.assertRaises(RuntimeError):
                 self.publish(candidate_id, audiences=('legal',), key='crash-1')
@@ -972,3 +972,87 @@ class TestGovernanceLists(GovernancePgTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestPublicationTransactionAtomicity(GovernancePgTestCase):
+    def prepare_publication(self):
+        with self.admin_conn() as conn:
+            self.seed_source(conn, 'atomic-source', acl=('steward', 'legal'))
+            candidate = self.seed_candidate(conn, 'atomic-source', acl=('legal',))
+        self.confirm('atomic-source')
+        return candidate
+
+    def test_failure_before_outbox_rolls_back_action_candidate_publication_and_bindings(self):
+        from unittest.mock import patch
+        candidate = self.prepare_publication()
+        execute = psycopg.Cursor.execute
+        def fail_outbox(cursor, query, *args, **kwargs):
+            if isinstance(query, str) and query.startswith('INSERT INTO knowledge_outbox'):
+                raise RuntimeError('injected crash before publication outbox')
+            return execute(cursor, query, *args, **kwargs)
+        with patch.object(psycopg.Cursor, 'execute', fail_outbox):
+            with self.assertRaisesRegex(RuntimeError, 'injected crash'):
+                self.publish(candidate, key='atomic-retry')
+        with self.admin_conn() as conn:
+            self.assertEqual('proposed', conn.execute('SELECT state FROM knowledge_candidates WHERE candidate_id=%s', (candidate,)).fetchone()[0])
+            for table in ('knowledge_publications', 'knowledge_publication_sources', 'knowledge_outbox'):
+                self.assertEqual(0, conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0])
+        self.assertEqual(0, len(self.admin_actions(action_type='publish', result='succeeded')))
+        self.assertEqual(1, len(self.admin_actions(action_type='publish', result='failed')))
+        self.assertTrue(self.publish(candidate, key='atomic-retry'))
+
+    def test_concurrent_same_key_retries_commit_one_action_publication_and_outbox(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        candidate = self.prepare_publication()
+        ready = threading.Barrier(4)
+        def publish():
+            ready.wait(10)
+            return self.publish(candidate, key='concurrent-retry')
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(lambda _index: publish(), range(4)))
+        self.assertEqual(1, len(set(results)))
+        self.assertEqual(1, len(self.admin_actions(action_type='publish', result='succeeded')))
+        self.assertEqual(0, len(self.admin_actions(action_type='publish', result='failed')))
+        self.assertEqual(1, len(self.outbox_events(results[0])))
+        with self.admin_conn() as conn:
+            self.assertEqual(1, conn.execute('SELECT count(*) FROM knowledge_publications').fetchone()[0])
+            self.assertEqual(1, conn.execute('SELECT count(*) FROM knowledge_publication_sources').fetchone()[0])
+
+    def test_source_expiry_preserves_original_acl_and_invalidates_consumption(self):
+        from knowledge.knowledge import Role
+        from knowledge.worker import GovernedConsumer
+        candidate = self.prepare_publication()
+        publication = self.publish(candidate)
+        actor = self.consumer('legal')
+        consumer = GovernedConsumer(self.storage, actor)
+        self.assertEqual(1, consumer.consume_once())
+        self.assertEqual((UUID(publication),), consumer.active_publication_ids())
+        tables = ('knowledge_sources', 'knowledge_entities', 'knowledge_claims',
+                  'knowledge_evidence', 'knowledge_candidates', 'candidate_evidence_links')
+        with self.admin_conn() as conn:
+            before = {table: conn.execute(f'SELECT acl FROM {table} ORDER BY acl::text').fetchall() for table in tables}
+        expired_at = self.now + timedelta(days=61)
+        self.assertEqual((), consumer.active_publication_ids(expired_at))
+        self.assertEqual('', self.service.export_versioned_jsonl([publication], actor, 'expired', expired_at))
+        steward = TrustedActor('steward', self.tenant, self.domain, frozenset({Role.DATA_STEWARD}), frozenset({'knowledge'}))
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            self.storage.set_session_identity(conn, steward)
+            self.assertEqual(1, len(self.storage.expire_sources(conn, expired_at)))
+        with self.admin_conn() as conn:
+            after = {table: conn.execute(f'SELECT acl FROM {table} ORDER BY acl::text').fetchall() for table in tables}
+            self.assertFalse(conn.execute('SELECT active FROM knowledge_consumer_assets').fetchone()[0])
+            self.assertTrue(conn.execute('SELECT withdrawn FROM knowledge_sources').fetchone()[0])
+        self.assertEqual(before, after)
+        self.assertEqual((), consumer.active_publication_ids())
+        self.assertEqual('', self.service.export_versioned_jsonl([publication], actor, 'revoked'))
+
+    def test_schema_rejection_preserves_fixed_error_without_attempting_action_write(self):
+        from unittest.mock import patch
+        from knowledge.storage import KnowledgeSchemaError
+        candidate = self.prepare_publication()
+        with patch.object(self.storage, 'verify_schema', side_effect=KnowledgeSchemaError()), patch.object(self.service, '_record_failed_action') as failed:
+            with self.assertRaises(KnowledgeSchemaError):
+                self.publish(candidate, key='incompatible')
+            failed.assert_not_called()
+        self.assertEqual([], self.admin_actions(action_type='publish'))
