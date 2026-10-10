@@ -1056,3 +1056,41 @@ class TestPublicationTransactionAtomicity(GovernancePgTestCase):
                 self.publish(candidate, key='incompatible')
             failed.assert_not_called()
         self.assertEqual([], self.admin_actions(action_type='publish'))
+
+    def test_consumer_invalidation_before_first_consumption_does_not_resurrect_asset(self):
+        from knowledge.worker import GovernedConsumer
+        candidate = self.prepare_publication()
+        publication = self.publish(candidate)
+        actor = self.consumer('legal')
+        consumer_storage = PostgresKnowledgeStorage(self.config['app_dsn'])
+        consumer = GovernedConsumer(consumer_storage, actor)
+
+        # Invalidate source before consumer has ever consumed the published event
+        self.service.withdraw_source('atomic-source', source_version='v1', basis='revoked',
+                                     context=self.context)
+
+        # Directly attempt to apply publication event to simulate race/replay after tombstone
+        with self.admin_conn() as conn:
+            outbox_pub = conn.cursor(row_factory=dict_row).execute(
+                "SELECT * FROM knowledge_outbox WHERE aggregate_id=%s AND event_type='KNOWLEDGE_PUBLISHED'",
+                (publication,)).fetchone()
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            consumer_storage.set_session_identity(conn, actor)
+            consumer._apply_publication(conn, outbox_pub)
+
+        with self.admin_conn() as conn:
+            row = conn.execute(
+                "SELECT active FROM knowledge_consumer_assets WHERE consumer_id='legal' AND publication_id=%s",
+                (publication,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertFalse(row[0], "Asset must remain inactive when applied against a tombstoned publication")
+
+        # Now normal consume_once processes remaining events (tombstone applied)
+        consumer.consume_once()
+        self.assertEqual((), consumer.active_publication_ids())
+
+        with self.admin_conn() as conn:
+            active_val = conn.execute(
+                "SELECT active FROM knowledge_consumer_assets WHERE consumer_id='legal' AND publication_id=%s",
+                (publication,)).fetchone()[0]
+            self.assertFalse(active_val)

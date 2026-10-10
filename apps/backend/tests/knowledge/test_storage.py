@@ -444,6 +444,113 @@ class TestKnowledgeSchemaV2(AdminGovernanceTestCase):
                     "ARRAY['legal'],'procurement')",
                     (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
 
+    def test_publication_rejects_empty_audiences(self):
+        with self.admin_scope() as conn:
+            candidate_id = self.seed_candidate(conn)
+            admin_action_id, governance_version_id = self.bind_governance(conn, candidate_id=candidate_id)
+            publication_id = uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,source_id,source_version,"
+                "governance_version_id) VALUES(%s,%s,%s,'source','v1',%s)",
+                (publication_id, self.tenant, self.domain, governance_version_id))
+            with self.assertRaisesRegex(Exception, 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED'):
+                conn.execute(
+                    "INSERT INTO knowledge_publications(publication_id,tenant_id,domain,candidate_id,"
+                    "candidate_version,intended_use,consumer_audiences,valid_until,admin_action_id,acl,purpose)"
+                    " VALUES (%s,%s,%s,%s,1,'procurement',ARRAY[]::text[],now()+interval '1 day',%s,"
+                    "ARRAY['legal'],'procurement')",
+                    (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
+
+    def test_publication_rejects_audience_outside_intersection(self):
+        with self.admin_scope() as conn:
+            candidate_id = self.seed_candidate(conn)
+            admin_action_id, governance_version_id = self.bind_governance(
+                conn, candidate_id=candidate_id, consumer_audiences=('legal',))
+            publication_id = uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,source_id,source_version,"
+                "governance_version_id) VALUES(%s,%s,%s,'source','v1',%s)",
+                (publication_id, self.tenant, self.domain, governance_version_id))
+            with self.assertRaisesRegex(Exception, 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED'):
+                conn.execute(
+                    "INSERT INTO knowledge_publications(publication_id,tenant_id,domain,candidate_id,"
+                    "candidate_version,intended_use,consumer_audiences,valid_until,admin_action_id,acl,purpose)"
+                    " VALUES (%s,%s,%s,%s,1,'procurement',ARRAY['procurement'],now()+interval '1 day',%s,"
+                    "ARRAY['procurement'],'procurement')",
+                    (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
+
+    def test_publication_rejects_purpose_mismatch(self):
+        with self.admin_scope() as conn:
+            candidate_id = self.seed_candidate(conn)
+            admin_action_id, governance_version_id = self.bind_governance(conn, candidate_id=candidate_id)
+            publication_id = uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,source_id,source_version,"
+                "governance_version_id) VALUES(%s,%s,%s,'source','v1',%s)",
+                (publication_id, self.tenant, self.domain, governance_version_id))
+            with self.assertRaisesRegex(Exception, 'KNOWLEDGE_PUBLICATION_PURPOSE_DENIED'):
+                conn.execute(
+                    "INSERT INTO knowledge_publications(publication_id,tenant_id,domain,candidate_id,"
+                    "candidate_version,intended_use,consumer_audiences,valid_until,admin_action_id,acl,purpose)"
+                    " VALUES (%s,%s,%s,%s,1,'marketing',ARRAY['legal'],now()+interval '1 day',%s,"
+                    "ARRAY['legal'],'marketing')",
+                    (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
+
+    def test_publication_rejects_past_valid_until(self):
+        with self.admin_scope() as conn:
+            candidate_id = self.seed_candidate(conn)
+            admin_action_id, governance_version_id = self.bind_governance(conn, candidate_id=candidate_id)
+            publication_id = uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,source_id,source_version,"
+                "governance_version_id) VALUES(%s,%s,%s,'source','v1',%s)",
+                (publication_id, self.tenant, self.domain, governance_version_id))
+            with self.assertRaisesRegex(Exception, 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE'):
+                conn.execute(
+                    "INSERT INTO knowledge_publications(publication_id,tenant_id,domain,candidate_id,"
+                    "candidate_version,intended_use,consumer_audiences,valid_until,admin_action_id,acl,purpose)"
+                    " VALUES (%s,%s,%s,%s,1,'procurement',ARRAY['legal'],now()-interval '1 hour',%s,"
+                    "ARRAY['legal'],'procurement')",
+                    (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
+
+    def test_publication_rejects_validity_exceeds_source(self):
+        with self.admin_scope() as conn:
+            candidate_id = self.seed_candidate(conn)
+            admin_action_id, governance_version_id = self.bind_governance(
+                conn, candidate_id=candidate_id, valid_days=2)
+            publication_id = uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,source_id,source_version,"
+                "governance_version_id) VALUES(%s,%s,%s,'source','v1',%s)",
+                (publication_id, self.tenant, self.domain, governance_version_id))
+            with self.assertRaisesRegex(Exception, 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE'):
+                conn.execute(
+                    "INSERT INTO knowledge_publications(publication_id,tenant_id,domain,candidate_id,"
+                    "candidate_version,intended_use,consumer_audiences,valid_until,admin_action_id,acl,purpose)"
+                    " VALUES (%s,%s,%s,%s,1,'procurement',ARRAY['legal'],now()+interval '30 days',%s,"
+                    "ARRAY['legal'],'procurement')",
+                    (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
+
+    def test_publication_rejects_expired_source(self):
+        with self.admin_scope() as conn:
+            candidate_id = self.seed_candidate(conn)
+            admin_action_id, governance_version_id = self.bind_governance(conn, candidate_id=candidate_id)
+            conn.execute(
+                "UPDATE knowledge_sources SET observed_at=now()-interval '2 hours', retention_until=now()-interval '1 hour' WHERE (tenant_id,domain,source_id,version)=(%s,%s,'source','v1')",
+                (self.tenant, self.domain))
+            publication_id = uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_publication_sources(publication_id,tenant_id,domain,source_id,source_version,"
+                "governance_version_id) VALUES(%s,%s,%s,'source','v1',%s)",
+                (publication_id, self.tenant, self.domain, governance_version_id))
+            with self.assertRaisesRegex(Exception, 'KNOWLEDGE_SOURCE_EXPIRED'):
+                conn.execute(
+                    "INSERT INTO knowledge_publications(publication_id,tenant_id,domain,candidate_id,"
+                    "candidate_version,intended_use,consumer_audiences,valid_until,admin_action_id,acl,purpose)"
+                    " VALUES (%s,%s,%s,%s,1,'procurement',ARRAY['legal'],now()+interval '1 day',%s,"
+                    "ARRAY['legal'],'procurement')",
+                    (publication_id, self.tenant, self.domain, candidate_id, admin_action_id))
+
 
 class TestAdminPublishTransactional(AdminGovernanceTestCase):
     def test_publish_transactional_binds_sources_and_is_idempotent(self):
@@ -584,3 +691,102 @@ class TestAdminRls(AdminGovernanceTestCase):
         with psycopg.connect(self.config['app_dsn']) as conn:
             with self.assertRaises(InsufficientPrivilege):
                 conn.execute(sql.SQL('SET ROLE {}').format(sql.Identifier(self.config['admin_role'])))
+
+
+class TestAuthorizedCandidateReadBranching(AdminGovernanceTestCase):
+    def test_published_restricted_candidate_read_by_authorized_consumer(self):
+        restricted = f'{self.domain}:restricted-candidate'
+        storage = self.admin_storage()
+        candidate_id = uuid4()
+        with self.admin_scope() as conn:
+            conn.execute(
+                "INSERT INTO knowledge_sources(tenant_id,domain,source_id,version,source_kind,acl,purpose,"
+                "observed_at,retention_until,independence_verified,withdrawn)"
+                " VALUES(%s,%s,'res-src','v1','document',ARRAY[%s],'procurement',now(),now()+interval '7 days',true,false)",
+                (self.tenant, self.domain, restricted))
+            conn.execute(
+                "INSERT INTO knowledge_evidence(tenant_id,domain,source_id,version,content_sha256,char_start,char_end,acl,purpose)"
+                " VALUES(%s,%s,'res-src','v1',%s,0,5,ARRAY[%s],'procurement')",
+                (self.tenant, self.domain, 'b' * 64, restricted))
+            subject, obj = uuid4(), uuid4()
+            conn.execute(
+                "INSERT INTO knowledge_entities(entity_id,tenant_id,domain,entity_type,name,acl,purpose)"
+                " VALUES(%s,%s,%s,'ORG','甲公司',ARRAY[%s],'procurement')",
+                (subject, self.tenant, self.domain, restricted))
+            conn.execute(
+                "INSERT INTO knowledge_entities(entity_id,tenant_id,domain,entity_type,name,acl,purpose)"
+                " VALUES(%s,%s,%s,'ORG','乙公司',ARRAY[%s],'procurement')",
+                (obj, self.tenant, self.domain, restricted))
+            claim_id = conn.execute(
+                "INSERT INTO knowledge_claims(tenant_id,domain,subject_id,predicate,object_id,polarity,modality,acl,purpose)"
+                " VALUES(%s,%s,%s,'supplies',%s,'positive','asserted',ARRAY[%s],'procurement') RETURNING claim_id",
+                (self.tenant, self.domain, subject, obj, restricted)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO knowledge_candidates(candidate_id,claim_id,tenant_id,domain,acl,purpose,state)"
+                " VALUES(%s,%s,%s,%s,ARRAY[%s],'procurement','proposed')",
+                (candidate_id, claim_id, self.tenant, self.domain, restricted))
+            evidence_id = conn.execute(
+                "SELECT evidence_id FROM knowledge_evidence WHERE (tenant_id,domain,source_id,version)=(%s,%s,'res-src','v1')",
+                (self.tenant, self.domain)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO candidate_evidence_links(candidate_id,evidence_id,tenant_id,domain,acl,purpose)"
+                " VALUES(%s,%s,%s,%s,ARRAY[%s],'procurement')",
+                (candidate_id, evidence_id, self.tenant, self.domain, restricted))
+
+        processor_actor = TrustedActor('worker', self.tenant, self.domain,
+                                       frozenset({Role.KNOWLEDGE_PROCESSOR}), frozenset({'procurement'}))
+        consumer_actor = TrustedActor('legal', self.tenant, self.domain,
+                                      frozenset(), frozenset({'procurement'}))
+        unauthorized_actor = TrustedActor('procurement', self.tenant, self.domain,
+                                          frozenset(), frozenset({'procurement'}))
+
+        # 1. Processor can read proposed candidate via processing path
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            storage.set_session_identity(conn, processor_actor, processing_acl=(restricted,))
+            loaded = storage.load_candidate(conn, candidate_id)
+            self.assertEqual(candidate_id, loaded.candidate_id)
+
+        # 2. Consumer before publish is rejected
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            storage.set_session_identity(conn, consumer_actor)
+            with self.assertRaises(KnowledgeError):
+                storage.load_candidate(conn, candidate_id)
+
+        # 3. Publish candidate with consumer_audiences=['legal']
+        with self.admin_scope() as conn:
+            admin_action_id, governance_version_id = self.bind_governance(
+                conn, source_id='res-src', version='v1', candidate_id=candidate_id, consumer_audiences=('legal',))
+            conn.execute("UPDATE knowledge_candidates SET state='published' WHERE candidate_id=%s", (candidate_id,))
+        storage.publish_transactional(
+            candidate_id=candidate_id, candidate_version=1, intended_use='procurement',
+            consumer_audiences=['legal'], valid_until=datetime.now(timezone.utc) + timedelta(days=5),
+            admin_action_id=admin_action_id, idempotency_key='res-pub',
+            source_bindings=[('res-src', 'v1', governance_version_id)])
+
+        # 4. Authorized consumer now reads successfully
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            storage.set_session_identity(conn, consumer_actor)
+            loaded = storage.load_candidate(conn, candidate_id)
+            self.assertEqual(candidate_id, loaded.candidate_id)
+            self.assertEqual('甲公司', loaded.claim.subject.name)
+
+        # 5. Processor still reads successfully
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            storage.set_session_identity(conn, processor_actor, processing_acl=(restricted,))
+            loaded = storage.load_candidate(conn, candidate_id)
+            self.assertEqual(candidate_id, loaded.candidate_id)
+
+        # 6. Unauthorized consumer rejected
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            storage.set_session_identity(conn, unauthorized_actor)
+            with self.assertRaises(KnowledgeError):
+                storage.load_candidate(conn, candidate_id)
+
+        # 7. Withdrawing source rejects authorized consumer
+        with self.admin_scope() as conn:
+            conn.execute("UPDATE knowledge_sources SET withdrawn=true WHERE (tenant_id,domain,source_id)=(%s,%s,'res-src')",
+                         (self.tenant, self.domain))
+        with psycopg.connect(self.config['app_dsn']) as conn:
+            storage.set_session_identity(conn, consumer_actor)
+            with self.assertRaises(KnowledgeError):
+                storage.load_candidate(conn, candidate_id)

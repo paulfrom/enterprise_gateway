@@ -42,7 +42,7 @@ SCHEMA_VERSION = 2
 # Locked to the measured metadata fingerprint of SCHEMA_SQL v2 (see
 # tests.knowledge.test_storage.TestSchemaFingerprint); any structural drift
 # must update this constant in the same change.
-SCHEMA_FINGERPRINT_V2 = '242c7c91491e5df0964c4ad1825dc4a298d8a76a61b1acecfafbc01714cc7ab2'
+SCHEMA_FINGERPRINT_V2 = '808ff8d8afb5cbf8a5d9b019f57a38721d5bb5f302b630f8b34985e1e24d8ed0'
 
 
 class KnowledgeSchemaError(RuntimeError):
@@ -186,7 +186,7 @@ CREATE TABLE knowledge_publications (
  publication_id UUID PRIMARY KEY,candidate_id UUID NOT NULL,claim_id UUID NOT NULL,
  tenant_id TEXT NOT NULL,domain TEXT NOT NULL,acl TEXT[] NOT NULL,purpose TEXT NOT NULL,
  candidate_version INTEGER NOT NULL,
- intended_use TEXT NOT NULL,consumer_audiences TEXT[] NOT NULL,
+ intended_use TEXT NOT NULL,consumer_audiences TEXT[] NOT NULL CHECK(cardinality(consumer_audiences)>0),
  published_at TIMESTAMPTZ NOT NULL,valid_until TIMESTAMPTZ NOT NULL,
  admin_action_id UUID NOT NULL,idempotency_key TEXT,
  FOREIGN KEY(tenant_id,domain,candidate_id) REFERENCES knowledge_candidates(tenant_id,domain,candidate_id),
@@ -240,13 +240,28 @@ CREATE TABLE knowledge_observations (
  FOREIGN KEY(tenant_id,domain,source_id,source_version) REFERENCES knowledge_sources(tenant_id,domain,source_id,version));
 
 CREATE FUNCTION enforce_publication_admission() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE v_src RECORD;
+DECLARE
+    v_src RECORD;
+    v_s_withdrawn BOOLEAN;
+    v_s_retention TIMESTAMPTZ;
+    v_g_use TEXT;
+    v_g_audiences TEXT[];
+    v_g_until TIMESTAMPTZ;
+    v_first BOOLEAN := true;
+    v_audience_intersection TEXT[];
+    v_bound_until TIMESTAMPTZ := NULL;
 BEGIN
     IF current_user <> __ADMIN_ROLE__ THEN
         RAISE EXCEPTION 'KNOWLEDGE_PUBLISHER_REQUIRED';
     END IF;
     IF nullif(current_setting('app.admin_context',true),'') IS DISTINCT FROM 'true' THEN
         RAISE EXCEPTION 'KNOWLEDGE_ADMIN_CONTEXT_REQUIRED';
+    END IF;
+    IF NEW.valid_until <= clock_timestamp() THEN
+        RAISE EXCEPTION 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE';
+    END IF;
+    IF NEW.consumer_audiences IS NULL OR cardinality(NEW.consumer_audiences) = 0 THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM knowledge_admin_actions a
         WHERE a.admin_action_id = NEW.admin_action_id
@@ -277,21 +292,64 @@ BEGIN
         FROM knowledge_publication_sources
        WHERE publication_id=NEW.publication_id
        ORDER BY source_id, source_version FOR UPDATE LOOP
-        PERFORM 1 FROM knowledge_sources s
+        SELECT s.withdrawn, s.retention_until INTO v_s_withdrawn, v_s_retention
+          FROM knowledge_sources s
          WHERE s.tenant_id=NEW.tenant_id AND s.domain=NEW.domain
            AND s.source_id=v_src.source_id AND s.version=v_src.source_version
-           AND NOT s.withdrawn FOR SHARE;
-        IF NOT FOUND THEN RAISE EXCEPTION 'KNOWLEDGE_SOURCE_WITHDRAWN'; END IF;
-        PERFORM 1 FROM knowledge_governance_versions g
+           FOR SHARE;
+        IF NOT FOUND OR v_s_withdrawn THEN
+            RAISE EXCEPTION 'KNOWLEDGE_SOURCE_WITHDRAWN';
+        END IF;
+        IF v_s_retention <= clock_timestamp() THEN
+            RAISE EXCEPTION 'KNOWLEDGE_SOURCE_EXPIRED';
+        END IF;
+
+        SELECT g.intended_use, g.consumer_audiences, g.valid_until
+          INTO v_g_use, v_g_audiences, v_g_until
+          FROM knowledge_governance_versions g
          WHERE g.tenant_id=NEW.tenant_id AND g.domain=NEW.domain
            AND g.source_id=v_src.source_id AND g.source_version=v_src.source_version
            AND g.governance_version_id=v_src.governance_version_id
            AND g.valid_from <= clock_timestamp() AND g.valid_until > clock_timestamp()
            AND NOT EXISTS (SELECT 1 FROM knowledge_governance_versions n
                             WHERE n.supersedes_version_id=g.governance_version_id)
-        FOR SHARE;
-        IF NOT FOUND THEN RAISE EXCEPTION 'KNOWLEDGE_GOVERNANCE_VERSION_INVALID'; END IF;
+           FOR SHARE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'KNOWLEDGE_GOVERNANCE_VERSION_INVALID';
+        END IF;
+
+        IF v_g_use IS DISTINCT FROM NEW.intended_use THEN
+            RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_PURPOSE_DENIED';
+        END IF;
+
+        IF NOT (NEW.consumer_audiences <@ v_g_audiences) THEN
+            RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED';
+        END IF;
+
+        IF v_first THEN
+            v_audience_intersection := v_g_audiences;
+            v_first := false;
+        ELSE
+            SELECT array_agg(x) INTO v_audience_intersection
+              FROM (SELECT unnest(v_audience_intersection) INTERSECT SELECT unnest(v_g_audiences)) t(x);
+        END IF;
+
+        v_bound_until := LEAST(COALESCE(v_bound_until, v_g_until), v_g_until, v_s_retention);
     END LOOP;
+
+    IF v_first THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_SOURCE_MISSING';
+    END IF;
+
+    IF v_audience_intersection IS NULL OR cardinality(v_audience_intersection) = 0
+       OR NOT (NEW.consumer_audiences <@ v_audience_intersection) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED';
+    END IF;
+
+    IF NEW.valid_until > v_bound_until THEN
+        RAISE EXCEPTION 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE';
+    END IF;
+
     RETURN NEW;
 END $$;
 CREATE TRIGGER enforce_publication_admission BEFORE INSERT ON knowledge_publications
@@ -342,8 +400,8 @@ REVOKE ALL ON FUNCTION invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ) F
 
 CREATE FUNCTION read_authorized_knowledge_candidate(p_candidate_id UUID) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,__GOVERNANCE_SCHEMA__ AS $$
-DECLARE candidate_row RECORD; claim_row RECORD; subject_row RECORD; object_row RECORD;
-        linked_count INT; admitted_count INT; evidence_payload JSONB;
+DECLARE candidate_row RECORD; pub_row RECORD; claim_row RECORD; subject_row RECORD; object_row RECORD;
+        linked_count INT; admitted_count INT; bound_count INT; valid_count INT; evidence_payload JSONB;
         caller_tenant TEXT:=current_setting('app.tenant',true); caller_domain TEXT:=current_setting('app.domain',true);
         caller_subjects TEXT[]:=COALESCE(nullif(current_setting('app.subjects',true),'')::text[],ARRAY[]::text[]);
         caller_purposes TEXT[]:=COALESCE(nullif(current_setting('app.purposes',true),'')::text[],ARRAY[]::text[]);
@@ -355,6 +413,7 @@ BEGIN
    AND (token IS DISTINCT FROM caller_domain||':restricted-candidate' OR NOT ('knowledge_processor'=ANY(caller_roles)))) THEN
    RAISE EXCEPTION 'authenticated subject or processing scope invalid' USING ERRCODE='42501';
  END IF;
+
  -- Lock every actual source before reading candidate state or checking ACLs.
  -- FOR SHARE conflicts with withdrawal's FOR UPDATE and stays held until the
  -- caller transaction ends, including after this function returns. Stable
@@ -365,23 +424,55 @@ BEGIN
    WHERE l.candidate_id=p_candidate_id
    AND (e.tenant_id,e.domain,e.source_id,e.version)=(s.tenant_id,s.domain,s.source_id,s.version))
  ORDER BY s.tenant_id,s.domain,s.source_id,s.version FOR SHARE OF s;
+
  SELECT * INTO candidate_row FROM knowledge_candidates c WHERE c.candidate_id=p_candidate_id
  AND (c.tenant_id,c.domain)=(caller_tenant,caller_domain);
- IF candidate_row IS NULL OR NOT (candidate_row.acl && caller_subjects)
- OR NOT (candidate_row.purpose=ANY(caller_purposes)) THEN
+ IF candidate_row IS NULL THEN
    RAISE EXCEPTION 'candidate context access denied' USING ERRCODE='42501';
  END IF;
- SELECT count(*) INTO linked_count FROM candidate_evidence_links l WHERE l.candidate_id=p_candidate_id;
- SELECT count(*) INTO admitted_count FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
- JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
- WHERE l.candidate_id=p_candidate_id AND (s.tenant_id,s.domain)=(caller_tenant,caller_domain)
- AND s.purpose=candidate_row.purpose AND e.purpose=candidate_row.purpose AND l.purpose=candidate_row.purpose
- AND s.acl && caller_subjects AND e.acl && caller_subjects AND l.acl && caller_subjects
- AND candidate_row.acl<@s.acl AND candidate_row.acl<@e.acl AND candidate_row.acl<@l.acl
- AND NOT s.withdrawn AND s.observed_at<=CURRENT_TIMESTAMP AND s.retention_until>CURRENT_TIMESTAMP;
- IF linked_count=0 OR linked_count<>admitted_count THEN
-   RAISE EXCEPTION 'candidate source access denied or source inactive' USING ERRCODE='42501';
+
+ IF candidate_row.acl && caller_subjects AND candidate_row.purpose=ANY(caller_purposes) THEN
+   SELECT count(*) INTO linked_count FROM candidate_evidence_links l WHERE l.candidate_id=p_candidate_id;
+   SELECT count(*) INTO admitted_count FROM candidate_evidence_links l JOIN knowledge_evidence e USING(evidence_id)
+   JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(e.tenant_id,e.domain,e.source_id,e.version)
+   WHERE l.candidate_id=p_candidate_id AND (s.tenant_id,s.domain)=(caller_tenant,caller_domain)
+   AND s.purpose=candidate_row.purpose AND e.purpose=candidate_row.purpose AND l.purpose=candidate_row.purpose
+   AND s.acl && caller_subjects AND e.acl && caller_subjects AND l.acl && caller_subjects
+   AND candidate_row.acl<@s.acl AND candidate_row.acl<@e.acl AND candidate_row.acl<@l.acl
+   AND NOT s.withdrawn AND s.observed_at<=CURRENT_TIMESTAMP AND s.retention_until>CURRENT_TIMESTAMP;
+   IF linked_count=0 OR linked_count<>admitted_count THEN
+     RAISE EXCEPTION 'candidate source access denied or source inactive' USING ERRCODE='42501';
+   END IF;
+ ELSE
+   SELECT * INTO pub_row FROM knowledge_publications p
+   WHERE (p.tenant_id,p.domain,p.candidate_id)=(caller_tenant,caller_domain,p_candidate_id)
+     AND p.candidate_version=candidate_row.candidate_version
+   ORDER BY p.published_at DESC, p.publication_id DESC LIMIT 1;
+
+   IF pub_row IS NULL
+   OR EXISTS(SELECT 1 FROM knowledge_tombstones t WHERE (t.tenant_id,t.domain,t.publication_id)=(caller_tenant,caller_domain,pub_row.publication_id))
+   OR pub_row.valid_until<=CURRENT_TIMESTAMP
+   OR NOT (caller_subject=ANY(pub_row.consumer_audiences))
+   OR NOT (pub_row.intended_use=ANY(caller_purposes)) THEN
+     RAISE EXCEPTION 'candidate context access denied' USING ERRCODE='42501';
+   END IF;
+
+   SELECT count(*) INTO bound_count FROM knowledge_publication_sources ps WHERE ps.publication_id=pub_row.publication_id;
+   SELECT count(*) INTO valid_count FROM knowledge_publication_sources ps
+   JOIN knowledge_sources s ON (s.tenant_id,s.domain,s.source_id,s.version)=(ps.tenant_id,ps.domain,ps.source_id,ps.source_version)
+   JOIN knowledge_governance_versions g ON (g.tenant_id,g.domain,g.source_id,g.source_version,g.governance_version_id)=
+                                          (ps.tenant_id,ps.domain,ps.source_id,ps.source_version,ps.governance_version_id)
+   WHERE ps.publication_id=pub_row.publication_id
+     AND (s.tenant_id,s.domain)=(caller_tenant,caller_domain)
+     AND NOT s.withdrawn AND s.observed_at<=CURRENT_TIMESTAMP AND s.retention_until>CURRENT_TIMESTAMP
+     AND g.valid_from<=CURRENT_TIMESTAMP AND g.valid_until>CURRENT_TIMESTAMP
+     AND NOT EXISTS (SELECT 1 FROM knowledge_governance_versions n WHERE n.supersedes_version_id=g.governance_version_id);
+
+   IF bound_count=0 OR bound_count<>valid_count THEN
+     RAISE EXCEPTION 'candidate source access denied or source inactive' USING ERRCODE='42501';
+   END IF;
  END IF;
+
  SELECT * INTO claim_row FROM knowledge_claims k WHERE k.claim_id=candidate_row.claim_id
  AND (k.tenant_id,k.domain)=(caller_tenant,caller_domain);
  SELECT * INTO subject_row FROM knowledge_entities e WHERE e.entity_id=claim_row.subject_id

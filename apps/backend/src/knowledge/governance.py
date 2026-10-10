@@ -818,6 +818,22 @@ class KnowledgeGovernanceService:
             return GovernanceError(PUBLISH_REJECTED,
                                    'a bound governance version was superseded concurrently',
                                    blocking_reasons=(GOVERNANCE_SUPERSEDED,))
+        if 'KNOWLEDGE_SOURCE_EXPIRED' in message:
+            return GovernanceError(PUBLISH_REJECTED,
+                                   'a contributing source expired concurrently',
+                                   blocking_reasons=(SOURCE_EXPIRED_REASON,))
+        if 'KNOWLEDGE_PUBLICATION_AUDIENCE_DENIED' in message:
+            return GovernanceError(PUBLISH_REJECTED,
+                                   'audiences exceed source governance bound',
+                                   blocking_reasons=(AUDIENCE_DENIED,))
+        if 'KNOWLEDGE_PUBLICATION_PURPOSE_DENIED' in message:
+            return GovernanceError(PUBLISH_REJECTED,
+                                   'intended use not allowed by source governance',
+                                   blocking_reasons=(PURPOSE_DENIED,))
+        if 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE' in message:
+            return GovernanceError(PUBLISH_REJECTED,
+                                   'publication validity exceeds contributing sources',
+                                   blocking_reasons=(SOURCE_EXPIRED_REASON,))
         if 'KNOWLEDGE_PUBLICATION_SOURCE_MISSING' in message:
             return GovernanceError(PUBLISH_REJECTED,
                                    'a contributing source binding is missing',

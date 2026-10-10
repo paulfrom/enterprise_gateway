@@ -143,10 +143,17 @@ class GovernedConsumer:
         }
         conn.execute('''INSERT INTO knowledge_consumer_assets
             (consumer_id,publication_id,tenant_id,domain,acl,purpose,active,asset_version,asset_kind,intended_use,lineage)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,1,'knowledge_publication',%s,%s)
-            ON CONFLICT(consumer_id,publication_id) DO UPDATE SET active=EXCLUDED.active''',
+            SELECT %s,%s,%s,%s,%s,%s,
+                   (NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id=%s)
+                    AND (SELECT p.valid_until FROM knowledge_publications p WHERE p.publication_id=%s) > clock_timestamp()),
+                   1,'knowledge_publication',%s,%s
+            ON CONFLICT(consumer_id,publication_id) DO UPDATE SET active=EXCLUDED.active
+            WHERE knowledge_consumer_assets.active=true
+              AND NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id=EXCLUDED.publication_id)
+              AND (SELECT p.valid_until FROM knowledge_publications p WHERE p.publication_id=EXCLUDED.publication_id) > clock_timestamp()''',
             (self.actor.subject_id,event['aggregate_id'],event['tenant_id'],event['domain'],
-             [self.actor.subject_id],event['purpose'],True,event['purpose'],json.dumps(lineage)))
+             [self.actor.subject_id],event['purpose'],event['aggregate_id'],event['aggregate_id'],
+             event['purpose'],json.dumps(lineage)))
 
     def _apply_revocation(self, conn, event):
         # Deactivate this consumer's applied asset; consumers without an applied
@@ -160,11 +167,9 @@ class GovernedConsumer:
         with psycopg.connect(self.storage.connection_uri) as conn:
             self.storage.set_session_identity(conn,self.actor)
             # v2 semantics: the consumer's own active assets joined to publications
-            # that are not revoked (no tombstone) and not expired. RLS visibility
-            # is the publication-bound authorization check, and source withdrawal
-            # or governance supersession always tombstones the publication in the
-            # same transaction as the invalidation, so a live row here proves every
-            # contributing source is active with a current bound governance version.
+            # that are not revoked (no tombstone) and not expired. Authoritative
+            # source and governance invalidations are reflected via tombstones and
+            # asset deactivations committed by the governance service.
             rows = conn.execute('''SELECT p.publication_id FROM knowledge_consumer_assets a
                 JOIN knowledge_publications p ON (p.tenant_id,p.domain,p.publication_id)=(a.tenant_id,a.domain,a.publication_id)
                 WHERE a.consumer_id=%s AND a.active AND p.valid_until>%s
