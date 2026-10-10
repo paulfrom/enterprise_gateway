@@ -48,7 +48,6 @@ class Modality(StrEnum):
 
 class CandidateState(StrEnum):
     PROPOSED = "proposed"
-    APPROVED = "approved"
     PUBLISHED = "published"
     REJECTED = "rejected"
     WITHDRAWN = "withdrawn"
