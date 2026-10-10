@@ -96,6 +96,20 @@ class AdminGovernanceFaultIsolationTests(unittest.TestCase):
             self.assertIn(original, text)
         self.assertNotIn("<<ENT", text)
 
+    async def protected_protocol_matrix(self, client, runtime):
+        before = len(runtime.fixture.calls)
+        for path, model in PROTOCOLS:
+            for stream in (False, True):
+                with self.subTest(model=model, stream=stream):
+                    response = await client.post(path, json=model_body(model, stream),
+                        headers={"authorization": "Bearer synthetic-key"})
+                    self.assert_model_result(response)
+        calls = runtime.fixture.calls[before:]
+        self.assertEqual(4, len(calls))
+        for call in calls:
+            for original in ("甲公司", "乙公司", "张三", "13800138000"):
+                self.assertNotIn(original, call.content.decode())
+
     def test_admin_csrf_secret_is_redacted_from_ingress_logging(self):
         with synthetic_governance_runtime() as runtime:
             captured = io.StringIO()
@@ -164,12 +178,12 @@ class AdminGovernanceFaultIsolationTests(unittest.TestCase):
                 old_storage = PostgresKnowledgeStorage(runtime.config["app_dsn"], tenant_id=runtime.tenant,
                     domain=runtime.domain, admin_dsn=dsn, admin_role=runtime.config["admin_role"])
                 service = KnowledgeGovernanceService(storage=old_storage, tenant_id=runtime.tenant, domain=runtime.domain)
-                from gateway.app import create_app
-                app = create_app(admin_service=runtime.admin_service, knowledge_governance=service)
+                app = runtime.app
                 async def exercise():
                     async with app.router.lifespan_context(app):
                         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway") as client:
                             headers = await login(client)
+                            await self.protected_protocol_matrix(client, runtime)
                             response = await client.get("/api/admin/sources", headers=headers)
                             self.assertEqual(response.status_code, 503, response.text)
                             self.assertEqual(response.json(), {"error": {"code": "KNOWLEDGE_SCHEMA_INCOMPATIBLE"}})
@@ -179,11 +193,123 @@ class AdminGovernanceFaultIsolationTests(unittest.TestCase):
                                     "idempotency_key": "legacy-no-write", "basis": "synthetic schema admission check"})
                             self.assertEqual(publication.status_code, 503, publication.text)
                             self.assertEqual(publication.json(), {"error": {"code": "KNOWLEDGE_SCHEMA_INCOMPATIBLE"}})
-                asyncio.run(exercise())
+                with patch.object(runtime.service, '_storage', old_storage):
+                    asyncio.run(exercise())
                 self.assertEqual(snapshot(), before)
             finally:
                 with psycopg.connect(owner_dsn) as conn:
                     conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+    def test_catalog_write_failure_backlog_and_rescan_recover_original_evidence(self):
+        from infra.envelope_crypto import parse_record
+        from infra.errors import SafetyError
+        with synthetic_governance_runtime() as runtime:
+            async def exercise():
+                async with runtime.app.router.lifespan_context(runtime.app):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url="http://gateway") as client:
+                        headers = await login(client)
+                        with patch("audit.catalog.commit_guarded", side_effect=DurableWriteError("synthetic catalog volume unavailable")):
+                            await self.protected_protocol_matrix(client, runtime)
+                            with self.assertRaises(SafetyError):
+                                await asyncio.to_thread(runtime.builder.build_once)
+                            self.assertGreaterEqual(runtime.builder.backlog(), 4)
+                            originals = {parse_record(path.read_bytes()).record_id: (path, path.read_bytes())
+                                for path in runtime.app.state.runtime_evidence_directory.glob('*.evidence.json')}
+                            self.assertEqual(4, len(originals))
+                            self.assertTrue(all(path.exists() for path, _body in originals.values()))
+                            # Metadata lag cannot suppress mandatory encrypted retention.
+                            self.assertEqual(4, len(list((runtime.fixture.root/'state'/'intents').glob('*.json'))))
+                        await asyncio.to_thread(runtime.builder.build_once)
+                        self.assertEqual(0, runtime.builder.backlog())
+                        records = await client.get('/api/admin/audit/records', headers=headers)
+                        self.assertEqual(200, records.status_code, records.text)
+                        self.assertEqual(set(originals), {row['record_id'] for row in records.json()['items']})
+                        for record_id, (path, body) in originals.items():
+                            self.assertEqual(body, path.read_bytes())
+                            detail = await client.get('/api/admin/audit/records/'+record_id, headers=headers)
+                            self.assertEqual(200, detail.status_code, detail.text)
+                            self.assertIn('甲公司', detail.json()['plaintext'])
+            asyncio.run(exercise())
+
+    def test_management_queue_saturation_preserves_protected_protocol_matrix(self):
+        # Real PostgreSQL AccessExclusiveLock holds the admin workers on their
+        # actual source-list SELECT; model admission uses independent resources.
+        with synthetic_governance_runtime() as runtime:
+            async def exercise():
+                async with runtime.app.router.lifespan_context(runtime.app):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url='http://gateway') as client:
+                        headers = await login(client)
+                        blocker = psycopg.connect(runtime.config['admin_dsn'])
+                        pending = []
+                        try:
+                            blocker.execute('LOCK TABLE knowledge_sources IN ACCESS EXCLUSIVE MODE')
+                            pending = [asyncio.create_task(client.get('/api/admin/sources',headers=headers)) for _ in range(4)]
+                            deadline = time.monotonic()+10
+                            while True:
+                                with psycopg.connect(runtime.config['admin_dsn']) as observer:
+                                    waiting = observer.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT table_name,column_name,ordinal_position%%'").fetchone()[0]
+                                if waiting == 4:
+                                    break
+                                self.assertLess(time.monotonic(),deadline,'four actual admin queries did not block')
+                                await asyncio.sleep(0.02)
+                            overflow = await client.get('/api/admin/sources',headers=headers)
+                            self.assertEqual(503,overflow.status_code,overflow.text)
+                            self.assertEqual({'error':{'code':'KNOWLEDGE_ADMIN_UNAVAILABLE'}},overflow.json())
+                            await self.protected_protocol_matrix(client,runtime)
+                        finally:
+                            blocker.rollback()
+                            blocker.close()
+                            results = await asyncio.gather(*pending)
+                        self.assertTrue(all(response.status_code in (200,503) for response in results))
+                        drain_deadline = time.monotonic()+10
+                        while True:
+                            recovered = await client.get('/api/admin/sources',headers=headers)
+                            if recovered.status_code == 200:
+                                break
+                            self.assertEqual(503,recovered.status_code,recovered.text)
+                            self.assertLess(time.monotonic(),drain_deadline,'admin slots did not drain after lock release')
+                            await asyncio.sleep(0.05)
+            asyncio.run(exercise())
+
+    def test_stopped_real_consumer_leaves_publication_pending_and_model_path_available(self):
+        from hashlib import sha256
+        from infra.envelope_crypto import decrypt_record, parse_record
+        from knowledge.governance import AdminActionContext
+        from knowledge.knowledge import Role, TrustedActor
+        from knowledge.knowledge_events import ObservationEvent
+        from knowledge.worker import KnowledgeWorker, PostgresKnowledgeSink
+        with synthetic_governance_runtime() as runtime:
+            async def exercise():
+                async with runtime.app.router.lifespan_context(runtime.app):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app),base_url='http://gateway') as client:
+                        await login(client)
+                        body=model_body('chat-fixture',False)
+                        body['messages']=[{'role':'user','content':'甲公司向乙公司采购设备。'}]
+                        self.assertEqual(200,(await client.post(PROTOCOLS[0][0],json=body,headers={'authorization':'Bearer synthetic-key'})).status_code)
+                        event=ObservationEvent.model_validate_json(decrypt_record(runtime.kms,parse_record(next(runtime.app.state.runtime_spool_directory.glob('*.env.json')).read_bytes())))
+                        processor=TrustedActor('worker',runtime.tenant,runtime.domain,frozenset({Role.KNOWLEDGE_PROCESSOR}),frozenset({event.purpose}))
+                        worker=KnowledgeWorker(runtime.app.state.runtime_spool_directory,runtime.kms,
+                            PostgresKnowledgeSink(runtime.storage,processor,runtime.kms,processing_acl=(runtime.domain+':restricted-candidate',)))
+                        self.assertEqual(1,(await asyncio.to_thread(worker.run_once)).submitted)
+                        until=datetime.now(timezone.utc)+timedelta(hours=1)
+                        context=AdminActionContext('admin',sha256(b'synthetic-stopped-consumer-session').hexdigest(),runtime.tenant,runtime.domain)
+                        runtime.service.confirm_source_governance(event.source_id,source_version=event.source_version,
+                            expected_governance_version=None,ownership='confirmed',use=event.purpose,audiences=['legal'],valid_until=until,basis='synthetic review',context=context)
+                        with runtime.storage.admin_transaction(tenant_id=runtime.tenant,domain=runtime.domain) as conn:
+                            candidate=str(conn.execute('SELECT candidate_id FROM knowledge_candidates').fetchone()[0])
+                        publication=runtime.service.publish_candidate(candidate,expected_version=1,use=event.purpose,audiences=['legal'],valid_until=until,idempotency_key='stopped-consumer',basis='synthetic publish',context=context)
+                        def assert_pending():
+                            availability=runtime.service.evaluate_availability(candidate_id=None,publication_id=publication,consumer='legal',use=event.purpose,now=datetime.now(timezone.utc))
+                            self.assertEqual('pending',availability.delivery_status)
+                            self.assertEqual(1,availability.pending_event_count)
+                            self.assertEqual((),availability.reuse_assets)
+                            with runtime.storage.admin_transaction(tenant_id=runtime.tenant,domain=runtime.domain) as conn:
+                                self.assertEqual(0,conn.execute('SELECT count(*) FROM consumer_receipts').fetchone()[0])
+                                self.assertEqual(0,conn.execute('SELECT count(*) FROM knowledge_consumer_assets').fetchone()[0])
+                        assert_pending()
+                        await self.protected_protocol_matrix(client,runtime)
+                        assert_pending()
+            asyncio.run(exercise())
 
     def test_existing_durable_intent_gate_still_blocks_supplier(self):
         with synthetic_governance_runtime() as runtime:
