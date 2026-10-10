@@ -33,7 +33,7 @@ from pathlib import Path
 from dataclasses import asdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from types import MappingProxyType
 
@@ -73,6 +73,11 @@ from infra.spool import CollectionMode, SpoolPermit, SpoolWriter
 from protocol.static_exemption import StaticExemptionRegistry
 
 __all__ = ["PipelineResult", "ProtectedPipeline"]
+
+
+# Server evidence lifecycle default; trusted intent metadata is committed once.
+EVIDENCE_RETENTION_DAYS = 30
+EVIDENCE_LIFECYCLE_POLICY_VERSION = 'model-query-retention-30d-v1'
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,6 +425,7 @@ class ProtectedPipeline:
             watermark_assessment = self.watermark_guard.check_egress_permitted()
 
             # Gate 7: Evidence Gate: Intent + Encryption (A-03, A-01)
+            evidence_record_id = f'req-{uuid.uuid4().hex}'
             intent = ReleaseIntent(
                 intent_id=f"intent-{uuid.uuid4().hex[:12]}",
                 recorded_at=now,
@@ -437,8 +443,11 @@ class ProtectedPipeline:
                 upstream_model=provider_model,
                 package_hash=version_handle.package_hash,
                 channel_version=route.package_version,
+                evidence_record_id=evidence_record_id,
+                evidence_retention_until=now + timedelta(days=EVIDENCE_RETENTION_DAYS),
+                evidence_lifecycle_policy_version=EVIDENCE_LIFECYCLE_POLICY_VERSION,
             )
-            evidence_spec = EvidenceSpec(plaintext=raw_bytes,bucket=self.evidence_bucket,record_id=f'req-{uuid.uuid4().hex}',purpose='model-query')
+            evidence_spec = EvidenceSpec(plaintext=raw_bytes,bucket=self.evidence_bucket,record_id=evidence_record_id,purpose='model-query')
             evidence_permit = self.evidence_gate.admit(intent, evidence_spec)
 
             # Gate 8: Knowledge Spooling (K-02, O-03)

@@ -227,6 +227,40 @@ class AdminReviewService:
             raise SafetyError(SafetyCode.AUDIT_RECORD_NOT_FOUND)
         return entry
 
+    def list_events(self, *, tenant_id: str, domain: str, limit: int = 50, cursor: str | None = None, deadline: float) -> dict:
+        """Page only fixed durable access-event fields in the requested scope."""
+        tenant_id = self._require_scope('tenant_id', tenant_id)
+        domain = self._require_scope('domain', domain)
+        if type(limit) is not int or not 1 <= limit <= MAX_PAGE_SIZE:
+            raise ValueError('invalid limit')
+        if cursor is not None and not _SAFE_TOKEN_RE.fullmatch(cursor):
+            raise ValueError('invalid cursor')
+        items = []
+        with self._access_log.locked():
+            for index, path in enumerate(sorted(self._access_log.path.glob('*.json'))):
+                if index >= MAX_CATALOG_SCAN or time.monotonic() >= deadline:
+                    raise SafetyError(SafetyCode.AUDIT_ACCESS_REJECTED)
+                if path.is_symlink() or not _SAFE_TOKEN_RE.fullmatch(path.stem) or (cursor is not None and path.stem <= cursor):
+                    continue
+                raw = read_capped(path, MAX_ACCESS_EVENT_BYTES)
+                if raw is None:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(event, dict) or event.get('tenant_id') != tenant_id or event.get('domain') != domain:
+                    continue
+                event_code = event.get('event')
+                rejected_codes = {f'AUDIT_READ_REJECTED:{reason}' for reason in ('evidence_corrupted', 'aad_mismatch', 'decryption_failed', 'kms_unavailable', 'invalid_wrapped_key', 'invalid_ciphertext', 'session_expired', 'deadline_exceeded')}
+                if event_code not in {_EVENT_ATTEMPTED, _EVENT_RELEASED} | rejected_codes:
+                    continue
+                fields = {'event', 'actor', 'session_digest', 'record_sha256', 'tenant_id', 'domain', 'at', 'attempt_at'}
+                items.append(dict({k: v for k, v in event.items() if k in fields}, event_id=path.stem))
+                if len(items) > limit:
+                    break
+        return {'items': items[:limit], 'next_cursor': items[limit - 1]['event_id'] if len(items) > limit else None}
+
     # -- direct read ----------------------------------------------------------
 
     def read_plaintext(self, record_id: str, *, context: AdminAuditContext) -> bytes:

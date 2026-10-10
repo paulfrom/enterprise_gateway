@@ -40,6 +40,7 @@ def create_runtime_app(
     max_body_bytes: int = 1048576, transport: httpx.BaseTransport | None = None,
     resolver: Resolver | None = None,
     history_store=None, admin_service=None,
+    knowledge_governance=None, audit_reader=None, audit_builder=None,
     client_profile: str = 'compatible',
     detection_failure_mode: str = 'error',
     quick_screen: QuickScreenConfig | None = None,
@@ -98,9 +99,33 @@ def create_runtime_app(
         app = create_app(router=router, authenticator=authenticator,
                          classifier=classifier, hmac_key=hmac_key,
                          history_store=history_store, admin_service=admin_service,
+                         knowledge_governance=knowledge_governance, audit_reader=audit_reader, audit_builder=audit_builder,
                          client_profile=client_profile)
 
+        import threading
+        builder_stop = threading.Event()
+        def build_catalog():
+            while not builder_stop.is_set():
+                try:
+                    audit_builder.build_once()
+                    app.state.audit_catalog_error_code = None
+                except Exception:
+                    app.state.audit_catalog_error_code = 'ADMIN_AUDIT_UNAVAILABLE'  # Directory lag never propagates into model readiness.
+                builder_stop.wait(5)
+        builder_thread = None
+
         def close_resources():
+            builder_stop.set()
+            if builder_thread is not None:
+                builder_thread.join(timeout=5)
+            for name in ('admin_audit_executor', 'admin_knowledge_executor'):
+                executor = getattr(app.state, name, None)
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
+            if knowledge_governance is not None:
+                close = getattr(getattr(knowledge_governance, '_storage', None), 'close', None)
+                if close is not None:
+                    close()
             try:
                 detector.close()
             finally:
@@ -115,6 +140,10 @@ def create_runtime_app(
 
         @asynccontextmanager
         async def lifespan(_app):
+            nonlocal builder_thread
+            if audit_builder is not None:
+                builder_thread = threading.Thread(target=build_catalog, name='admin-audit-catalog', daemon=True)
+                builder_thread.start()
             try:
                 yield
             finally:
