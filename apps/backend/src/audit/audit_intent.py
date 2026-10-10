@@ -13,6 +13,16 @@ directory fsync). Only after that persistence boundary is reached is an
 immutable :class:`ReleasePermit` returned — "persisted, may attempt send".
 Any write/fsync/ENOSPC failure maps to ``AUDIT_WRITE_FAILED`` and no permit
 handle is produced; the failure never fabricates the "persisted" state.
+
+B2 extension (design §4.1): when the channel policy requires original-text
+evidence, the same single intent commit may carry the server-preallocated
+evidence link — ``evidence_record_id`` (the same identifier the
+:class:`enterprise_gateway.evidence_gate.EvidenceSpec` uses), plus the
+server-authoritative ``evidence_retention_until`` and
+``evidence_lifecycle_policy_version``. All three are optional trusted
+metadata persisted inside the existing intent document; they add no extra
+write and no gate step, and intents without them (legacy records) parse
+unchanged.
 """
 
 from __future__ import annotations
@@ -24,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from infra.durable_write import DurableWriteError, durable_commit
 from infra.errors import SafetyCode, SafetyError
@@ -55,6 +65,9 @@ class ReleaseIntent(BaseModel):
     package_hash: str | None = None
     route_id: str | None = None
     model: str | None = None
+    evidence_record_id: str | None = None
+    evidence_retention_until: datetime | None = None
+    evidence_lifecycle_policy_version: str | None = None
 
     @field_validator("intent_id")
     @classmethod
@@ -76,6 +89,36 @@ class ReleaseIntent(BaseModel):
         if not value.strip():
             raise ValueError("field must be a non-empty string")
         return value
+
+    @field_validator("evidence_record_id")
+    @classmethod
+    def _evidence_record_id_safe(cls, value: str | None) -> str | None:
+        if value is not None and not _INTENT_ID_RE.fullmatch(value):
+            raise ValueError("evidence_record_id must be a safe token")
+        return value
+
+    @field_validator("evidence_retention_until")
+    @classmethod
+    def _evidence_retention_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("evidence_retention_until must be timezone-aware")
+        return value
+
+    @field_validator("evidence_lifecycle_policy_version")
+    @classmethod
+    def _evidence_policy_non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("evidence_lifecycle_policy_version must be a non-empty string")
+        return value
+
+    @model_validator(mode="after")
+    def _evidence_link_coherent(self) -> "ReleaseIntent":
+        if self.evidence_record_id is None and (
+            self.evidence_retention_until is not None
+            or self.evidence_lifecycle_policy_version is not None
+        ):
+            raise ValueError("evidence lifecycle fields require evidence_record_id")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
