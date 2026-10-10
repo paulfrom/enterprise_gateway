@@ -34,7 +34,7 @@ from infra.spool_relay import compute_dedup_key
 from knowledge.knowledge_events import ObservationEvent
 from knowledge.worker import KnowledgeWorker, PostgresKnowledgeSink, GovernedConsumer
 from tests.pg_support import get_test_dsn, prepare_test_database
-from knowledge.governance import KnowledgeGovernanceService
+from knowledge.governance import AdminActionContext, GovernanceError, KnowledgeGovernanceService
 from knowledge.knowledge import (
     CandidateState,
     KnowledgeError,
@@ -358,7 +358,6 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
         self.assertEqual(0,cand.independent_source_count)
         self.assertEqual(CandidateState.PROPOSED, cand.state)
         self.assertEqual(frozenset({f'{self.domain}:restricted-candidate'}), cand.acl)
-        self.assertEqual((), cand.approvals)
         self.assertEqual(0, worker.run_once().submitted)
         # A new storage instance reads the same persisted restricted candidate.
         restarted_storage = PostgresKnowledgeStorage(get_test_dsn())
@@ -367,13 +366,24 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
             restored = restarted_storage.load_candidate(conn, cand.candidate_id)
             self.assertEqual(cand, restored)
         now = datetime.now(timezone.utc)
-        governance = KnowledgeGovernanceService(self.domain, restarted_storage)
-        with self.assertRaises(KnowledgeError):
-            governance.approve_candidate(cand, actor('security', Role.SECURITY_REVIEWER),
-                                         Role.SECURITY_REVIEWER, 'synthetic/security-review', now)
-        with self.assertRaises(KnowledgeError):
-            governance.publish_candidate(cand, actor('publisher', Role.PUBLISHER),
-                                          now + timedelta(days=90), now)
+        governance = KnowledgeGovernanceService(tenant_id=event.tenant, domain=self.domain,
+                                                storage=restarted_storage)
+        # Governance actions without a configured admin connection refuse with the
+        # fixed capability code instead of falling back to memory or old two-person flow.
+        with self.assertRaises(GovernanceError) as rejected:
+            governance.reject_candidate(str(cand.candidate_id), basis='synthetic/rejection',
+                                        context=AdminActionContext(
+                                            actor_id='admin', session_digest=sha256(b'session').hexdigest(),
+                                            tenant_id=event.tenant, domain=self.domain))
+        self.assertEqual('KNOWLEDGE_ADMIN_UNAVAILABLE', rejected.exception.code)
+        with self.assertRaises(GovernanceError) as rejected:
+            governance.publish_candidate(str(cand.candidate_id), expected_version=1, use='knowledge',
+                                         audiences=('reader',), valid_until=now + timedelta(days=1),
+                                         idempotency_key=None, basis='synthetic/publish',
+                                         context=AdminActionContext(
+                                             actor_id='admin', session_digest=sha256(b'session').hexdigest(),
+                                             tenant_id=event.tenant, domain=self.domain))
+        self.assertEqual('KNOWLEDGE_ADMIN_UNAVAILABLE', rejected.exception.code)
         with psycopg.connect(get_test_dsn()) as conn:
             restarted_storage.set_session_identity(conn, actor('reader'))
             with self.assertRaises(KnowledgeError):
