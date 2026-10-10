@@ -1,11 +1,14 @@
-"""Knowledge governance, review state machine, ACL scoping, and compilation (K-06, K-07, K-08, K-09, K-13).
+"""Knowledge governance, ACL scoping, publication, and compilation (K-07, K-08, K-09, K-13).
 
 Enforces:
-- K-06: Two-reviewer verification before publication (distinct reviewers & roles).
 - K-07: Derivative knowledge permission narrowing (source ACL intersection, never union/expansion).
 - K-08: Versioned JSONL output for authorized consumers with ACL filtering.
 - K-09: Compiling approved knowledge into runtime dictionary payloads.
 - K-13: Source invalidation cascade, tombstoning, and consumer receipt verification.
+
+Schema v2 removed the persisted two-reviewer approval flow; persisted governance
+mutations are bound to single-admin actions (see knowledge.storage). The local
+in-memory review bookkeeping below only supports non-persistent unit flows.
 """
 
 from __future__ import annotations
@@ -22,7 +25,6 @@ if TYPE_CHECKING:
 from detection.dictionary import DictionaryEntry, compute_dictionary_hash
 from infra.errors import SafetyCode, SafetyError
 from knowledge.knowledge import (
-    Approval,
     Candidate,
     CandidateState,
     Claim,
@@ -46,7 +48,8 @@ class KnowledgeGovernanceService:
     def __init__(self, domain: str, storage: PostgresKnowledgeStorage | None = None) -> None:
         self.domain = domain
         self.storage = storage
-        self._approvals: dict[UUID, tuple[Approval, ...]] = {}
+        self._approvals: dict[UUID, frozenset[Role]] = {}
+        self._reviewers: dict[UUID, frozenset[str]] = {}
         self._publications: dict[UUID, Publication] = {}
         self._revoked: set[UUID] = set()
         self._withdrawn_sources: set[tuple] = set()
@@ -80,7 +83,6 @@ class KnowledgeGovernanceService:
                 stored = self.storage.load_candidate(conn,candidate.candidate_id)
             if stored != candidate:
                 raise KnowledgeError('candidate differs from authoritative repository')
-            self._approvals[candidate.candidate_id] = stored.approvals
 
     def _active_publication(self, pub: Publication, now: datetime, actor: TrustedActor) -> bool:
         if self.storage:
@@ -132,7 +134,7 @@ class KnowledgeGovernanceService:
         return frozenset(effective_acl)
 
     # -------------------------------------------------------------------------
-    # K-06: Verification & Approval State Machine
+    # Local (non-persistent) review bookkeeping for unit flows
     # -------------------------------------------------------------------------
     def approve_candidate(
         self,
@@ -142,53 +144,34 @@ class KnowledgeGovernanceService:
         verification_ref: str,
         now: datetime | None = None,
     ) -> Candidate:
-        """Add an approval from an authorized reviewer.
+        """Record one verified review for non-persistent governance flows.
 
-        Requires distinct reviewers. Transitions to APPROVED when both
-        SECURITY_REVIEWER and BUSINESS_REVIEWER have approved.
+        The persisted two-reviewer approval table was removed with schema v2;
+        durable governance mutations are recorded as single-admin actions. This
+        in-memory bookkeeping remains only for callers without storage.
         """
         now = now or datetime.now(timezone.utc)
         self._validate(candidate, now)
         self._authorize(candidate, reviewer, role)
         self._stored_candidate(candidate,reviewer)
+        if self.storage:
+            raise KnowledgeError('persistent review approval requires the admin governance flow bound to schema v2')
         if role not in (Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER) or not verification_ref.strip():
             raise KnowledgeError('review requires approved role and verification record')
-        if candidate.approvals != self._approvals.get(candidate.candidate_id, ()):
-            raise KnowledgeError('unverified approval history')
         if candidate.state != CandidateState.PROPOSED:
             raise KnowledgeError(f"cannot approve candidate in state {candidate.state}")
 
-        # Check for duplicate approval from same reviewer or same role
-        for existing in candidate.approvals:
-            if existing.reviewer_id == reviewer.subject_id:
-                raise KnowledgeError(f"reviewer {reviewer.subject_id} has already approved this candidate")
-            if existing.role == role:
-                raise KnowledgeError(f"role {role} has already been fulfilled by reviewer {existing.reviewer_id}")
+        recorded_roles = self._approvals.setdefault(candidate.candidate_id, frozenset())
+        recorded_reviewers = self._reviewers.setdefault(candidate.candidate_id, frozenset())
+        if reviewer.subject_id in recorded_reviewers:
+            raise KnowledgeError(f"reviewer {reviewer.subject_id} has already approved this candidate")
+        if role in recorded_roles:
+            raise KnowledgeError(f"role {role} has already been fulfilled for this candidate")
+        updated_roles = frozenset((*recorded_roles, role))
+        self._approvals[candidate.candidate_id] = updated_roles
+        self._reviewers[candidate.candidate_id] = frozenset((*recorded_reviewers, reviewer.subject_id))
 
-        if now is None:
-            now = datetime.now(timezone.utc)
-
-        new_approval = Approval(
-            reviewer_id=reviewer.subject_id,
-            role=role,
-            verification_ref=verification_ref,
-            approved_at=now,
-        )
-        updated_approvals = tuple(sorted((*candidate.approvals,new_approval),
-                                 key=lambda approval: 0 if approval.role == Role.SECURITY_REVIEWER else 1))
-        if self.storage:
-            import psycopg
-            with psycopg.connect(self.storage.connection_uri) as conn:
-                self.storage.set_session_identity(conn,reviewer)
-                self.storage.save_approval(conn,candidate.candidate_id,new_approval)
-        self._approvals[candidate.candidate_id] = updated_approvals
-
-        # Check if requirements for APPROVED are satisfied:
-        # Must have both SECURITY_REVIEWER and BUSINESS_REVIEWER
-        roles_present = {app.role for app in updated_approvals}
-        is_approved = Role.SECURITY_REVIEWER in roles_present and Role.BUSINESS_REVIEWER in roles_present
-        new_state = CandidateState.APPROVED if is_approved else CandidateState.PROPOSED
-
+        new_state = CandidateState.APPROVED if updated_roles == {Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER} else CandidateState.PROPOSED
         return Candidate(
             candidate_id=candidate.candidate_id,
             claim=candidate.claim,
@@ -196,7 +179,6 @@ class KnowledgeGovernanceService:
             acl=candidate.acl,
             purpose=candidate.purpose,
             state=new_state,
-            approvals=updated_approvals,
             rejection_reason=candidate.rejection_reason,
         )
 
@@ -227,7 +209,6 @@ class KnowledgeGovernanceService:
             acl=candidate.acl,
             purpose=candidate.purpose,
             state=CandidateState.REJECTED,
-            approvals=candidate.approvals,
             rejection_reason=reason,
         )
 
@@ -238,23 +219,21 @@ class KnowledgeGovernanceService:
         valid_until: datetime,
         now: datetime | None = None,
     ) -> tuple[Publication, Candidate]:
-        """Publish a fully approved candidate. Fails if candidate is not in APPROVED state."""
+        """Publish a verified candidate. Fails if the candidate is not active."""
         now = now or datetime.now(timezone.utc)
         self._validate(candidate, now)
         self._authorize(candidate, publisher, Role.PUBLISHER)
         self._stored_candidate(candidate,publisher)
-        if candidate.state != CandidateState.APPROVED:
-            raise KnowledgeError(f"candidate must be in state APPROVED to publish, got {candidate.state}")
+        if candidate.state in (CandidateState.REJECTED, CandidateState.WITHDRAWN):
+            raise KnowledgeError(f"candidate must be active to publish, got {candidate.state}")
+        recorded = self._approvals.get(candidate.candidate_id, frozenset())
+        if candidate.state != CandidateState.APPROVED or recorded != {Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER}:
+            raise KnowledgeError('publication requires verified distinct reviews')
 
         if now is None:
             now = datetime.now(timezone.utc)
         if valid_until <= now:
             raise KnowledgeError("publication valid_until must be strictly in the future")
-        approvals = self._approvals.get(candidate.candidate_id, ())
-        if candidate.approvals != approvals or len(approvals) != 2 or {a.role for a in approvals} != {Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER}:
-            raise KnowledgeError('publication requires two verified distinct approvals')
-        if any(a.approved_at > now for a in approvals):
-            raise KnowledgeError('publication predates approval')
         if candidate.claim.modality != Modality.ASSERTED or candidate.claim.predicate == Predicate.CO_OCCURS_WITH:
             raise KnowledgeError('only verified asserted business facts publish')
         if all(ev.source.source_kind == SourceKind.MODEL_OUTPUT for ev in candidate.evidence):
@@ -281,15 +260,9 @@ class KnowledgeGovernanceService:
             acl=candidate.acl,
             purpose=candidate.purpose,
             state=CandidateState.PUBLISHED,
-            approvals=candidate.approvals,
         )
         if self.storage:
-            import psycopg
-            with psycopg.connect(self.storage.connection_uri) as conn:
-                self.storage.set_session_identity(conn,publisher)
-                claim_id = conn.execute('SELECT claim_id FROM knowledge_candidates WHERE candidate_id=%s',
-                                        (candidate.candidate_id,)).fetchone()[0]
-                self.storage.publish_transactional(conn,publication,claim_id)
+            raise KnowledgeError('persistent publication requires the admin governance flow bound to schema v2')
         self._publications[pub_id] = publication
         return publication, updated_candidate
 

@@ -1,4 +1,8 @@
-"""Tests for knowledge governance, review state machine, ACL scoping, and compilation (K-06, K-07, K-08, K-09, K-13)."""
+"""Tests for knowledge governance, review state machine, ACL scoping, and compilation (K-06, K-07, K-08, K-09, K-13).
+
+The persisted two-reviewer approval table was removed with schema v2; the local
+review bookkeeping exercised here is non-persistent and only supports unit flows.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,6 @@ from uuid import uuid4
 from detection.dictionary import compile_dictionary
 from knowledge.governance import KnowledgeGovernanceService
 from knowledge.knowledge import (
-    Approval,
     Candidate,
     CandidateState,
     Claim,
@@ -118,8 +121,8 @@ class TestKnowledgeGovernance(unittest.TestCase):
         with self.assertRaises(KnowledgeError):
             self.service.compute_derived_acl([ev1, ev_disjoint])
 
-    def test_k06_two_reviewer_state_machine_and_publishing(self) -> None:
-        """K-06: Candidate requires two distinct reviewers before publishing."""
+    def test_k06_local_review_state_machine_and_publishing(self) -> None:
+        """Local (non-persistent) review bookkeeping transitions proposed -> approved -> published."""
         ev = Evidence(self.source1, "a" * 64, 0, 10)
         candidate = Candidate(
             candidate_id=uuid4(),
@@ -135,9 +138,8 @@ class TestKnowledgeGovernance(unittest.TestCase):
             candidate, self.sec_reviewer, Role.SECURITY_REVIEWER, "audit-sec"
         )
         self.assertEqual(CandidateState.PROPOSED, c1.state)
-        self.assertEqual(1, len(c1.approvals))
 
-        # Duplicate approval from same reviewer fails
+        # A second review from an already-recorded reviewer fails
         with self.assertRaises(KnowledgeError):
             self.service.approve_candidate(
                 c1, self.sec_reviewer, Role.BUSINESS_REVIEWER, "audit-dup"
@@ -154,7 +156,6 @@ class TestKnowledgeGovernance(unittest.TestCase):
             c1, self.biz_reviewer, Role.BUSINESS_REVIEWER, "audit-biz"
         )
         self.assertEqual(CandidateState.APPROVED, c2.state)
-        self.assertEqual(2, len(c2.approvals))
 
         # 3. Publish approved candidate
         pub, published_candidate = self.service.publish_candidate(

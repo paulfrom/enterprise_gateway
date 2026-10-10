@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import psycopg
 
+from knowledge.storage import KnowledgeSchemaError
+
 
 class DatabaseRoleError(RuntimeError):
     """Static public role-validation failure, without connection details."""
@@ -49,3 +51,16 @@ def assert_restricted_application_role(
     ).fetchone()[0]
     if global_role:
         raise DatabaseRoleError("application_has_global_predefined_role")
+
+
+def assert_no_privilege_path(conn: psycopg.Connection, *, role: str, forbidden_role: str) -> None:
+    """Assert `role` has no GRANT/INHERIT path to `forbidden_role` (pg_auth_members closure)."""
+    row = conn.execute(
+        "WITH RECURSIVE chain(rolname) AS ("
+        " SELECT %s::name UNION"
+        " SELECT m.rolname FROM pg_auth_members am"
+        " JOIN pg_roles r ON r.oid=am.member JOIN pg_roles m ON m.oid=am.roleid"
+        " JOIN chain c ON c.rolname=r.rolname)"
+        " SELECT count(*) FROM chain WHERE rolname=%s", (role, forbidden_role)).fetchone()
+    if row[0]:
+        raise KnowledgeSchemaError(f'KNOWLEDGE_ROLE_PATH_FORBIDDEN:{role}->{forbidden_role}')

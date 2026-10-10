@@ -2,7 +2,7 @@
 
 Callers must authenticate identities and verify source metadata before constructing
 these contracts. Real entity names and relation claims remain sensitive data.
-Publication requires two distinct reviewers; consumers must apply tombstones.
+Publication is bound to verified governance actions; consumers must apply tombstones.
 """
 
 from dataclasses import dataclass, replace
@@ -193,14 +193,6 @@ class Claim:
 
 
 @dataclass(frozen=True)
-class Approval:
-    reviewer_id: str
-    role: Role
-    verification_ref: str
-    approved_at: datetime
-
-
-@dataclass(frozen=True)
 class Candidate:
     candidate_id: UUID
     claim: Claim
@@ -208,7 +200,6 @@ class Candidate:
     acl: frozenset[str]
     purpose: str
     state: CandidateState = CandidateState.PROPOSED
-    approvals: tuple[Approval, ...] = ()
     rejection_reason: str | None = None
 
     @property
@@ -317,33 +308,12 @@ class KnowledgeLedger:
         if any(item.source.observed_at > now or item.source.retention_until <= now or item.source.key in self._withdrawn_sources
                for item in candidate.evidence):
             raise KnowledgeError("candidate evidence is future-dated, expired, or withdrawn")
-        if any(approval.approved_at > now for approval in candidate.approvals):
-            raise KnowledgeError("command predates an existing review")
 
     def _authorize(self, candidate: Candidate, actor: TrustedActor, role: Role) -> None:
         if (actor.tenant_id, actor.domain) != (candidate.claim.subject.tenant_id, candidate.claim.subject.domain):
             raise KnowledgeError("actor scope mismatch")
         if role not in actor.roles or actor.subject_id not in candidate.acl or candidate.purpose not in actor.purposes:
             raise KnowledgeError("actor lacks role, source access, or purpose authorization")
-
-    def approve(self, candidate_id: UUID, actor: TrustedActor, role: Role,
-                verification_ref: str, now: datetime) -> Candidate:
-        candidate = self._candidate(candidate_id)
-        self._live(candidate, now)
-        if candidate.state != CandidateState.PROPOSED:
-            raise KnowledgeError("only proposed candidates accept reviews")
-        if role not in (Role.SECURITY_REVIEWER, Role.BUSINESS_REVIEWER):
-            raise KnowledgeError("a security or business review is required")
-        self._authorize(candidate, actor, role)
-        if not verification_ref.strip():
-            raise KnowledgeError("review requires an external verification record")
-        if any(review.reviewer_id == actor.subject_id or review.role == role for review in candidate.approvals):
-            raise KnowledgeError("reviews require distinct people and distinct roles")
-        approvals = (*candidate.approvals, Approval(actor.subject_id, role, verification_ref, now))
-        candidate = replace(candidate, approvals=approvals,
-                            state=CandidateState.APPROVED if len(approvals) == 2 else CandidateState.PROPOSED)
-        self._candidates[candidate_id] = candidate
-        return candidate
 
     def reject(self, candidate_id: UUID, actor: TrustedActor, reason: str, now: datetime) -> Candidate:
         candidate = self._candidate(candidate_id)
@@ -359,8 +329,6 @@ class KnowledgeLedger:
         candidate = self._candidate(candidate_id)
         self._live(candidate, now)
         self._authorize(candidate, actor, Role.PUBLISHER)
-        if candidate.state != CandidateState.APPROVED:
-            raise KnowledgeError("publication requires two verified approvals")
         if candidate.claim.predicate == Predicate.CO_OCCURS_WITH or candidate.claim.modality != Modality.ASSERTED:
             raise KnowledgeError("co-occurrence and hypothetical content remain candidates")
         if all(item.source.source_kind == SourceKind.MODEL_OUTPUT for item in candidate.evidence):
