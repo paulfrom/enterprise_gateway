@@ -22,9 +22,9 @@
 
 - `check_ready()`：实际校验受限角色、独立历史表的 forced RLS/不可达 owner、作用域与 KMS。失败拒绝，不能创建缺失结构或补建旧 Key。
 - `begin(*, protocol, model, raw_body: bytes) -> HistoryRecorder`：生成 request_id，事务保存 processing 元数据及 input 加密正文。
-- `list_requests(*, limit=50, cursor=None, query='', status=None) -> dict`：返回 `{items: [...], next_cursor: str|null}`，只搜索模型/协议/请求ID等元数据；排除过期记录。
-- `get_request(request_id) -> dict`：返回单请求元数据和四阶段 `{stage, state, media_type, body}`（body为UTF-8文本，未产生时null）。核对密文绑定，授权读取留痕可靠完成后再次校验期限再释放正文。
-- `audit_access(*, operation, request_id=None, outcome)`：仅持久保存操作者（actor=admin）及会话关联摘要、静态操作/结果、随机审计ID、请求ID、时间、固定作用域；不写查询文本、正文、密码或会话令牌。
+- `list_requests(*, limit=50, cursor=None, model=None, protocol=None, status=None, error_code=None, created_after=None, created_before=None, actor=None, session_reference=None) -> dict`：返回 `{items: [...], next_cursor: str|null}`，仅按模型/协议/状态/错误码/时间窗等白名单元数据精确筛选，无正文搜索参数；排除过期记录。
+- `get_request(request_id, *, actor=None, session_reference=None) -> dict`：返回单请求元数据和四阶段 `{stage, state, media_type, body}`（body为UTF-8文本，未产生时null）。核对密文绑定，授权读取留痕可靠完成后再次校验期限再释放正文。
+- `audit_access(*, operation, request_id=None, outcome, actor=None, session_reference=None)`：仅持久保存操作者（actor=admin）及会话关联摘要、静态操作/结果、随机审计ID、请求ID、时间、固定作用域；不写查询文本、正文、密码或会话令牌。
 - `purge_expired() -> int`：限定本装配域，事务删除过期历史及正文；不触碰知识表。提交前审计仅记attempted，返回值证明提交成功；失败不据attempted推断删除已发生。在线物理删除不等于全部备份密码学销毁。
 
 `HistoryRecorder` 有 `.request_id`、`.write(stage, body: bytes, *, media_type='application/json', state='complete', append=False)`、`.write_many(updates)`、`.finish(status, error_code=None)`。updates为字典列表，每项含stage/body及上述选项。Recorder累计大小有界，append累计真实字节；write_many原子保存各阶段快照。写失败不得静默继续。finish不得把未产生阶段补造成空的成功文本；重复终态不能改写已完成记录。
@@ -33,7 +33,7 @@
 
 ## HTTP及网页
 
-管理页面 `GET /admin/requests` 及 `/admin` 壳内静态资源受管理员会话保护，未登录跳转 `/login`。数据接口 `GET /api/admin/requests` 接受 limit/cursor/q/status 及时间/模型/协议/状态/错误码筛选；`GET /api/admin/requests/{request_id}` 读取详情。两类查询只接受同源管理员会话 Cookie 及统一管理员依赖校验，写操作另校验会话绑定 CSRF token；拒绝无会话、伪造或过期会话，不把供应商 Key 或客户端自报头升级为查询授权。旧 `/history`、`/api/requests` 路由及独立查询 Key 入口整体删除，不保留重定向、兼容路径或另一套匿名入口。
+管理页面 `GET /admin/requests` 及 `/admin` 壳内静态资源受管理员会话保护，未登录跳转 `/login`。数据接口 `GET /api/admin/requests` 接受 limit/cursor 及时间/模型/协议/状态/错误码白名单元数据筛选（无正文搜索参数，非法筛选值返回 422）；`GET /api/admin/requests/{request_id}` 读取详情。两类查询只接受同源管理员会话 Cookie 及统一管理员依赖校验，写操作另校验会话绑定 CSRF token；拒绝无会话、伪造或过期会话，不把供应商 Key 或客户端自报头升级为查询授权。旧 `/history`、`/api/requests` 路由及独立查询 Key 入口整体删除，不保留重定向、兼容路径或另一套匿名入口。
 
 API正文和页面使用 no-store，设置同源CSP、nosniff、frame-ancestors none等响应边界。错误固定净化；数据库/KMS/访问审计失败拒绝释放正文。网页只使用textContent及文本节点呈现模型输出，不解释模型HTML；支持真实空列表、错误、过期、部分/未知阶段。管理员默认直接查看全部可用阶段的实际正文，不再提供"显示原文"遮挡开关；退出、401 或会话失效时清除页面正文并取消在途请求。模型调用返回服务端 `x-request-id`，便于定位该次记录。
 

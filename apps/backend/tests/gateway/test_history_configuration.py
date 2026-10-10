@@ -37,7 +37,6 @@ class HistoryConfigurationTests(unittest.TestCase):
 
     def settings(self):
         return {"GATEWAY_HISTORY_PG_DSN": "synthetic-dsn",
-                "GATEWAY_HISTORY_READ_KEY": "ab" * 32,
                 "GATEWAY_HISTORY_RETENTION_DAYS": "1",
                 "GATEWAY_HISTORY_BUCKET": "synthetic-history"}
 
@@ -58,8 +57,8 @@ class HistoryConfigurationTests(unittest.TestCase):
     def test_complete_group_and_exclusive_secret_sources(self):
         config = self.settings()
         with patch.dict(os.environ, config, clear=True):
-            self.assertEqual(launcher._history_spec()['read_key'], bytes.fromhex('ab' * 32))
-        config['GATEWAY_HISTORY_READ_KEY_FILE'] = 'synthetic-secret-file'
+            self.assertEqual(launcher._history_spec()['connection_uri'], 'synthetic-dsn')
+        config['GATEWAY_HISTORY_PG_DSN_FILE'] = 'synthetic-secret-file'
         with patch.dict(os.environ, config, clear=True), self.assertRaises(SafetyError):
             launcher._history_spec()
 

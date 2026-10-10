@@ -1,6 +1,7 @@
 """Observable four-stage behavior and fail-closed plaintext retrieval."""
 import json
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import tempfile
@@ -72,10 +73,17 @@ class HistoryLocalTests(unittest.TestCase):
     def test_durable_audit_contains_only_whitelisted_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.store(directory)
-            store.audit_access(operation='get',request_id=str(uuid4()),outcome='success')
+            store.audit_access(operation='get',request_id=str(uuid4()),outcome='success',
+                               actor='admin',session_reference='ab'*8)
             document = json.loads(next(Path(directory).glob('*.json')).read_text(encoding='utf-8'))
-            self.assertEqual({'audit_id','operation','outcome','request_id','tenant_id','domain','created_at'},set(document))
-            for options in (dict(operation='body-secret',outcome='success'),dict(operation='get',outcome='secret')):
+            self.assertEqual({'audit_id','operation','outcome','request_id','tenant_id','domain',
+                              'actor','session_reference','created_at'},set(document))
+            self.assertEqual('admin',document['actor'])
+            self.assertEqual('ab'*8,document['session_reference'])
+            for options in (dict(operation='body-secret',outcome='success'),
+                            dict(operation='get',outcome='secret'),
+                            dict(operation='get',outcome='success',actor='root'),
+                            dict(operation='get',outcome='success',session_reference='not-hex-ref')):
                 with self.assertRaises(HistoryUnavailable):
                     store.audit_access(**options)
 
@@ -183,7 +191,7 @@ class HistoryPostgresTests(unittest.TestCase):
         self.assertEqual('a'*1024+'b'*1024,detail['stages'][2]['body'])
         self.assertIsNone(detail['stages'][3]['body'])
 
-    def test_cursor_status_metadata_only_search_and_all_domain_records(self):
+    def test_cursor_status_and_metadata_filters_cover_all_domain_records(self):
         first = self.begin(model='synthetic-alpha')
         first.finish('blocked','SECRET_DETECTED')
         second = self.begin(model='synthetic-beta')
@@ -195,9 +203,22 @@ class HistoryPostgresTests(unittest.TestCase):
         self.assertEqual(first.request_id,following['items'][0]['request_id'])
         self.assertIsNone(following['next_cursor'])
         self.assertEqual([first.request_id],[r['request_id'] for r in self.store.list_requests(status='blocked')['items']])
-        self.assertEqual([second.request_id],[r['request_id'] for r in self.store.list_requests(query='beta')['items']])
-        self.assertEqual([],self.store.list_requests(query='synthetic-sensitive-text')['items'])
-        for options in (dict(cursor='malformed'),dict(limit=True),dict(status='synthetic-body')):
+        self.assertEqual([second.request_id],[r['request_id'] for r in self.store.list_requests(model='synthetic-beta')['items']])
+        self.assertEqual([first.request_id],[r['request_id'] for r in self.store.list_requests(error_code='SECRET_DETECTED')['items']])
+        self.assertEqual(sorted([first.request_id,second.request_id]),
+                         sorted(r['request_id'] for r in self.store.list_requests(protocol=PROTOCOL)['items']))
+        # Body content is never a filter input; only recorded metadata matches.
+        self.assertEqual([],self.store.list_requests(model='synthetic-sensitive-text')['items'])
+        future = datetime.now(timezone.utc)+timedelta(days=1)
+        past = datetime.now(timezone.utc)-timedelta(days=1)
+        self.assertEqual(2,len(self.store.list_requests(created_after=past)['items']))
+        self.assertEqual([],self.store.list_requests(created_after=future)['items'])
+        self.assertEqual(2,len(self.store.list_requests(created_before=future)['items']))
+        self.assertEqual([],self.store.list_requests(created_after=past,created_before=past)['items'])
+        for options in (dict(cursor='malformed'),dict(limit=True),dict(status='synthetic-body'),
+                        dict(model=''),dict(protocol='unknown'),dict(error_code='NOPE'),
+                        dict(created_after='not-a-moment'),dict(created_after=datetime.now()),
+                        dict(created_after=future,created_before=past)):
             with self.assertRaises(HistoryUnavailable):
                 self.store.list_requests(**options)
 

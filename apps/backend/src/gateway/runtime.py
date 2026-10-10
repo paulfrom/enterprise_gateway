@@ -39,7 +39,7 @@ def create_runtime_app(
     package_version: str = "runtime-v1", ner_timeout: float = DEFAULT_NER_TIMEOUT,
     max_body_bytes: int = 1048576, transport: httpx.BaseTransport | None = None,
     resolver: Resolver | None = None,
-    history_store=None, history_read_key: bytes | None = None,
+    history_store=None, admin_service=None,
     client_profile: str = 'compatible',
     detection_failure_mode: str = 'error',
     quick_screen: QuickScreenConfig | None = None,
@@ -50,8 +50,6 @@ def create_runtime_app(
     clients and the real disk probe. Supplier configuration is read once.
     """
     configs = load_provider_configs(provider_config_path)
-    if (history_store is None) != (history_read_key is None):
-        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "complete history assembly required")
     if history_store is not None:
         if history_store.domain != domain or history_store.tenant_id != tenant_id:
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "history assembly scope")
@@ -99,10 +97,8 @@ def create_runtime_app(
         router = ProviderRouter(by_model)
         app = create_app(router=router, authenticator=authenticator,
                          classifier=classifier, hmac_key=hmac_key,
-                         history_store=history_store, client_profile=client_profile)
-        if history_store is not None:
-            from gateway.history_api import install_history_routes
-            install_history_routes(app, history_store, history_read_key)
+                         history_store=history_store, admin_service=admin_service,
+                         client_profile=client_profile)
 
         def close_resources():
             try:

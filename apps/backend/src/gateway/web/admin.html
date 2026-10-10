@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>请求历史 · 管理控制台 · 企业隐私网关</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <link rel="stylesheet" href="/admin/assets/history.css">
+  <script src="/admin/assets/admin-session.js" defer></script>
+  <script src="/admin/assets/admin.js" defer></script>
+  <script src="/admin/assets/history.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar" aria-label="管理导航与请求历史">
+    <div class="brand"><svg class="brand-mark" viewBox="0 0 34 40" fill="none" aria-hidden="true"><path d="M17 2 31 8v11c0 8-5 14-14 19C8 33 3 27 3 19V8L17 2Z" stroke="currentColor" stroke-width="1.2"/><path d="M10 18h14M10 23h9M12 12h10" stroke="currentColor" stroke-width="1.2"/></svg><div><div class="brand-name">管理控制台</div><div class="brand-sub">ENTERPRISE GATEWAY</div></div></div>
+    <nav class="admin-nav" aria-label="管理导航">
+      <span class="nav-label">管理能力</span>
+      <a class="nav-link" id="nav-requests" href="/admin/requests">请求历史</a>
+    </nav>
+    <div class="history-top"><h2>全部请求</h2><span class="history-actions"><button id="refresh-history" class="sidebar-refresh" type="button">刷新</button><span class="history-count" id="history-count"></span></span></div>
+    <form id="history-filters" class="filters" novalidate>
+      <div class="filter-field"><label for="filter-model">模型</label><input id="filter-model" type="text" placeholder="按模型精确筛选" autocomplete="off" spellcheck="false"></div>
+      <div class="filter-field"><label for="filter-protocol">协议</label><select id="filter-protocol"><option value="">全部协议</option><option value="deepseek-chat-completions">deepseek-chat-completions</option><option value="claude-messages">claude-messages</option></select></div>
+      <div class="filter-field"><label for="filter-status">状态</label><select id="filter-status"><option value="">全部状态</option><option value="processing">进行中</option><option value="completed">完成</option><option value="partial">部分内容</option><option value="blocked">被阻断</option><option value="failed">失败</option></select></div>
+      <div class="filter-field"><label for="filter-error-code">错误码</label><input id="filter-error-code" type="text" placeholder="如 UPSTREAM_FAILED" autocomplete="off" spellcheck="false"></div>
+      <div class="filter-field"><label for="filter-created-after">开始时间</label><input id="filter-created-after" type="datetime-local" step="1"></div>
+      <div class="filter-field"><label for="filter-created-before">结束时间</label><input id="filter-created-before" type="datetime-local" step="1"></div>
+      <div class="filter-actions"><button type="submit" class="filter-apply">应用筛选</button><button type="button" class="filter-reset" id="filter-reset">清除</button></div>
+    </form>
+    <p id="filter-error" class="filter-error" role="alert" hidden></p>
+    <div class="request-list" id="request-list"><p class="sidebar-empty">正在读取请求历史…</p></div>
+    <button id="load-more" class="load-more" type="button" hidden>加载更多</button>
+    <div class="sidebar-footer"><div class="footer-rule"></div><p>每一段文本，都有来处。<br>沿着处理链路，查看输入与输出，<br>理解一次请求的完整旅程。</p></div>
+  </aside>
+  <main class="workspace">
+    <div class="page-top"><div class="breadcrumb">管理控制台<span>/</span>请求历史</div><div id="session-bar" class="session-bar"><span id="session-identity" class="session-identity"></span><button id="logout-button" type="button" class="exit-button">退出登录</button></div></div>
+    <div class="hero"><div><div class="eyebrow">REQUEST JOURNEY</div><h1>让文本变化，清晰可见。</h1><p class="hero-sub">一次请求，四段文本。查看输入、脱敏外发、模型返回与还原输出。</p></div><div class="hero-stamp" aria-hidden="true">04</div></div>
+    <section id="record-content" aria-label="选中请求的四阶段文本"></section>
+    <div class="security-note"><span><strong>审计提示</strong>　管理员读取历史正文会留下服务端审计记录。</span><span>最终输出表示网关已生成的内容，不代表客户端已完整接收。</span></div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="sr-only" id="selection-status" role="status" aria-live="polite"></div>
+</body>
+</html>

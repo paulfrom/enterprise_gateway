@@ -52,11 +52,9 @@ if [ "${HEALTH_OK}" -eq 1 ]; then
   if [ "${PRIMARY_IP}" != "127.0.0.1" ]; then
     echo "    - 局域网地址: http://${PRIMARY_IP}:${GATEWAY_PUBLISHED_PORT}"
   fi
-  if curl -sf -o /dev/null "http://127.0.0.1:${GATEWAY_PUBLISHED_PORT}/history"; then
-    echo "    - 历史查询:   http://${PRIMARY_IP}:${GATEWAY_PUBLISHED_PORT}/history"
-    if [ -f "${ROOT_DIR}/.runtime_state/local/secrets/history_read.key" ]; then
-      echo "      (查询 Key 位于 .runtime_state/local/secrets/history_read.key，不回显；请用 cat 自行查看)"
-    fi
+  if curl -sf -o /dev/null "http://127.0.0.1:${GATEWAY_PUBLISHED_PORT}/login"; then
+    echo "    - 管理员登录: http://${PRIMARY_IP}:${GATEWAY_PUBLISHED_PORT}/login"
+    echo "      (管理员状态初始化见 apps/backend/scripts/prepare_admin_state.py)"
   fi
 else
   echo "==> 网关启动耗时较长，请检查容器运行状态。"

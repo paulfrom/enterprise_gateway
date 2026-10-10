@@ -45,6 +45,20 @@ def _metadata(row) -> dict:
             'status': row[5], 'error_code': row[6]}
 
 
+def _aware(value) -> bool:
+    return (isinstance(value, datetime) and value.tzinfo is not None
+            and value.utcoffset() is not None)
+
+
+def _session_reference(value) -> bool:
+    if not isinstance(value, str) or len(value) != 16 or value != value.lower():
+        return False
+    try:
+        return len(bytes.fromhex(value)) == 8
+    except ValueError:
+        return False
+
+
 class PostgresHistoryStore:
     """Bound service tenant/domain, never supplier credentials or employee identity."""
 
@@ -163,17 +177,23 @@ class PostgresHistoryStore:
             pass
         raise HistoryUnavailable()
 
-    def audit_access(self, *, operation: str, request_id=None, outcome: str) -> None:
+    def audit_access(self, *, operation: str, request_id=None, outcome: str,
+                     actor: str | None = None, session_reference: str | None = None) -> None:
         try:
             if operation not in {'readiness','list','get','purge','authenticate'} or outcome not in {
                 'success','denied','not_found','unavailable','failure','attempted',
             }:
+                raise HistoryUnavailable()
+            if actor is not None and actor != 'admin':
+                raise HistoryUnavailable()
+            if session_reference is not None and not _session_reference(session_reference):
                 raise HistoryUnavailable()
             request_id = None if request_id is None else _canonical_id(request_id)
             self._check_audit_directory()
             audit_id = str(uuid4())
             document = json.dumps({'audit_id':audit_id,'operation':operation,'outcome':outcome,
                                    'request_id':request_id,'tenant_id':self.tenant_id,'domain':self.domain,
+                                   'actor':actor,'session_reference':session_reference,
                                    'created_at':datetime.now(timezone.utc).isoformat()},
                                   ensure_ascii=False,separators=(',',':')).encode('utf-8')
             durable_commit(self._audit_directory,audit_id+'.json',document)
@@ -182,20 +202,41 @@ class PostgresHistoryStore:
             pass
         raise HistoryUnavailable()
 
-    def list_requests(self, *, limit=50, cursor=None, query='', status=None) -> dict:
+    def list_requests(self, *, limit=50, cursor=None, model=None, protocol=None,
+                      status=None, error_code=None, created_after=None, created_before=None,
+                      actor=None, session_reference=None) -> dict:
+        """Metadata-only admin filters over every record in the bound scope."""
         try:
-            if (type(limit) is not int or not 1<=limit<=100 or not isinstance(query,str)
-                    or len(query)>256 or status is not None and status not in STATUSES):
+            if (type(limit) is not int or not 1<=limit<=100
+                    or model is not None and (not isinstance(model,str) or not 1<=len(model)<=256)
+                    or protocol is not None and protocol not in PROTOCOLS
+                    or status is not None and status not in STATUSES
+                    or error_code is not None and error_code not in ERROR_CODES
+                    or created_after is not None and not _aware(created_after)
+                    or created_before is not None and not _aware(created_before)
+                    or (created_after is not None and created_before is not None
+                        and created_after>created_before)):
                 raise HistoryUnavailable()
             params = []
             where = ['expires_at>clock_timestamp()']
+            if model is not None:
+                where.append('model=%s')
+                params.append(model)
+            if protocol is not None:
+                where.append('protocol=%s')
+                params.append(protocol)
             if status is not None:
                 where.append('status=%s')
                 params.append(status)
-            if query:
-                where.append("(strpos(lower(model),lower(%s))>0 OR strpos(lower(protocol),lower(%s))>0 "
-                             "OR strpos(request_id::text,%s)>0)")
-                params.extend([query,query,query])
+            if error_code is not None:
+                where.append('error_code=%s')
+                params.append(error_code)
+            if created_after is not None:
+                where.append('created_at>=%s')
+                params.append(created_after)
+            if created_before is not None:
+                where.append('created_at<=%s')
+                params.append(created_before)
             if cursor is not None:
                 if not isinstance(cursor,str) or len(cursor)>512:
                     raise HistoryUnavailable()
@@ -218,17 +259,19 @@ class PostgresHistoryStore:
                 final = rows[limit-1]
                 next_cursor = base64.urlsafe_b64encode(json.dumps(
                     [final[3].isoformat(),str(final[0])],separators=(',',':')).encode()).decode().rstrip('=')
-            self.audit_access(operation='list',outcome='success')
+            self.audit_access(operation='list',outcome='success',actor=actor,
+                              session_reference=session_reference)
             return {'items':items,'next_cursor':next_cursor}
         except Exception:
             pass
         raise HistoryUnavailable()
 
-    def get_request(self, request_id) -> dict:
+    def get_request(self, request_id, *, actor=None, session_reference=None) -> dict:
         try:
             identifier = _canonical_id(request_id)
         except HistoryNotFound:
-            self.audit_access(operation='get',outcome='not_found')
+            self.audit_access(operation='get',outcome='not_found',actor=actor,
+                              session_reference=session_reference)
             raise HistoryNotFound() from None
         missing = False
         failed = False
@@ -249,7 +292,8 @@ class PostgresHistoryStore:
                     result = _metadata(row)
                     result['stages'] = [by_stage.get(stage,{'stage':stage,'state':'not_produced',
                                                           'media_type':None,'body':None}) for stage in STAGES]
-                    self.audit_access(operation='get',request_id=identifier,outcome='success')
+                    self.audit_access(operation='get',request_id=identifier,outcome='success',
+                                      actor=actor,session_reference=session_reference)
                     # Use database clock after audit fsync/KMS, not an earlier application timestamp.
                     if not conn.execute('SELECT 1 FROM request_records WHERE request_id=%s '
                                         'AND expires_at>clock_timestamp()', (identifier,)).fetchone():
@@ -260,7 +304,8 @@ class PostgresHistoryStore:
             failed = True
         if failed:
             raise HistoryUnavailable()
-        self.audit_access(operation='get',request_id=identifier,outcome='not_found')
+        self.audit_access(operation='get',request_id=identifier,outcome='not_found',
+                          actor=actor,session_reference=session_reference)
         raise HistoryNotFound()
 
     def purge_expired(self) -> int:
