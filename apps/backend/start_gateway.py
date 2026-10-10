@@ -109,17 +109,25 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
     from knowledge.governance import KnowledgeGovernanceService
     from knowledge.database_security import assert_restricted_application_role
 
+    def assert_no_owned_objects(connection):
+        # Ownership is not part of the v2 fingerprint. Every protected object's
+        # owner, including schema/functions/sequences, must remain unreachable.
+        owner_path = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM ("
+            " SELECT relowner AS owner FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
+            " UNION SELECT proowner FROM pg_proc WHERE pronamespace=current_schema()::regnamespace"
+            " UNION SELECT nspowner FROM pg_namespace WHERE oid=current_schema()::regnamespace"
+            ") owners WHERE pg_has_role(current_user,owner,'MEMBER'))").fetchone()[0]
+        if owner_path:
+            raise ValueError('management role must not reach protected object owners')
+
     def connect():
         # Keep DSN options (notably search_path) intact; timeouts are session GUCs.
         connection = psycopg.connect(spec['connection_uri'], connect_timeout=5)
         try:
             assert_restricted_application_role(connection)
             role = connection.execute('SELECT current_user').fetchone()[0]
-            owner_path = connection.execute(
-                "SELECT EXISTS(SELECT 1 FROM pg_class WHERE relname='knowledge_sources' "
-                "AND relnamespace=current_schema()::regnamespace AND pg_has_role(current_user,relowner,'MEMBER'))").fetchone()[0]
-            if owner_path:
-                raise ValueError('management role must not reach schema owner')
+            assert_no_owned_objects(connection)
             connection.rollback()
             for setting in ('statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'):
                 connection.execute("SELECT set_config(%s,'5000',false)", (setting,))
@@ -159,6 +167,8 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
                     if role != self.admin_role:
                         connection.close()
                         raise ValueError('management role changed')
+                assert_restricted_application_role(connection, expected_role=self.admin_role)
+                assert_no_owned_objects(connection)
                 connection.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.admin_role)))
                 connection.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
                 connection.execute("SELECT set_config('app.domain',%s,true)", (domain,))

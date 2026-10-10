@@ -893,6 +893,51 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
             self.assertFalse(recovered.closed)
             self.assertEqual(recovered.execute('SHOW statement_timeout').fetchone()[0], '5s')
 
+    def test_runtime_rejects_management_ownership_of_non_sources_objects(self):
+        import psycopg
+        from psycopg import sql
+        from psycopg.conninfo import make_conninfo
+        import start_gateway
+        config = test_configuration()
+        password = uuid4().hex
+        with psycopg.connect(config['admin_app_dsn']) as owner:
+            owner_role = owner.execute('SELECT current_user').fetchone()[0]
+            owner.execute(sql.SQL('ALTER ROLE {} LOGIN PASSWORD {}').format(
+                sql.Identifier(config['admin_role']), sql.Literal(password)))
+        dsn = make_conninfo(config['admin_app_dsn'], user=config['admin_role'], password=password)
+        for table in ('knowledge_publications', 'knowledge_governance_versions', 'knowledge_admin_actions'):
+            with self.subTest(table=table):
+                try:
+                    with psycopg.connect(config['admin_app_dsn']) as owner:
+                        owner.execute(sql.SQL('ALTER TABLE {} OWNER TO {}').format(
+                            sql.Identifier(table), sql.Identifier(config['admin_role'])))
+                    with self.assertRaises(ValueError):
+                        start_gateway._assemble_admin_knowledge({'connection_uri': dsn}, tenant=self.tenant, domain=self.domain)
+                finally:
+                    with psycopg.connect(config['admin_app_dsn']) as owner:
+                        owner.execute(sql.SQL('ALTER TABLE {} OWNER TO {}').format(
+                            sql.Identifier(table), sql.Identifier(owner_role)))
+                        owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(
+                            sql.Identifier(config['schema']), sql.Identifier(config['admin_role'])))
+        # An indirect NOINHERIT path to a non-privileged table owner is equally forbidden.
+        reachable_owner = 'owner_' + uuid4().hex[:16]
+        try:
+            with psycopg.connect(config['admin_app_dsn']) as owner:
+                owner.execute(sql.SQL('CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOBYPASSRLS').format(sql.Identifier(reachable_owner)))
+                owner.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(config['schema']), sql.Identifier(reachable_owner)))
+                owner.execute(sql.SQL('ALTER TABLE knowledge_publications OWNER TO {}').format(sql.Identifier(reachable_owner)))
+                owner.execute(sql.SQL('GRANT {} TO {} WITH INHERIT FALSE').format(sql.Identifier(reachable_owner), sql.Identifier(config['admin_role'])))
+            with self.assertRaises(ValueError):
+                start_gateway._assemble_admin_knowledge({'connection_uri': dsn}, tenant=self.tenant, domain=self.domain)
+        finally:
+            with psycopg.connect(config['admin_app_dsn']) as owner:
+                owner.execute(sql.SQL('ALTER TABLE knowledge_publications OWNER TO {}').format(sql.Identifier(owner_role)))
+                owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(
+                    sql.Identifier(config['schema']), sql.Identifier(config['admin_role'])))
+                owner.execute(sql.SQL('REVOKE {} FROM {}').format(sql.Identifier(reachable_owner), sql.Identifier(config['admin_role'])))
+                owner.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(reachable_owner)))
+                owner.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(reachable_owner)))
+
     def test_conflicting_expected_governance_version_is_409(self):
         self._seed_source("pg-src-2")
         headers = self._auth()
