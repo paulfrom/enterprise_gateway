@@ -19,7 +19,7 @@ from knowledge.storage import PostgresKnowledgeStorage
 from knowledge.worker import KnowledgeWorker,PostgresKnowledgeSink,GovernedConsumer
 from tests.pg_support import get_test_dsn,prepare_test_database,test_configuration
 
-class TestM2BKnowledgeIntegration(unittest.TestCase):
+class KnowledgeWorkerLifecycleTests(unittest.TestCase):
     def test_same_text_different_trusted_source_acl_does_not_collide(self):
         first=self.observe()
         self.acl=self.acl|{'other-authorized-member'}

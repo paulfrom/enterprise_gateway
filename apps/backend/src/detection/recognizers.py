@@ -1,5 +1,5 @@
-"""中文规则识别器：秘密（D-01）、手机号（D-02）、身份证号（D-03）、
-统一社会信用代码（D-04）、金额（D-05）、账号（D-13）、合同编号（D-14）。
+"""中文规则识别器：秘密（）、手机号（）、身份证号（）、
+统一社会信用代码（）、金额（）、账号（）、合同编号（）。
 
 编排与校验分离：每个识别器是 presidio ``PatternRecognizer`` 子类，
 正则只做候选提取（含边界断言），确定性校验函数负责通过性判定。
@@ -29,7 +29,7 @@
     分隔符（``:``/``：``/``=``，允许前后空白）后的非空值；值不得含
     空白、引号与常见分隔标点；公开占位示例不命中。只承诺政策定义
     上下文，不承诺识别任意密码；语境词按子串锚定（``mypassword=x``
-    同样命中，与 D-02 手机号字母粘连同一取舍）。
+    同样命中，与 手机号字母粘连同一取舍）。
   - 三类形态共用一个实体与一个识别器；``validate_result`` 按命中
     形状分发校验（BEGIN 块→PEM；策略前缀开头且主体符合字符集→
     API Key；其余→密码值）。
@@ -165,7 +165,7 @@ _USCC_INDEX = {char: index for index, char in enumerate(_USCC_CHARSET)}
 
 # ---- 政策常量（全部为本地合成政策快照，非真实业务授权） ----
 
-# D-01 秘密政策。
+# 秘密政策。
 SECRET_API_KEY_PREFIXES = ("sk-", "ak-")
 SECRET_API_KEY_MIN_BODY_LENGTH = 16
 SECRET_API_KEY_BODY_CHARS = tuple(
@@ -185,7 +185,7 @@ SECRET_PLACEHOLDER_MARKERS = (
     "sample",
 )
 
-# D-05 金额政策。
+# 金额政策。
 MONEY_SYMBOLS = ("¥", "$", "€")
 MONEY_UNITS = ("人民币", "美元", "欧元", "日元", "港元", "万元", "亿元", "千元", "元")
 MONEY_CONTEXTS = (
@@ -202,12 +202,12 @@ MONEY_CONTEXTS = (
     "金额",
 )
 
-# D-13 账号政策。
+# 账号政策。
 ACCOUNT_CONTEXTS = ("银行账号", "收款账号", "付款账号", "账号", "账户", "卡号", "户名")
 ACCOUNT_MIN_DIGITS = 8
 ACCOUNT_MAX_DIGITS = 30
 
-# D-14 合同编号政策。
+# 合同编号政策。
 CONTRACT_CONTEXTS = ("合同编号", "协议编号", "合同号", "协议号")
 CONTRACT_PREFIX_MIN_LETTERS = 2
 CONTRACT_PREFIX_MAX_LETTERS = 4
@@ -273,7 +273,7 @@ class SecretPolicy:
 
 @dataclass(frozen=True)
 class MoneyPolicy:
-    """D-05 金额识别政策（本地合成快照，非真实业务授权）。
+    """金额识别政策（本地合成快照，非真实业务授权）。
 
     单字单位不允许出现在数字前（只在数字后），避免"公元2026年"类
     误报；多字单位前后均可。
@@ -399,14 +399,14 @@ def uscc_valid(code: str) -> bool:
     return _USCC_CHARSET[(31 - total % 31) % 31] == code[17]
 
 
-# ---- D-01/D-05/D-13/D-14 候选正则构建 ----
+# ---- ///候选正则构建 ----
 #
 # 语境词一律放 lookbehind（presidio 引擎用 regex 模块编译模式，支持变长
 # lookbehind），因此密码值/金额/账号/合同编号的命中跨度只覆盖值本身，
 # 不含语境词。validate_result 只收到命中文本、看不到位置，语境邻近性由
 # 候选正则保证。
 
-# PEM 私钥块候选：整块提取（(?s) 使 . 跨行）；首尾算法名一致性与块体
+# PEM 私钥块候选：整块提取（(?s) 使. 跨行）；首尾算法名一致性与块体
 # 字符集由 pem_private_key_valid 判定。
 _PEM_PRIVATE_KEY_CANDIDATE = (
     r"(?s)(?<!-)-----BEGIN ([A-Z0-9]+ )?PRIVATE KEY-----"
@@ -491,7 +491,7 @@ def _contract_candidate(policy: ContractPolicy) -> str:
     return rf"(?<={contexts}\s*[:：]?\s*)(?<![A-Z0-9-]){code}(?![A-Z0-9-])"
 
 
-# ---- D-01/D-05/D-13/D-14 确定性校验 ----
+# ---- ///确定性校验 ----
 
 
 def _contains_placeholder(text: str, policy: SecretPolicy) -> bool:
@@ -596,7 +596,7 @@ class _CnPatternRecognizer(PatternRecognizer):
 
 
 class SecretRecognizer(_CnPatternRecognizer):
-    """D-01 秘密识别器：API Key / PEM 私钥块 / 政策密码上下文。
+    """秘密识别器：API Key / PEM 私钥块 / 政策密码上下文。
 
     命中输出 priority=0 的 Span；整请求阻断由 spans.merge_spans 的
     P0 语义承载。validate_result 按命中形状分发：BEGIN 块按 PEM 校验；
@@ -776,7 +776,7 @@ class CnUsccRecognizer(_CnPatternRecognizer):
 def default_recognizers() -> tuple[EntityRecognizer, ...]:
     """默认七路中文规则识别器（每次都是新实例，无共享可变状态）。
 
-    含秘密（D-01，priority=0）与 D-02/03/04/05/13/14 候选识别器；
+    含秘密（，priority=0）与 /03/04/05/13/14 候选识别器；
     秘密的整请求阻断语义由 spans.merge_spans 承载。
     """
     return (

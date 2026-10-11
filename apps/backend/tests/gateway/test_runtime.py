@@ -136,22 +136,26 @@ class RuntimeAssemblyTests(unittest.TestCase):
                 close.assert_called_once()
             self.assertTrue(app.state.runtime_closed)
 
-    def test_unknown_fields_pass_through_but_do_not_override_route_or_credentials(self):
+    def test_unknown_fields_rejected_and_admitted_controls_preserve_route_and_credentials(self):
         app = self.app()
         with TestClient(app) as client:
-            self.assertGreaterEqual(self.post(client, model="unadmitted").status_code, 400)
+            self.assertEqual(self.post(client, model="unadmitted").status_code, 400)
             response = client.post("/v1/chat/completions", json={"model": "chat-fixture", "messages": []})
             self.assertGreaterEqual(response.status_code, 400)
             self.assertEqual(0, len(self.calls))
-            for changes in ({"base_url": "https://other.example"},
-                            {"apiKey": "payload-secret"}, {"thinking": {"type": "enabled"}}):
-                self.assertEqual(self.post(client, **changes).status_code, 200)
-                request = self.calls[-1]
-                self.assertEqual(request.url.host, app.state.runtime_pipelines[0].egress_client.binding.host)
-                self.assertEqual(request.headers['authorization'], 'Bearer synthetic-key')
-                payload = json.loads(request.content)
-                for name, value in changes.items():
-                    self.assertEqual(payload[name], value)
+            for changes in ({"base_url": "https://other.example"}, {"apiKey": "payload-secret"}):
+                with self.subTest(changes=changes):
+                    response = self.post(client, **changes)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["error"]["code"], "PROTOCOL_VIOLATION")
+                    self.assertNotIn("payload-secret", response.text)
+                    self.assertEqual(0, len(self.calls))
+            self.assertEqual(self.post(client, thinking={"type": "enabled"}).status_code, 200)
+            self.assertEqual(1, len(self.calls))
+            request = self.calls[0]
+            self.assertEqual(request.url.host, app.state.runtime_pipelines[0].egress_client.binding.host)
+            self.assertEqual(request.headers['authorization'], 'Bearer synthetic-key')
+            self.assertEqual(json.loads(request.content)["thinking"], {"type": "enabled"})
 
     def test_classifier_missing_secret_and_unknown_categories_never_egress(self):
         for classifier in (None, lambda _raw: "SECRET", lambda _raw: "unknown"):

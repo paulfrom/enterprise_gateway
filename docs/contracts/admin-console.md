@@ -1,12 +1,12 @@
 # 管理控制台契约（认证、会话、授权与单管理员发布）
 
-本契约定义管理员登录、服务端会话、统一管理授权、管理路由、知识单管理员发布与数据库结构契约。管理端只供管理员使用；当前只有一个固定账号 admin。本文是实施契约，相关能力的落地状态以代码与验收证据为准。
+本契约定义管理员登录、服务端会话、统一管理授权、管理路由、知识单管理员发布与数据库结构契约。管理端只供管理员使用；当前只有一个固定账号 admin。字段与路由以 `gateway.admin_contract` 和 `contracts/admin.openapi.json` 为准。
 
-当前已交付登录/会话/退出、请求历史、知识来源/候选/发布/观察查询及治理写接口、审计目录和直接读取 API。运行组件、配置发布、消费执行器、导出/词典编译及维护作业路由属于后续装配；下表是完整目标路由契约，不能据其存在宣称全部路由已部署。治理网页全覆盖另行交付。
+当前管理端页面提供登录、会话恢复、退出和请求历史；后端另提供知识治理与审计 API。尚待装配内容集中记录在 [后续工作](../next-steps.md)。
 
 ## 1. 账号与密码
 
-- 固定用户名 admin，初始密码由部署方在显式初始化时指定；本阶段不提供账号 CRUD、密码修改页、强制改密、MFA 或注册/邀请流程。
+- 固定用户名 admin，初始密码由部署方在显式初始化时指定。
 - 服务端运行态只保存随机盐（至少16字节）与 scrypt 派生值（N=2^17、r=8、p=1，设置足够 maxmem），不保存明文密码；登录页不预填、不内置正确密码。
 - 登录校验限并发，重 CPU 派生不在事件循环内执行；初始化与校验均验证实际运行环境可用，不降级为明文比较或弱哈希。
 - 显式初始化工具（`scripts/prepare_admin_state.py`）只作用于不存在的新管理员状态；重复初始化拒绝，服务重启不覆盖状态或重置默认账号。
@@ -26,7 +26,7 @@
 
 - 管理会话产生不可由客户端构造的 `AdminContext`：actor_id=admin、部署管理范围（租户/保护域）、session_reference、认证时间与到期时间。所有管理 API 从会话取得该上下文，不接受客户端自报角色、租户、域或 ACL 授予管理权。
 - 统一管理员依赖逐请求保护全部管理读写 API；写操作同时校验同源及会话绑定 CSRF token，严格校验请求 schema 和目标标识，拒绝任意文件路径、SQL、Python 模块或 shell 命令。
-- 同步正文释放前再次校验会话和期限；关键审计失败不释放正文。长作业在提交时验证管理员权限并保存执行上下文；已可靠接受的作业按服务端状态继续执行，管理员退出阻止新请求但不伪称取消已提交操作。
+- 同步正文释放前再次校验会话和期限；关键审计失败不释放正文。
 - 管理授权不改变数据生命周期与业务有效性：到期、已销毁、未产生的正文不能伪造为可读。
 
 ## 4. 路由契约
@@ -41,29 +41,19 @@ API（全部经统一管理员依赖）：
 | GET /api/admin/session | 当前管理员、管理范围、有效期及 CSRF token；无有效会话 401 |
 | POST /api/admin/logout | 立即持久注销当前会话，清 Cookie；同源及 CSRF 校验 |
 | GET /api/admin/requests、/{request_id} | 全部历史列表和详情；支持时间/模型/协议/状态/错误码筛选 |
-| GET /api/admin/runtime | 运行组件、真实指标、版本与采集时间 |
-| GET /api/admin/config/{kind} | 读取允许的政策、路由、词典、模板和制品元数据；kind 枚举固定 |
-| POST /api/admin/config/{kind}/validate | 服务端校验草案及变更影响，返回实际校验结果 |
-| POST /api/admin/config/{kind}/publish | 指定预期版本和已校验草案，创建真实发布作业 |
-| POST /api/admin/config/rollback | 回退至已存在、校验通过且资源完整的完整版本 |
 | GET /api/admin/observations、/sources、/candidates、/publications 及对应详情 | 全状态管理查询；管理读取与消费者 active 过滤分开 |
 | POST /api/admin/sources/{id}/governance | 确认归属/用途/消费受众/期限与依据，登记来源验证记录及治理可信状态，产生新治理版本 |
 | POST /api/admin/candidates/{id}/publish | 一次提交管理员验证依据和发布参数，直接完成合法发布 |
 | POST /api/admin/candidates/{id}/reject、/revise | 拒绝或生成新修订，不原位改写旧证据 |
 | POST /api/admin/sources/{id}/withdraw、/publications/{id}/revoke | 直接撤回，事务级联及 outbox 可追踪 |
-| POST /api/admin/publications/export、/dictionary/compile | 执行导出或词典编译；明确目标消费受众，保存版本/结果 |
 | GET /api/admin/audit/records 及 /{id}、/api/admin/audit/events | 查询受控审计记录，直接读取可用正文；不接收任意密文或文件路径 |
-| GET /api/admin/retention、POST /api/admin/retention | 查看和设置明确保留策略，按版本校验，不能延长已销毁资产 |
-| POST /api/admin/maintenance/{action} | action 固定枚举：消费、隔离重试、到期清理、受控密钥生命周期及恢复验证；返回真实 job_id |
-| GET /api/admin/jobs、/{job_id} | 作业状态、实际结果、幂等键及失败码，输出不带敏感正文 |
 
-错误语义统一：未登录 401，CSRF/越界 403，不存在 404，版本冲突 409，数据不合法 422，依赖不可用 503；异步作业接受 202，只有执行完成才标成功。接口实现与全路由枚举测试必须一致。
+错误语义统一：未登录 401，CSRF/越界 403，不存在 404，版本冲突 409，数据不合法 422，依赖不可用 503。接口实现与全路由枚举测试必须一致。
 
-现有 `/healthz` 和 `/readyz` 保留为受信部署内部探针，只返回运维所需最小状态。管理控制台不提供匿名业务数据入口；模型 /v1 接口继续由 BYOK 及部署入口边界保护。旧 `/history`、`/api/requests` 路由与独立查询 Key 入口整体删除，不保留重定向或兼容路径。
+现有 `/healthz` 和 `/readyz` 保留为受信部署内部探针，只返回运维所需最小状态。管理控制台不提供匿名业务数据入口；模型 /v1 接口继续由 BYOK 及部署入口边界保护。
 
 ## 5. 知识单管理员发布与来源治理
 
-- 删除双人审批模型：不再有 Approval 实体、审批角色槽、approval_count=2 条件、审批身份触发器或等待第二批准状态。
 - admin 一次提交验证依据与发布参数即可原子完成合法发布：publication 与 outbox 同事务提交；发布事务绑定一次有效管理员动作及当前来源版本。
 - 来源治理授权与事实验证形成新版本记录，至少绑定 admin 主体、对象版本、动作、用途、消费受众、依据、时间和结果；原始 ACL、原始证据与原始 BYOK 来源可信度（unverified）不原位改写、不被登录自动覆盖。
 - 派生输出以有效来源的消费授权交集为边界；受限来源未获消费授权时可管理可查看，但不自动向下游开放。发布校验采用当前有效的治理/验证记录，不因原始来源仍为 unverified 而永久禁止已完成合法验证的数据发布。
@@ -73,8 +63,8 @@ API（全部经统一管理员依赖）：
 
 - 管理服务使用专用受限 PG 应用连接，worker 与 consumer 继续使用各自受限连接；均不得为 owner、superuser 或 BYPASSRLS。
 - 管理 RLS 分支同时绑定专用管理数据库身份、服务端 AdminContext 和本部署租户/域；不只相信 app.roles 字符串。worker/consumer 数据库身份不能 SET ROLE 到管理服务身份，部署门禁验证可达成员关系及各表 forced RLS。
-- 新 DDL 带明确结构版本/指纹，删除旧审批表与触发器，替换为单管理员验证/动作记录；初始化检查表、函数、触发器及 RLS 完整契约。首次上线使用新的隔离 schema/实例，初始化器继续拒绝已有 namespace。
-- 不写 migration，不对旧 schema 执行自动 ALTER/DROP，不自动搬运旧数据；旧知识 schema 与新管理服务不混用，启动给出固定净化错误并拒绝相应能力。
+- DDL 带明确结构版本/指纹及单管理员验证/动作记录；初始化检查表、函数、触发器及 RLS 完整契约。首次上线使用新的隔离 schema/实例，初始化器继续拒绝已有 namespace。
+- 初始化仅创建新的 schema；结构不符时拒绝对应能力，不修改已有对象。
 - admin 查询受限/拒绝/撤回/到期元数据不使用消费者 active publication 过滤；正文读取遵守实际保留与密钥状态。
 
 DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`knowledge_publication_sources`。候选具有 `candidate_version` 和 `derived_from`，发布绑定精确候选版本、用途、消费受众、有效期限、管理员动作和幂等键；消费者资产、回执与 Outbox 保存实际版本、谱系和投递状态。结构准入使用 `SCHEMA_VERSION=2` 和 `SCHEMA_FINGERPRINT_V2`：对数据库元数据规范化后计算，保留列、约束、函数体、触发器和策略语义，剔除部署 schema/角色名字面量及 OID。
@@ -83,10 +73,9 @@ DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`kno
 
 权限或连接失败返回净化的 `KNOWLEDGE_ADMIN_UNAVAILABLE`；结构不匹配返回 `KNOWLEDGE_SCHEMA_INCOMPATIBLE`，均为 503，不返回 SQL、DSN、密码或内部路径。拒绝路径不创建、迁移或修复数据库对象。
 
-## 7. 审计与配置发布
+## 7. 管理审计
 
-- 所有正文读取、配置发布、来源授权、验证发布、撤回、删除和维护动作记录 actor=admin、会话关联摘要、操作、对象、范围、时间和真实结果；审计不存正文、密码、Cookie、供应商 Key、DSN 密码或密钥材料。
-- 配置发布遵循既有 manifest/蓝绿原则：校验草案 → 构建完整制品 → 验证资源/依赖 → 受管发布 → 切换新请求 → 在途请求保留原包 → 排空与资源关闭 → 记录实际生效版本。保存、校验、发布接受、发布成功、回退成功是不同状态；作业返回 job_id、幂等键、源/目标版本、实际开始/结束、结果和固定错误码；重试检查原任务状态，不重复销毁密钥或重复外发模型请求。
+- 正文读取、来源授权、验证发布、拒绝、修订和撤回动作记录 actor=admin、会话关联摘要、操作、对象、范围、时间和真实结果；审计不存正文、密码、Cookie、供应商 Key、DSN 密码或密钥材料。
 
 ## 8. BYOK 边界（不变量）
 
@@ -110,7 +99,7 @@ DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`kno
 
 成功响应使用真实 `governance_version_id`、`publication_id` 或新 `candidate_id`。版本冲突为 409，来源不存在为 404，授权交集/用途/期限不满足为 422；来源到期固定码 `KNOWLEDGE_SOURCE_EXPIRED` 为 422。已接受的写动作按事务执行，即使会话随后注销也不伪称取消；失效会话不能读取迟到的成功响应。
 
-可用性字段是 B3 消费执行器/作业与 B4 页面共同使用的冻结契约：
+可用性字段反映服务端权威状态：
 
 | 字段 | 含义 |
 |---|---|
@@ -125,7 +114,7 @@ DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`kno
 
 ## 10. 审计目录、释放边界与资源隔离
 
-后台构建器只扫描装配固定的 intent/evidence 根，以持久化的精确 `evidence_record_id`、摘要、AAD 与服务端生命周期关联入目录；没有可信关联的旧记录不可见。新记录沿用一次既有 intent 提交写入关联和保留元数据，不新增模型请求同步写入。默认策略为 30 天、版本 `model-query-retention-30d-v1`。
+后台构建器只扫描装配固定的 intent/evidence 根，以持久化的精确 `evidence_record_id`、摘要、AAD 与服务端生命周期关联入目录；没有可信关联或完整持久生命周期元数据的记录不可见。新记录沿用一次既有 intent 提交写入关联和保留元数据，不新增模型请求同步写入。默认策略为 30 天、版本 `model-query-retention-30d-v1`。
 
 审计列表返回 `{items, next_cursor, catalog_backlog, catalog_error_code}`，不批量解密；详情返回 `{item, plaintext}`，一次仅释放一条有效记录。事件返回 `{items, next_cursor}`，包含固定事件码、操作者、会话摘要、记录句柄摘要、部署范围和时间，不含正文或密钥。`AUDIT_READ_RELEASED` 表示可靠记录了解密结果检查点；此后预算、生命周期或最后会话复检仍可能拒绝响应，不能将事件视为客户端已收到正文的证明。
 
@@ -134,3 +123,5 @@ DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`kno
 审计记录不存在为 404 `AUDIT_RECORD_NOT_FOUND`，到期或不可用为 409 `AUDIT_RECORD_UNAVAILABLE`，摘要/AAD/密文损坏为 409 `AUDIT_EVIDENCE_CORRUPTED`，读取权限或预算拒绝为 403 `AUDIT_ACCESS_REJECTED`，关键留痕失败为 503 `AUDIT_WRITE_FAILED`。最终认证失败保留认证错误语义；最终复检跨过读取预算或记录期限时不释放正文。
 
 管理 PG、目录构建与解密队列独立于模型检测/NER；知识能力故障不关闭审计能力，新增管理能力故障不改变模型准入。既有必需加密留证、密钥、水位和 Spool 门禁仍执行。独立目录配额限制新增使用量，不承诺共享磁盘、共享 KMS 或整机完全故障时仍可外发。
+
+知识管理与历史共用部署 schema，知识管理角色不得获得历史表权限；启动与取连接时同时检查跨用途授权。知识 v2 指纹仅排除两张已知历史表及其元数据，未知知识结构漂移仍拒绝。完整布局见 [ADR 0008](../adr/0008-unified-database-namespace.md)。

@@ -1,10 +1,10 @@
-"""P-16 request admission limiter: bounded resource-dimension gate.
+"""Request admission limiter: bounded resource-dimension gate.
 
 The limiter is the resource-dimension gate a request crosses before it may
 enter the detection pipeline. It judges *resources only* — raw body size,
 decompressed size, compression expansion, message count, business text
 volume, and concurrency slots. It never parses protocol structure or
-business fields; strict protocol validation is the P-04 ingress contract,
+business fields; strict protocol validation is the ingress contract,
 and the two gates compose instead of overlapping.
 
 All limits are constructor-injected; ``None`` disables a dimension:
@@ -18,9 +18,9 @@ All limits are constructor-injected; ``None`` disables a dimension:
   is supplied by the caller; when absent the documented lightweight
   heuristic counts non-overlapping occurrences of ``b'"role"'`` in the raw
   (or decompressed) body. The heuristic is a resource measurement, not a
-  protocol parse — P-04 remains authoritative for protocol semantics.
+  protocol parse — remains authoritative for protocol semantics.
 - ``max_text_chars``: total business text characters. Always a structured
-  caller-measured count (e.g. summed fragment lengths downstream of P-04);
+  caller-measured count (e.g. summed fragment lengths downstream of );
   mandatory when the dimension is configured.
 - ``max_concurrency``: admission slots (default 1).
 - ``wait_timeout`` / ``max_waiters``: bounded-wait policy for slots
@@ -59,12 +59,12 @@ slot is held by an :class:`AdmissionPermit`: released via ``release()``
 (idempotent) or the context manager, which also releases on exception paths.
 Released slots are immediately reusable.
 
-D-10 alignment: one admission permit authorizes occupying one compute slot
+alignment: one admission permit authorizes occupying one compute slot
 of the bounded inference executor. Wire ``max_concurrency`` equal to the
 executor's ``max_workers`` (and the executor's ``max_pending=0``) so that
 queueing happens here — bounded by ``max_waiters`` — instead of piling up
 inside the executor. The limiter never imports or drives the executor; the
-orchestration (D-12/P-18) composes the two.
+orchestration composes the two.
 
 Determinism: dimension verdicts are pure functions of the measured values.
 Concurrency verdicts are timing-dependent by nature, but every outcome is

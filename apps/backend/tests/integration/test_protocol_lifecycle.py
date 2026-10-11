@@ -1,4 +1,4 @@
-"""M3 HTTP lifecycle assertions with trained NER and synthetic provider bytes.
+"""Strict-profile HTTP lifecycle assertions with trained NER and synthetic provider bytes.
 
 The direct ASGI harness sends an actual http.disconnect into the public app;
 it does not bypass authentication, inference, audit, spool or stream protection.
@@ -60,7 +60,18 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
     tearDown = matrix.ProtocolHttpMatrix.tearDown
     request = matrix.ProtocolHttpMatrix.request
     response = matrix.ProtocolHttpMatrix.response
-    call = matrix.ProtocolHttpMatrix.call
+    async def call(self, protocol, body, handler, **options):
+        # These cases assert schema/receipt rejection and ProtectedStream cleanup.
+        spy = UpstreamSpyTransport(handler)
+        pipeline = self.fixture._create_pipeline(protocol, spy, **options)
+        app = create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}),
+                         authenticator=ByokAuthenticator(domain=self.fixture.identity.domain,
+                             tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY),
+                         classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://gateway') as client:
+            result = await client.post(pipeline.path, json=body,
+                                       headers={'authorization': 'Bearer enterprise-token'})
+        return result, spy
 
     async def test_http_disconnect_before_stream_delivery_closes_abandoned_response(self):
         for protocol in PROTOCOLS:

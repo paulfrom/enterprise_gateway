@@ -106,7 +106,7 @@ class GovernedConsumer:
 
     Applications receive authorized publication IDs. Readable facts are fetched from
     active governed rows, so tombstones/expiry prevent stale snapshot re-use. Consumer
-    authorization is the publication-bound effective governance grant (design §1.2):
+    authorization is the publication-bound effective governance grant:
     outbox rows are visible to a consumer only while the publication's consumer
     audiences and intended use cover the authenticated consumer scope.
     """

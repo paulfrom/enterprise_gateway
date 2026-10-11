@@ -1,6 +1,6 @@
-"""B2 admin direct read: single-record plaintext release with paired durable traces.
+"""Admin direct read: single-record plaintext release with paired durable traces.
 
-DESIGN §4.2: the admin review service reads evidence through the trusted
+The admin review service reads evidence through the trusted
 catalog only — it never accepts arbitrary ciphertext or paths. ``list_records``
 and ``get_record`` return catalog metadata alone. ``read_plaintext`` walks a
 strict order and releases nothing on any refusal path:
@@ -119,7 +119,7 @@ class AdminAuditContext:
 
 
 class AdminReviewService:
-    """Single-record admin review over the trusted catalog (DESIGN §4.2)."""
+    """Single-record admin review over the trusted catalog."""
 
     def __init__(
         self,

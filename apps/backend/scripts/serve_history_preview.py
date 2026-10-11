@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,11 +63,17 @@ def main(argv=None):
         with synthetic_history_runtime() as runtime:
             phase = "seed"
             seed(runtime)
-            print(json.dumps({"login_url": "http://127.0.0.1:" + str(args.port) + "/login",
+            print(json.dumps({"api_base_url": "http://127.0.0.1:" + str(args.port),
                               "synthetic_only": True, "retention_days": 1,
                               "seeded_records": 4}), flush=True)
             phase = "serve"
-            uvicorn.run(runtime.app, host="127.0.0.1", port=args.port, access_log=False, log_level="warning")
+            # Uvicorn replays SIGTERM after graceful shutdown. Convert that
+            # replay into normal Python exit so fixture and atexit cleanup run.
+            previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+            try:
+                uvicorn.run(runtime.app, host="127.0.0.1", port=args.port, access_log=False, log_level="warning")
+            finally:
+                signal.signal(signal.SIGTERM, previous)
         return 0
     except Exception as error:
         frame = error.__traceback__

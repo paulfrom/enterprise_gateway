@@ -9,13 +9,12 @@ transaction; a failure of that recording is reported honestly as
 
 Schema v2 removed the persisted two-reviewer approval flow completely. The
 effective consumer authorization for a publication is the intersection of the
-effective governance versions of all contributing sources (design §3.1);
+effective governance versions of all contributing sources;
 original source ACLs remain untouched evidence and never gate consumption.
-The availability contract (design §3.2) is computed from authoritative
+The availability contract is computed from authoritative
 outbox/receipt/asset rows, never inferred from candidate state alone.
 
-The frozen method signatures, error codes and Availability fields in this
-module are the T2 contract consumed by the admin API layer.
+Method signatures, error codes and Availability fields are consumed by the admin API layer.
 """
 
 from __future__ import annotations
@@ -54,7 +53,7 @@ VALIDITY_EXCEEDS_SOURCE = 'KNOWLEDGE_VALIDITY_EXCEEDS_SOURCE'
 ADMIN_UNAVAILABLE = 'KNOWLEDGE_ADMIN_UNAVAILABLE'
 AUDIT_WRITE_FAILED = 'AUDIT_WRITE_FAILED'
 
-# Fixed blocking reason codes (design §3.1/§3.2); never carry SQL or secrets.
+# Fixed blocking reason codes; never carry SQL or secrets.
 GOVERNANCE_MISSING = 'GOVERNANCE_MISSING'
 GOVERNANCE_SUPERSEDED = 'GOVERNANCE_SUPERSEDED'
 AUDIENCE_DENIED = 'AUDIENCE_DENIED'
@@ -64,7 +63,7 @@ SOURCE_WITHDRAWN_REASON = 'SOURCE_WITHDRAWN'
 PUBLICATION_REVOKED = 'PUBLICATION_REVOKED'
 EVIDENCE_UNAVAILABLE = 'EVIDENCE_UNAVAILABLE'
 
-# Availability vocabularies (design §3.2).
+# Availability vocabularies.
 GOVERNANCE_STATUS_UNCONFIRMED = 'unconfirmed'
 GOVERNANCE_STATUS_PUBLISHABLE = 'publishable'
 GOVERNANCE_STATUS_REJECTED = 'rejected'
@@ -519,7 +518,7 @@ class KnowledgeGovernanceService:
         """Confirm a new governance version for one source version.
 
         Re-governing supersedes the current effective version and conservatively
-        invalidates every publication still bound to it (design §3.1); expanded
+        invalidates every publication still bound to it; expanded
         audiences or validity never propagate to prior publications.
         """
         storage = self._require_storage()
@@ -957,7 +956,7 @@ class KnowledgeGovernanceService:
         revocation outbox, asset deactivation, candidate withdrawal) while the
         original source ACL is retained as evidence: consumption is blocked by
         the withdrawn flag and the effective-authorization checks, not by
-        erasing the provenance row (design §1.2).
+        erasing the provenance row.
         """
         storage = self._require_storage()
         self._check_context(context)
@@ -1054,7 +1053,7 @@ class KnowledgeGovernanceService:
         return None
 
     # ------------------------------------------------------------------
-    # Availability (design §3.2)
+    # Availability
     # ------------------------------------------------------------------
     def evaluate_availability(self, *, candidate_id: str | None,
                               publication_id: str | None, consumer: str | None,
@@ -1425,10 +1424,10 @@ class KnowledgeGovernanceService:
         } for row in rows], next_cursor
 
     # ------------------------------------------------------------------
-    # K-07: Derivative ACL Calculation
+    # Derivative ACL Calculation
     # ------------------------------------------------------------------
     def compute_derived_acl(self, evidences: Sequence[Evidence]) -> frozenset[str]:
-        """K-07: the derived ACL is the INTERSECTION of contributing source ACLs."""
+        """the derived ACL is the INTERSECTION of contributing source ACLs."""
         if not evidences:
             raise KnowledgeError('cannot derive ACL from empty evidence set')
         effective_acl: set[str] | None = None
@@ -1446,7 +1445,7 @@ class KnowledgeGovernanceService:
         return frozenset(effective_acl)
 
     # ------------------------------------------------------------------
-    # K-08/K-09: Authorized export and dictionary compilation (v2 model)
+    # /Authorized export and dictionary compilation (v2 model)
     # ------------------------------------------------------------------
     def _export_record(self, conn: Connection, publication_uuid: UUID, *,
                        consumer: TrustedActor, version: str,
@@ -1505,10 +1504,10 @@ class KnowledgeGovernanceService:
     def export_versioned_jsonl(self, publication_ids: Sequence[Any],
                                consumer: TrustedActor, version: str,
                                now: datetime | None = None) -> str:
-        """K-08: versioned JSONL of authorized structured facts only.
+        """versioned JSONL of authorized structured facts only.
 
         A publication is exported only while its effective governance
-        authorization (design §1.2/§3.1) permits the consumer; stale snapshots,
+        authorization permits the consumer; stale snapshots,
         revoked publications and lapsed governance are excluded.
         """
         storage = self._require_storage()
@@ -1533,7 +1532,7 @@ class KnowledgeGovernanceService:
                                             publication_ids: Sequence[Any],
                                             now: datetime | None = None, *,
                                             consumer: TrustedActor) -> dict:
-        """K-09: compile authorized published facts into a dictionary payload."""
+        """compile authorized published facts into a dictionary payload."""
         storage = self._require_storage()
         if now is None:
             now = datetime.now(timezone.utc)

@@ -1,4 +1,4 @@
-"""D-10 bounded inference executor: process-isolated, time-budgeted execution.
+"""Bounded inference executor: process-isolated, time-budgeted execution.
 
 Native inference runtimes (e.g. onnxruntime ``session.run``) cannot be
 reliably interrupted from a thread, so the unit of compute isolation is a
@@ -19,10 +19,7 @@ dedicated worker *process* per call. The caller-facing contract is:
   worker, rejects all queued/running waiters with
   ``SafetyError(INFERENCE_TIMEOUT)``, joins the slot threads, and leaves no
   residual process or thread — every worker is ``join``-confirmed exited and
-  every handle held by the executor is released. (On Windows a reaped
-  worker's pid can stay openable to ``OpenProcess`` for a while; that is OS
-  teardown outside user-mode control, not a live worker — poll the pid to
-  observe disappearance.) ``submit`` after ``close()`` raises
+  every handle held by the executor is released. ``submit`` after ``close()`` raises
   ``TypeError("executor is closed")``.
 - Controlled failure propagation: an exception raised inside the worker
   comes back with the exception chain broken and no business text. A
@@ -30,8 +27,7 @@ dedicated worker *process* per call. The caller-facing contract is:
   dropped); any other exception surfaces as ``RuntimeError("inference task
   failed: <exception type name>")``.
 
-Portability: the multiprocessing **spawn** context is used on every platform
-(Windows and Linux semantics stay identical). Spawn requires the work
+The multiprocessing **spawn** context requires the work
 function and its arguments to be picklable — i.e. defined at module top
 level, not closures or lambdas. Tasks are rejected in two distinct ways:
 
@@ -109,13 +105,8 @@ def _alive(proc: multiprocessing.Process) -> bool:
 def _reap(proc: multiprocessing.Process) -> None:
     """Ensure a worker is dead and its OS handle released.
 
-    Idempotent and race-safe: the close() sweep and the owning slot thread
-    may reap the same process concurrently; on Windows, ``Process`` methods
-    raise ``ValueError`` ("process object is closed") or ``OSError``
-    (WinError 6, handle invalid) once the handle is gone — in all those
-    cases the worker is already dead, which is the goal. An unreleased
-    handle keeps a dead pid openable on Windows, which would look like a
-    leak.
+    Idempotent and race-safe: close() and the owning slot thread may reap
+    the same process concurrently. Closed handles are already released.
     """
     try:
         if proc.is_alive():
@@ -285,13 +276,7 @@ class InferenceExecutor:
         Idempotent. After ``close()`` returns: every worker process has
         exited (``join`` observed termination), every handle held by this
         executor is released, no slot thread remains, and ``submit`` raises
-        ``TypeError``. Note that "exited + handle released" is the strongest
-        guarantee available in user mode: on Windows the pid of a reaped
-        worker can stay *openable* (``OpenProcess`` succeeds) for an
-        unbounded period while the kernel process object is still referenced
-        by other components (console host, security tooling). Detecting
-        worker disappearance therefore requires polling the pid, never a
-        synchronous one-shot check.
+        ``TypeError``.
         """
         with self._submit_lock:
             if self._closed:
@@ -320,11 +305,6 @@ class InferenceExecutor:
             _reap(proc)
         # Post-condition of a successful close(): every worker has exited
         # (join observed termination) and every handle WE held is released.
-        # What close() cannot guarantee is the OS forgetting the pid: on
-        # Windows the kernel process object can stay referenced (console
-        # host, security tooling) for an unbounded time after exit, keeping
-        # the pid openable via OpenProcess. Callers must therefore check
-        # worker disappearance by polling, not synchronously.
         leftover = [proc.pid for proc in live if _alive(proc)]
         if leftover:
             raise RuntimeError(f"worker processes did not terminate: {leftover}")

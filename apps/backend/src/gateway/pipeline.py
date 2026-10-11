@@ -1,16 +1,16 @@
-"""P-18 non-streaming protected roundtrip pipeline.
+"""Protected request pipeline with non-streaming and SSE response handoff.
 
-Integrates all gates and stages of the M2A milestone for a channel:
-1. Header & identity verification (C-02) via TrustedIdentity
-2. Ingress validation (C-01, C-03, C-04) via IngressValidator
-3. Resource admission limiter (P-16) via AdmissionLimiter
-4. Three-way detection orchestration (D-12) via DetectionOrchestrator
-5. Request redaction and token replacement (P-05) via replace_request
-6. Audit watermark capacity guard (A-08) via AuditWatermarkGuard
-7. Evidence gate: intent + envelope encryption (A-03) via EvidenceGate
-8. Knowledge spooling (K-02) via SpoolWriter
-9. Channel-bound outbound client (P-17) via BoundEgressClient
-10. Response restoration (P-06) via restore_response
+Integrates request protection, durable collection and channel-bound egress:
+1. Header and trusted source verification
+2. Ingress validation via IngressValidator
+3. Resource admission limiter via AdmissionLimiter
+4. Three-way detection orchestration via DetectionOrchestrator
+5. Request redaction and token replacement via replace_request
+6. Audit watermark capacity guard via AuditWatermarkGuard
+7. Evidence gate: intent + envelope encryption via EvidenceGate
+8. Knowledge spooling via SpoolWriter
+9. Channel-bound outbound client via BoundEgressClient
+10. Response restoration via restore_response
 
 Guarantees:
 - Upstream receives ONLY redacted tokens in place of detected entities.
@@ -294,15 +294,15 @@ class ProtectedPipeline:
                 raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
         check_deadline()
 
-        # Gate 1: Identity validity period and required request intent/purpose (C-02, O-02)
+        # Gate 1: Identity validity period and required request intent/purpose
         validate_request_authorization(identity, now=now, required_purpose="model-query")
 
-        # Gate 1a: Untrusted Client Headers Check (C-02)
+        # Gate 1a: Untrusted Client Headers Check
         for h in headers:
             if h.lower() in FORBIDDEN_CLIENT_IDENTITY_HEADERS:
                 raise SafetyError(SafetyCode.UNTRUSTED_HEADER_REJECTED, h)
 
-        # Gate 1b: Domain Scope Consistency Checks (C-02, O-05)
+        # Gate 1b: Domain Scope Consistency Checks
         if identity.domain != route.domain:
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "domain mismatch")
 
@@ -315,7 +315,7 @@ class ProtectedPipeline:
         ):
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "dictionary domain mismatch")
 
-        # Gate 1c: Version Provenance & RequestVersionHandle Consistency (C-05)
+        # Gate 1c: Version Provenance & RequestVersionHandle Consistency
         if version_handle is not None:
             version_handle.assert_consistent_hash(self._version_manager.active_package_hash)
             version_handle.manifest.require_complete()
@@ -357,7 +357,7 @@ class ProtectedPipeline:
         if egress_policy.scope != route.domain:
             raise SafetyError(SafetyCode.SCOPE_MISMATCH, "policy scope mismatch")
 
-        # Gate 2: Ingress validation (C-01, C-03, C-04, O-01)
+        # Gate 2: Ingress validation
         validated = IngressValidator.validate_request(
             raw_body=raw_body,
             protocol=route.protocol,
@@ -373,7 +373,7 @@ class ProtectedPipeline:
         text_chars = sum(len(f.content) for f in validated.fragments)
         msg_count = len(validated.fragments)
 
-        # Gate 3: Admission Limiter: Dimension check + Concurrency slot (P-16)
+        # Gate 3: Admission Limiter: Dimension check + Concurrency slot
         self.admission_limiter.admit(
             raw_bytes,
             history_messages=msg_count,
@@ -415,16 +415,16 @@ class ProtectedPipeline:
                 else:
                     fragment_spans[fragment.json_path] = ()
 
-            # Gate 5: Request Token Replacement (P-05)
+            # Gate 5: Request Token Replacement
             redacted_request = validated.parsed_request if detection_failed else replace_request(validated, fragment_spans, context)
             provider_model = route.model_mapping[validated.model]
             redacted_request = redacted_request.model_copy(update={'model':provider_model})
             check_deadline()
 
-            # Gate 6: Audit Watermark Pre-flight Check (A-08)
+            # Gate 6: Audit Watermark Pre-flight Check
             watermark_assessment = self.watermark_guard.check_egress_permitted()
 
-            # Gate 7: Evidence Gate: Intent + Encryption (A-03, A-01)
+            # Gate 7: Evidence Gate: Intent + Encryption
             evidence_record_id = f'req-{uuid.uuid4().hex}'
             intent = ReleaseIntent(
                 intent_id=f"intent-{uuid.uuid4().hex[:12]}",
@@ -450,7 +450,7 @@ class ProtectedPipeline:
             evidence_spec = EvidenceSpec(plaintext=raw_bytes,bucket=self.evidence_bucket,record_id=evidence_record_id,purpose='model-query')
             evidence_permit = self.evidence_gate.admit(intent, evidence_spec)
 
-            # Gate 8: Knowledge Spooling (K-02, O-03)
+            # Gate 8: Knowledge Spooling
             spool_permit: SpoolPermit | None = None
             mode = collection_mode or CollectionMode.REQUIRED
             if auto_collect and mode is not CollectionMode.REQUIRED:
@@ -470,7 +470,7 @@ class ProtectedPipeline:
                     if observation_event is not None:
                         spool_permit = self.spool_writer.collect(observation_event, mode=mode)
 
-            # Gate 9: Outbound Egress Send (P-17)
+            # Gate 9: Outbound Egress Send
             provider_payload=redacted_request.model_dump(exclude_unset=True)
             redacted_payload=json.dumps(provider_payload,ensure_ascii=False).encode('utf-8')
             if history_recorder is not None:
@@ -504,7 +504,7 @@ class ProtectedPipeline:
                 upstream_response.close()
                 raise
 
-            # Gate 10: Response Verification & Restoration (P-06)
+            # Gate 10: Response Verification & Restoration
             if upstream_response.status_code != 200:
                 from gateway.error_sanitizer import ErrorSanitizer
                 sanitized = ErrorSanitizer.sanitize(upstream_response.status_code,upstream_response.headers)
@@ -542,7 +542,6 @@ class ProtectedPipeline:
                 allowed_models=frozenset(route.allowed_models | {provider_model}),
                 allowed_tools=self.tool_schemas(redacted_request, protocol=route.protocol),
                 state_validator=history_adapter.validator if history_adapter is not None else None,
-                allow_unsupported=True,
             )
             restored_response = restored_response.model_copy(update={'model':validated.model})
             check_deadline()

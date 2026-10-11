@@ -1,4 +1,4 @@
-"""PostgreSQL storage adapter for enterprise knowledge domain (K-04, K-12, K-14).
+"""PostgreSQL storage adapter for enterprise knowledge domain.
 
 Provides relational persistence for knowledge sources, entities, claims,
 evidence, transactional outbox events, and consumer receipts.
@@ -74,22 +74,22 @@ def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> 
     tables = conn.execute(
         "SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c "
         "JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname=current_schema() AND c.relkind='r' ORDER BY c.relname").fetchall()
+        "WHERE n.nspname=current_schema() AND c.relkind='r' AND c.relname NOT IN ('request_records','request_stage_contents') ORDER BY c.relname").fetchall()
     columns = conn.execute(
         "SELECT table_name,column_name,ordinal_position,data_type,is_nullable,column_default "
-        "FROM information_schema.columns WHERE table_schema=current_schema() "
+        "FROM information_schema.columns WHERE table_schema=current_schema() AND table_name NOT IN ('request_records','request_stage_contents') "
         "ORDER BY table_name,ordinal_position").fetchall()
     constraints = conn.execute(
         "SELECT conrelid::regclass::text,conname,contype,condeferrable,condeferred,"
         "pg_get_constraintdef(c.oid) FROM pg_constraint c "
-        "WHERE c.connamespace=current_schema()::regnamespace ORDER BY conname").fetchall()
+        "WHERE c.connamespace=current_schema()::regnamespace AND conrelid NOT IN (SELECT oid FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname IN ('request_records','request_stage_contents')) ORDER BY conname").fetchall()
     indexes = conn.execute(
-        "SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+        "SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() AND tablename NOT IN ('request_records','request_stage_contents') "
         "ORDER BY indexname").fetchall()
     triggers = conn.execute(
         "SELECT tgrelid::regclass::text,tgname,pg_get_triggerdef(t.oid) FROM pg_trigger t "
         "WHERE NOT t.tgisinternal AND t.tgrelid IN (SELECT c.oid FROM pg_class c "
-        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema()) "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname NOT IN ('request_records','request_stage_contents')) "
         "ORDER BY tgname").fetchall()
     functions = conn.execute(
         "SELECT p.proname,pg_get_function_identity_arguments(p.oid),p.prosecdef,p.proconfig,p.prosrc "
@@ -97,7 +97,7 @@ def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> 
         "WHERE n.nspname=current_schema() ORDER BY p.proname").fetchall()
     policies = conn.execute(
         "SELECT tablename,policyname,cmd,roles,qual,with_check FROM pg_policies "
-        "WHERE schemaname=current_schema() ORDER BY policyname,tablename").fetchall()
+        "WHERE schemaname=current_schema() AND tablename NOT IN ('request_records','request_stage_contents') ORDER BY policyname,tablename").fetchall()
     canonical = {
         'tables': norm(tables),
         'columns': norm(columns),
@@ -527,7 +527,7 @@ RLS_SETUP_SQL = '\n'.join(
 
 
 class PostgresKnowledgeStorage:
-    """Relational knowledge repository implementing K-04, K-12, K-14."""
+    """Relational knowledge repository implementing,,."""
 
     def __init__(self, connection_uri: str, *, tenant_id: str | None = None, domain: str | None = None,
                  admin_dsn: str | None = None, admin_role: str | None = None) -> None:
@@ -559,7 +559,7 @@ class PostgresKnowledgeStorage:
                     cur.execute(RLS_SETUP_SQL.replace('__ADMIN_ROLE__',admin_literal))
                 if application_role:
                     cur.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
-                    cur.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
+                    cur.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}').format(sql.SQL(',').join(sql.Identifier(schema, table) for table in (*_ASSET_TABLES, *_ADMIN_TABLES)),sql.Identifier(application_role)))
                     cur.execute(sql.SQL('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
                     for function in ("invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ)", "read_authorized_knowledge_candidate(UUID)"):
                         cur.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.' + function + ' TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
@@ -880,7 +880,7 @@ class PostgresKnowledgeStorage:
         conn: psycopg.Connection,
         tombstone: Tombstone,
     ) -> None:
-        """Revoke a publication and write outbox tombstone in ONE transaction (K-12, K-13)."""
+        """Revoke a publication and write outbox tombstone in ONE transaction."""
         with conn.cursor() as cur:
             role_row = cur.execute("SELECT current_setting('app.roles',true)::text[]").fetchone()
             if not role_row or Role.DATA_STEWARD.value not in (role_row[0] or []) or not tombstone.reason.strip():

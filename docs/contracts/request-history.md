@@ -12,15 +12,15 @@
 
 采集从唯一合法BYOK凭据、完整可解析正文、已准入模型/端点校验通过后开始；此后政策拒绝也有记录。认证失败、畸形/超限正文和未知模型在此之前拒绝，不持久采集为请求历史。因此“全部”指本服务固定域内所有已采集记录，不保证记录每次HTTP访问。
 
-四阶段记录是独立受控资产，不属于知识观察/候选，不开放知识发布接口；审计原文读取由管理员直接审阅契约（[admin-record-review](admin-record-review.md)）单独约束，旧审计工单与双人审批接口已删除。不保存 MappingContext；但完整对照正文可能推断出原值关系，全部正文按原文等价敏感数据加密和授权读取。
+四阶段记录是独立受控资产，不属于知识观察/候选，不开放知识发布接口；审计原文读取由管理员直接审阅契约（[admin-record-review](admin-record-review.md)）单独约束。不保存 MappingContext；但完整对照正文可能推断出原值关系，全部正文按原文等价敏感数据加密和授权读取。
 
 ## 组件接口（共同实现依据）
 
 模块为 `request_history`。`HistoryUnavailable` 与 `HistoryNotFound` 使用固定错误信息，不能附带正文、Key、DSN或上游错误原文。
 
-`PostgresHistoryStore(connection_uri, kms, *, tenant_id, domain, retention_days, bucket, audit_directory, max_stage_bytes=16777216)` 要求显式正整数留存天数、已初始化的 request-history 用途 KEK、专用 schema 和普通受限应用连接。
+`PostgresHistoryStore(connection_uri, kms, *, tenant_id, domain, retention_days, bucket, audit_directory, max_stage_bytes=16777216)` 要求显式正整数留存天数、已初始化的 request-history 用途 KEK、统一 schema 内仅有历史表权限的普通受限应用连接。
 
-- `check_ready()`：实际校验受限角色、独立历史表的 forced RLS/不可达 owner、作用域与 KMS。失败拒绝，不能创建缺失结构或补建旧 Key。
+- `check_ready()`：实际校验受限角色、独立历史表的 forced RLS/不可达 owner、作用域与 KMS。失败拒绝，不能创建缺失结构或补建已有记录对应的丢失密钥。
 - `begin(*, protocol, model, raw_body: bytes) -> HistoryRecorder`：生成 request_id，事务保存 processing 元数据及 input 加密正文。
 - `list_requests(*, limit=50, cursor=None, model=None, protocol=None, status=None, error_code=None, created_after=None, created_before=None, actor=None, session_reference=None) -> dict`：返回 `{items: [...], next_cursor: str|null}`，仅按模型/协议/状态/错误码/时间窗等白名单元数据精确筛选，无正文搜索参数；排除过期记录。
 - `get_request(request_id, *, actor=None, session_reference=None) -> dict`：返回单请求元数据和四阶段 `{stage, state, media_type, body}`（body为UTF-8文本，未产生时null）。核对密文绑定，授权读取留痕可靠完成后再次校验期限再释放正文。
@@ -33,10 +33,10 @@
 
 ## HTTP及网页
 
-管理页面 `GET /admin/requests` 及 `/admin` 壳内静态资源受管理员会话保护，未登录跳转 `/login`。数据接口 `GET /api/admin/requests` 接受 limit/cursor 及时间/模型/协议/状态/错误码白名单元数据筛选（无正文搜索参数，非法筛选值返回 422）；`GET /api/admin/requests/{request_id}` 读取详情。两类查询只接受同源管理员会话 Cookie 及统一管理员依赖校验，写操作另校验会话绑定 CSRF token；拒绝无会话、伪造或过期会话，不把供应商 Key 或客户端自报头升级为查询授权。旧 `/history`、`/api/requests` 路由及独立查询 Key 入口整体删除，不保留重定向、兼容路径或另一套匿名入口。
+管理页面由 React 应用提供，未登录跳转 `/login`；页面资源不包含历史正文。数据接口 `GET /api/admin/requests` 接受 limit/cursor 及时间/模型/协议/状态/错误码白名单元数据筛选（无正文搜索参数，非法筛选值返回 422）；`GET /api/admin/requests/{request_id}` 读取详情。两类查询只接受同源管理员会话 Cookie 及统一管理员依赖校验，写操作另校验会话绑定 CSRF token；拒绝无会话、伪造或过期会话，不把供应商 Key 或客户端自报头升级为查询授权。
 
-API正文和页面使用 no-store，设置同源CSP、nosniff、frame-ancestors none等响应边界。错误固定净化；数据库/KMS/访问审计失败拒绝释放正文。网页只使用textContent及文本节点呈现模型输出，不解释模型HTML；支持真实空列表、错误、过期、部分/未知阶段。管理员默认直接查看全部可用阶段的实际正文，不再提供"显示原文"遮挡开关；退出、401 或会话失效时清除页面正文并取消在途请求。模型调用返回服务端 `x-request-id`，便于定位该次记录。
+API正文和页面使用 no-store，设置同源CSP、nosniff、frame-ancestors none等响应边界。错误固定净化；数据库/KMS/访问审计失败拒绝释放正文。网页通过 React 文本节点呈现模型输出，不解释模型HTML；支持真实空列表、错误、过期、部分/未知阶段。管理员默认直接查看全部可用阶段的实际正文，直接展示可用正文；退出、401 或会话失效时清除页面正文并取消在途请求。模型调用返回服务端 `x-request-id`，便于定位该次记录。
 
 ## 部署与验证边界
 
-历史采用独立 PostgreSQL schema，新namespace事务初始化，拒绝旧布局与权限绕过；沿用现有psycopg/受限角色校验/信封加密，不修改知识worker的13表契约。留存期必须明确配置；没有业务期限不启用真实正文采集。合成测试可使用明确的测试期限，不代表生产留存政策。启动CLI可显式选择历史装配，历史装配缺少任何必需设置/资源即拒绝，不进行数据库迁移、旧实现fallback或原文绕行。历史是否启用不决定管理员能否登录；会话存储失效时管理API拒绝，不降级到独立查询Key。
+历史与知识集中在同一 PostgreSQL schema，以明确的表级授权隔离；统一初始化在新namespace事务内完成，拒绝不符合当前结构的布局与权限绕过；沿用现有psycopg/受限角色校验/信封加密，不修改知识模块的15表结构契约。留存期必须明确配置；没有业务期限不启用真实正文采集。合成测试可使用明确的测试期限，不代表生产留存政策。启动CLI可显式选择历史装配，历史装配缺少任何必需设置/资源即拒绝，初始化仅创建新 schema。历史是否启用不决定管理员能否登录；会话存储失效时管理 API 拒绝查询。

@@ -4,31 +4,40 @@ import atexit
 import json
 import os
 from pathlib import Path
-import re
 import threading
+import sys
 from uuid import uuid4
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import make_conninfo
+from psycopg.conninfo import make_conninfo, conninfo_to_dict
 
 _lock = threading.Lock()
 _initialized = False
 _runtime_configuration = None
 _created = []
+_session = None
+_history_configuration = None
+_gateway_configuration = None
 
 
 def _cleanup() -> None:
-    for base_admin_dsn, schema, admin_role in reversed(_created):
+    global _session
+    for base_admin_dsn, schema, roles in reversed(_created):
         try:
             with psycopg.connect(base_admin_dsn, connect_timeout=10) as conn:
-                # Only names explicitly created by this process, never a configured namespace.
-                conn.execute(sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(schema)))
-                if admin_role:
-                    conn.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(admin_role)))
-                    conn.execute(sql.SQL('DROP ROLE IF EXISTS {}').format(sql.Identifier(admin_role)))
-        except Exception:
-            pass
+                if schema is not None:
+                    conn.execute(sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(schema)))
+                for role in roles:
+                    if not conn.execute('SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=%s)', (role,)).fetchone()[0]:
+                        continue
+                    conn.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
+                    conn.execute(sql.SQL('DROP ROLE IF EXISTS {}').format(sql.Identifier(role)))
+        except Exception as exc:
+            print('Gateway test cleanup failed: '+type(exc).__name__, file=sys.stderr)
+    if _session is not None:
+        _session.close()
+        _session = None
 
 
 atexit.register(_cleanup)
@@ -36,15 +45,18 @@ atexit.register(_cleanup)
 def test_configuration() -> dict:
     if _runtime_configuration is not None:
         return _runtime_configuration
-    path = Path(os.environ.get('GATEWAY_TEST_PG_CONFIG', Path(__file__).resolve().parents[1]/'.env.test'))
+    path = Path(os.environ.get('GATEWAY_TEST_PG_CONFIG') or os.environ.get('GATEWAY_HISTORY_PG_CONFIG')
+                or Path(__file__).resolve().parents[1]/'.env.test')
     if not path.is_file():
         raise RuntimeError('Explicit isolated PostgreSQL test configuration required.')
     config = json.loads(path.read_text(encoding='utf-8-sig'))
     for key in ('app_dsn','admin_dsn','schema','application_role'):
         if not isinstance(config.get(key),str) or not config[key]:
             raise RuntimeError('Incomplete isolated PostgreSQL test configuration.')
-    if not re.fullmatch(r'gw_test_[a-z0-9_]+',config['schema']):
-        raise RuntimeError('Test schema must be an explicitly isolated gw_test_ namespace.')
+    if config['schema'] != 'gw_test_gateway':
+        raise RuntimeError('Tests require the single gw_test_gateway schema.')
+    if any(conninfo_to_dict(config[key]).get('dbname') != 'enterprise_gateway' for key in ('app_dsn', 'admin_dsn')):
+        raise RuntimeError('Tests require the dedicated enterprise_gateway database.')
     return config
 
 def get_test_dsn() -> str:
@@ -54,45 +66,58 @@ def get_admin_dsn() -> str:
     return test_configuration()['admin_dsn']
 
 def prepare_test_database() -> None:
-    global _initialized, _runtime_configuration
+    global _initialized, _runtime_configuration, _session, _history_configuration, _gateway_configuration
     with _lock:
         if _initialized:
             return
-        from knowledge.storage import PostgresKnowledgeStorage
-        config=test_configuration()
-        # Each verification process uses a fresh schema; never mutate an old layout.
-        schema=config['schema']+'_'+uuid4().hex[:12]
-        base_admin_dsn=config['admin_dsn']
+        from gateway.database import prepare_database
+        config = test_configuration()
+        base_admin_dsn = make_conninfo(config['admin_dsn'], options='', connect_timeout=10)
+        # A session lock serializes processes using the one fixed test schema.
+        # Refuse leftovers from a crashed run; never silently reset existing data.
+        _session = psycopg.connect(base_admin_dsn, autocommit=True)
+        if not _session.execute("SELECT pg_try_advisory_lock(710231, 1)").fetchone()[0]:
+            _session.close()
+            _session = None
+            raise RuntimeError('Another gateway database test process is running.')
+        schema = config['schema']
+        if _session.execute('SELECT to_regnamespace(%s)', (schema,)).fetchone()[0] is not None:
+            _session.close()
+            _session = None
+            raise RuntimeError('Existing gateway test schema preserved; explicit cleanup required.')
+        token = uuid4().hex[:12]
+        history_role, admin_role = 'gw_test_history_'+token, 'gw_test_admin_'+token
+        history_password, admin_password = os.urandom(32).hex(), os.urandom(32).hex()
+        # Register roles before provisioning; claim a namespace only after our
+        # initializer succeeds, so a concurrent external collision is preserved.
+        _created.append((base_admin_dsn, None, (history_role, admin_role)))
         with psycopg.connect(base_admin_dsn) as conn:
-            conn.execute(sql.SQL('CREATE SCHEMA {} AUTHORIZATION CURRENT_USER').format(sql.Identifier(schema)))
-        config=dict(config,schema=schema,
-                    admin_dsn=make_conninfo(config['admin_dsn'],options='-c search_path='+schema),
-                    app_dsn=make_conninfo(config['app_dsn'],options='-c search_path='+schema))
-        _runtime_configuration=config
-        admin_role = f"{schema}_admin"
-        PostgresKnowledgeStorage(config['admin_dsn']).init_database(
-            enable_rls=True, application_role=config['application_role'], admin_role=admin_role)
-        with psycopg.connect(config['admin_dsn']) as conn:
-            conn.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(config['schema']),sql.Identifier(config['application_role'])))
-            conn.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(sql.Identifier(config['schema']),sql.Identifier(config['application_role'])))
-            conn.execute(sql.SQL('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}').format(sql.Identifier(config['schema']),sql.Identifier(config['application_role'])))
-            conn.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ) TO {}').format(sql.Identifier(config['schema']),sql.Identifier(config['application_role'])))
-            conn.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.read_authorized_knowledge_candidate(UUID) TO {}').format(sql.Identifier(config['schema']),sql.Identifier(config['application_role'])))
-        with psycopg.connect(config['admin_dsn']) as admin_conn:
-            with admin_conn.cursor() as cur:
-                cur.execute(sql.SQL('CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEROLE NOBYPASSRLS').format(sql.Identifier(admin_role)))
-                cur.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(config['schema']),sql.Identifier(admin_role)))
-                cur.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(sql.Identifier(config['schema']),sql.Identifier(admin_role)))
-                cur.execute(sql.SQL('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}').format(sql.Identifier(config['schema']),sql.Identifier(admin_role)))
-                cur.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ) TO {}').format(sql.Identifier(config['schema']),sql.Identifier(admin_role)))
-                cur.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.read_authorized_knowledge_candidate(UUID) TO {}').format(sql.Identifier(config['schema']),sql.Identifier(admin_role)))
-        config = dict(config, admin_role=admin_role,
-                      admin_app_dsn=make_conninfo(base_admin_dsn, options='-c search_path='+config['schema']))
-        _runtime_configuration=config
-        _created.append((base_admin_dsn, schema, admin_role))
-        with psycopg.connect(config['app_dsn']) as conn:
-            role=conn.execute('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
-            owns=conn.execute('SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user)',(config['schema'],)).fetchone()[0]
-            if role is None or any(role) or owns:
-                raise RuntimeError('Test application must be nonowner, nonsuperuser, and no BYPASSRLS.')
-        _initialized=True
+            for role, password in ((history_role, history_password), (admin_role, admin_password)):
+                conn.execute(sql.SQL('CREATE ROLE {} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB '
+                                     'NOCREATEROLE NOREPLICATION PASSWORD {}').format(sql.Identifier(role), sql.Literal(password)))
+                conn.execute(sql.SQL('GRANT CONNECT ON DATABASE {} TO {}').format(
+                    sql.Identifier(conn.info.dbname), sql.Identifier(role)))
+        bound = prepare_database(dict(config, admin_dsn=base_admin_dsn, history_role=history_role,
+                     history_dsn=make_conninfo(config['app_dsn'], user=history_role, password=history_password),
+                     admin_role=admin_role,
+                     admin_app_dsn=make_conninfo(config['app_dsn'], user=admin_role, password=admin_password)))
+        _created[-1] = (base_admin_dsn, schema, (history_role, admin_role))
+        _gateway_configuration = bound
+        # Governance tests explicitly need the DDL-owner connection for fixtures.
+        # Runtime login tests derive a restricted login from this private owner DSN.
+        _runtime_configuration = dict(bound, admin_app_dsn=bound['admin_dsn'])
+        _history_configuration = dict(schema=schema, application_role=history_role,
+                     admin_dsn=bound['admin_dsn'], app_dsn=bound['history_dsn'],
+                     report={'initialized': True, 'forced_rls': True, 'asset_count': 2},
+                     original_schema=schema)
+        _initialized = True
+
+
+def history_configuration() -> dict:
+    prepare_test_database()
+    return _history_configuration
+
+
+def gateway_configuration() -> dict:
+    prepare_test_database()
+    return _gateway_configuration

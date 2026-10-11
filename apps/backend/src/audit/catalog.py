@@ -1,25 +1,22 @@
-"""B2 trusted audit catalog: controlled background builder, exact record links.
+"""Trusted audit catalog: controlled background builder, exact record links.
 
-DESIGN §4.1: a background catalog builder — never on the
-:class:`enterprise_gateway.evidence_gate.EvidenceGate.admit` egress path —
+A background catalog builder — never on the
+:class:`audit.evidence_gate.EvidenceGate.admit` egress path —
 scans only the assembler-fixed intent/evidence roots and appends one durable
 catalog document per evidence record. A record enters the catalog only
 through its persisted, server-preallocated link: the intent document must
 carry the exact ``evidence_record_id`` (the same identifier
-:class:`enterprise_gateway.evidence_gate.EvidenceSpec` committed), the
+:class:`audit.evidence_gate.EvidenceSpec` committed), the
 evidence file must live inside the controlled evidence root (no symlink
 escape), and the envelope header must agree with the link on record_id and
 domain. Time-neighbourhood or filename-order guesses are never used.
 
-Retention comes from server-authoritative sources only: the lifecycle fields
-persisted in the intent submission when present, otherwise the injected
-``lifecycle`` policy callable (``record_id -> (retention_until,
-policy_version)``). Client-side values can never mint retention. Legacy
-intents without a record_id link, tenant link, or lifecycle basis stay
-invisible — the builder neither catalogues them nor counts them as backlog.
+Retention comes exclusively from lifecycle fields persisted in the intent.
+Intents without an exact evidence link, tenant link or complete lifecycle
+metadata stay invisible and are excluded from backlog counts.
 
 Writes are serialized by an OS advisory lock and bounded by an independent
-quota (:data:`MAX_CATALOG_BYTES`) so the catalog cannot crowd out mandatory
+quota ( :data:`MAX_CATALOG_BYTES`) so the catalog cannot crowd out mandatory
 intent/evidence/spool retention space. A catalog write failure raises
 ``SafetyError(AUDIT_WRITE_FAILED)``; the builder never fabricates success.
 
@@ -224,7 +221,7 @@ def _resolve_inside(root: Path, name: str) -> Path | None:
 
 
 class AuditCatalogBuilder:
-    """Controlled background primitive; the lifecycle loop itself belongs to T4.
+    """Controlled background primitive; the runtime owns the background loop.
 
     ``build_once()`` processes up to ``batch_limit`` new trusted records per
     call and is idempotent by ``record_id``: restarts rescan freely and never
@@ -239,7 +236,6 @@ class AuditCatalogBuilder:
         intent_root: Path,
         evidence_root: Path,
         catalog_directory: Path,
-        lifecycle: Callable[[str], tuple[datetime, str]],
         batch_limit: int = 200,
     ) -> None:
         if not isinstance(intent_root, (str, Path)):
@@ -248,13 +244,10 @@ class AuditCatalogBuilder:
             raise TypeError("evidence_root must be a str or Path")
         if not isinstance(catalog_directory, (str, Path)):
             raise TypeError("catalog_directory must be a str or Path")
-        if not callable(lifecycle):
-            raise TypeError("lifecycle must be callable")
         if type(batch_limit) is not int or batch_limit < 1:
             raise ValueError("batch_limit must be a positive integer")
         self._intent_root = Path(intent_root).absolute()
         self._evidence_root = Path(evidence_root).absolute()
-        self._lifecycle = lifecycle
         self._batch_limit = batch_limit
         catalog_failed = False
         try:
@@ -337,7 +330,7 @@ class AuditCatalogBuilder:
         except ValueError:
             return None
         if intent.tenant_id is None or intent.evidence_record_id is None:
-            return None  # no persisted exact link: legacy records stay invisible
+            return None  # Catalog entries require the persisted exact evidence link.
         record_id = intent.evidence_record_id
         evidence_name = f"{record_id}.evidence.json"
         evidence_path = _resolve_inside(self._evidence_root, evidence_name)
@@ -357,19 +350,7 @@ class AuditCatalogBuilder:
         retention_until = intent.evidence_retention_until
         policy_version = intent.evidence_lifecycle_policy_version
         if retention_until is None or policy_version is None:
-            lifecycle_retention, lifecycle_policy = self._lifecycle(record_id)
-            if (
-                not isinstance(lifecycle_retention, datetime)
-                or lifecycle_retention.tzinfo is None
-                or lifecycle_retention.utcoffset() is None
-                or not isinstance(lifecycle_policy, str)
-                or not lifecycle_policy.strip()
-            ):
-                return None  # the policy oracle refused: no fabricated lifecycle
-            if retention_until is None:
-                retention_until = lifecycle_retention
-            if policy_version is None:
-                policy_version = lifecycle_policy
+            return None
         status = "available" if _utcnow() < retention_until else "expired"
         return CatalogEntry(
             tenant_id=intent.tenant_id,

@@ -1,4 +1,4 @@
-"""D-09 sliding-window NER extraction with exact source-offset recovery.
+"""Sliding-window NER extraction with exact source-offset recovery.
 
 Inputs longer than one model window are processed with fixed-stride sliding
 windows and merged deterministically into entity spans on original-text code
@@ -162,8 +162,7 @@ def _decode_window_spans(
 class NerWindowMerger:
     """Fixed-window NER extractor with deterministic offset recovery.
 
-    ``tokenizer``/``session``/``id2label`` are the components of a D-08
-    ``LoadedNerPackage`` (duck-typed here so tests can inject controlled
+    ``tokenizer``/``session``/``id2label`` are the components of a ``LoadedNerPackage`` (duck-typed here so tests can inject controlled
     fakes; production wiring passes ``load_model_package`` results).
     ``window_length`` counts the special tokens; ``stride`` is the content
     advance between consecutive windows.

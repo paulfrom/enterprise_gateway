@@ -14,6 +14,7 @@ import anyio
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from gateway.admin_contract import HistoryPage, HistoryDetail, ERROR_RESPONSES, HISTORY_QUERY
 from gateway.admin_auth import AdminAuthService, AdminContext
 from gateway.admin_storage import AdminStorageUnavailable, SessionInvalid
 from request_history.models import ERROR_CODES, PROTOCOLS, STATUSES, HistoryNotFound
@@ -102,7 +103,7 @@ def install_history_routes(app: FastAPI, store, auth_service: AdminAuthService) 
         raise TypeError("auth_service must be an AdminAuthService")
     require_admin = auth_service.require_admin()
 
-    @app.get("/api/admin/requests")
+    @app.get("/api/admin/requests", response_model=HistoryPage, responses=ERROR_RESPONSES, openapi_extra=HISTORY_QUERY)
     async def request_list(request: Request, context: AdminContext = Depends(require_admin)):
         try:
             filters = _parse_list_query(request)
@@ -116,7 +117,7 @@ def install_history_routes(app: FastAPI, store, auth_service: AdminAuthService) 
             return _error("HISTORY_UNAVAILABLE", 503)
         return JSONResponse(content=payload, headers=_SECURITY_HEADERS)
 
-    @app.get("/api/admin/requests/{request_id}")
+    @app.get("/api/admin/requests/{request_id}", response_model=HistoryDetail, responses=ERROR_RESPONSES)
     async def request_detail(request: Request, request_id: str,
                              context: AdminContext = Depends(require_admin)):
         # Keep client-supplied paths out of durable access metadata.

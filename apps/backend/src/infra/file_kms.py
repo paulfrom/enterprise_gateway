@@ -13,7 +13,6 @@ do not prove deletion of filesystem snapshots or copied keys; rollback of the
 whole controlled store is outside this backend's trust boundary. Master/KEK
 rotation needs coordinated backend governance; this backend does not expose a
 pretend rotation API. Version and random key ID are bound to every wrapped DEK.
-Windows directory rename durability follows durable_write's stated limitation.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import time
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -91,25 +89,13 @@ class FileKmsProvider(KmsProvider):
             path = self._directory / ".kms.lock"
             if path.is_symlink():
                 raise _unavailable()
-            fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             handle = os.fdopen(fd, "r+b", buffering=0)
             # OS locks can cover a byte beyond EOF. Never write a sentinel
             # before acquiring it: another handle may already own that byte.
             handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                deadline = time.monotonic() + 30
-                while True:
-                    try:
-                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                        break
-                    except OSError:
-                        if time.monotonic() >= deadline:
-                            raise _unavailable() from None
-                        time.sleep(0.02)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
             acquired = True
             yield
         except (OSError, ValueError):
@@ -118,12 +104,8 @@ class FileKmsProvider(KmsProvider):
             if handle is not None:
                 if acquired:
                     handle.seek(0)
-                    if os.name == "nt":
-                        import msvcrt
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        import fcntl
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
 
     @staticmethod
@@ -144,7 +126,7 @@ class FileKmsProvider(KmsProvider):
 
     def _read(self, selector: dict) -> tuple[dict, bytes]:
         path = self._path(selector)
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             raw = stream.read(4097)
         if len(raw) > 4096:

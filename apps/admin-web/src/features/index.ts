@@ -1,2 +1,7 @@
-// Feature modules placeholder
-export {};
+export * from './Dashboard';
+export * from './History';
+export * from './KnowledgeSources';
+export * from './KnowledgeCandidates';
+export * from './KnowledgePublications';
+export * from './KnowledgeObservations';
+export * from './SecurityAudit';

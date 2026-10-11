@@ -1,6 +1,6 @@
-"""A-07 observability whitelist: ordinary logs/metrics/errors/traces carry metadata only.
+"""Observability whitelist: ordinary logs/metrics/errors/traces carry metadata only.
 
-Contract (DESIGN §6/§8): routine observability records must never carry request
+Contract: routine observability records must never carry request
 bodies, prompts, credentials, or employee content. The boundary is enforced
 structurally, not by trusting authors:
 
@@ -154,11 +154,11 @@ def scan_record(record: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
 
 
 def scan_sanitized_error(response) -> tuple[tuple[str, Any], ...]:
-    """Whitelist-check a P-13 sanitized error response before it is logged/traced.
+    """Whitelist-check a sanitized error response before it is logged/traced.
 
     Maps the :class:`enterprise_gateway.error_sanitizer.SanitizedErrorResponse`
     onto whitelist fields (status code, controlled error code, safe message,
-    approved pass-through headers) and scans the result, so the P-13 output
+    approved pass-through headers) and scans the result, so the output
     contract and this whitelist cannot drift apart silently.
     """
     record: dict[str, Any] = {

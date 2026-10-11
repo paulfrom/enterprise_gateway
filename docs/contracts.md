@@ -1,6 +1,6 @@
 # 企业隐私网关契约与规范体系
 
-本文档定义企业隐私网关的核心契约体系与安全边界规范。字段级数据模型直接由 `enterprise_gateway` 相应模块中的强类型 Pydantic Schema（`extra="forbid", strict=True`）定义并保证单一真实来源。
+本文档定义企业隐私网关的核心契约体系与安全边界规范。字段级数据模型直接由 `apps/backend/src` 相应模块中的强类型 Pydantic Schema（`extra="forbid", strict=True`）定义并保证单一真实来源。
 
 ---
 
@@ -18,9 +18,9 @@
 ## 2. 可信身份与保护域契约 (Identity Contract)
 
 * **身份通道分离**：在线模型入口不依赖企业身份，使用 BYOK 受限来源上下文（`UnverifiedSourceContext`，见 ADR 0005）；管理入口使用服务端会话签发的 `AdminContext`（见 ADR 0007 与 [管理控制台契约](contracts/admin-console.md)）；`TrustedIdentity` 仅保留给既有受信内部流程，明确限定 `caller_id`、`tenant_id`、`domain_id`（保护域）、`role`、`purposes` 及数据访问权限 `scopes`，并严格处于时间有效期内（`authenticated_at <= now <= expires_at`）。
-* **防伪造原则**：外部客户端请求头自称的租户或保护域一律无效，身份元数据仅允许由网关上游受信任的鉴权反向代理/内部网关适配注入；管理权限只来自服务端管理员会话，客户端自报角色、ACL 或身份头均不能升级为管理员。
-* **默认兼容入口**：HTTP 入口默认丢弃客户端自报的身份、租户、域、角色、用途和 ACL 头，后续鉴权与流水线只使用服务端固定处理范围及 BYOK 受限来源。显式 `strict` 模式保留对此类头的拒绝。两种模式均不得由自报信息建立企业身份、管理权限或知识权限。
-* **身份与原始 ACL 分离**：网关前置统一入口，所有经过网关的输入默认可采集，缺客户端来源 ID 或原始 ACL 不作为采集拒绝前提。客户端传入的可信原始 ACL（若存在）予以保留，仅用于下游知识资产的读取与发布授权，不与模型外发权限或管理授权混淆。
+* **防伪造原则**：HTTP 模型入口的处理范围来自服务端部署配置，BYOK 只提供未验证的受限来源关联；拒绝客户端自报身份、租户、域、角色、用途和 ACL 头。管理权限只来自服务端管理员会话。
+* **模型入口身份校验**：拒绝客户端自报身份、租户、域、角色、用途和 ACL 头；BYOK 受限来源与处理范围来自服务端配置。
+* **身份与原始 ACL 分离**：HTTP BYOK 来源保留为 unverified，处理 ACL 限制到服务端作用域。受信内部调用通过 `TrustedIdentity` 提供的原始 ACL 保留为证据；下游知识消费授权由版本化治理显式确认，不从客户端自报信息推导。
 * **跨域强阻断**：严禁请求跨越已分配的保护域访问数据或应用非本域隐私政策。
 
 ---
@@ -29,11 +29,10 @@
 
 支持 **OpenAI Chat Completions** 与 **Anthropic Claude Messages** 两种标准交互协议：
 
-* **选择性处理与透传**：仅提取已支持的文本叶节点执行检测和替换。未知字段、未知内容类型、图片/文件、客户端元数据、用量字段、模型控制参数、工具定义与 schema 按原值透传，不因网关无法处理而拒绝，也不删除未知字段。未处理字段不承诺脱敏。
-* **路由与基本结构**：请求必须是可解析的 JSON 对象，并携带服务端已绑定的模型名。保留鉴权、请求总时限与资源预算。独立严格解析工具仍可用于离线契约检查，在线流水线不以它作为未知字段的准入门禁。
-* **对话内容与工具结果**：`user`/`assistant` 字符串内容、`text` 块、assistant 的 `reasoning`/`reasoning_content`、非豁免工具结果进入检测与脱敏；`Skill` 结果豁免。系统提示词和工具调用结构保持原样。替换仅触及实际提取出的文本路径，未知块的数组位置、字段和值保留。
+* **严格协议准入**：在线入口调用 `parse_deepseek_chat_completion` 或 `parse_claude_messages`，拒绝未知字段、错误类型及未准入内容块；模型必须绑定服务端路由。
+* **对话内容与工具结果**：检测 `user`/`assistant` 消息文本和工具结果；`Skill` 结果豁免。系统提示词、工具定义和工具参数不进入检测；工具 schema、工具选择和历史调用仍执行结构校验。DeepSeek 请求中的思考历史拒绝；Claude 签名历史需供应商验证及域/版本绑定的网关 receipt。
 * **检测故障策略**：`GATEWAY_DETECTION_FAILURE_MODE` 为服务端配置，默认 `error`。显式配置 `passthrough` 时，请求期间检测器故障、NER 故障和检测超时允许未脱敏文本外发，并记录不含业务内容的故障码日志。已发现的高敏秘密、鉴权失败、整体请求超时和持久化失败不属于检测故障旁路。
-* **响应处理**：支持的文本位置精确恢复映射令牌；未知响应元数据、用量字段及不支持的内容保持原值。流式响应的未知 JSON 事件及未知内容块透传；已支持的协议终态和真实 EOF 仍用于关闭资源和提交历史。
+* **响应处理**：非流式响应及 SSE 使用已准入的类型与字段集合，拒绝未知或损坏映射令牌、结构字段中的令牌及无效工具参数。流式业务内容在完整协议终态与真实 EOF 验证后释放。
 * **保留令牌字面量守卫**：无论检测器是否返回敏感区间（即使返回空 Span），输入文本包含保留命名空间字面量（如 `<<ENT_...>>`）均严格拦截阻断。
 
 ---
@@ -92,7 +91,7 @@
 
 知识候选及拒绝由PG持久化。归一实体/claim仅作内部描述索引，读取必须通过具体候选上下文核验候选及全部来源权限；不得并集来源ACL扩大共享表读取。受限SECURITY DEFINER函数固定search_path、撤销PUBLIC执行权，应用角色非owner且无BYPASSRLS；部署需独立受控管理owner，不能给应用角色该权限。读取按稳定来源身份排序取得共享锁并保持至事务提交，撤回/到期等待先开始的读取事务完成；已提交撤回后的新读拒绝。
 
-以上并发取消与事务锁模式分别沿用[AnyIO取消屏蔽](https://anyio.readthedocs.io/en/stable/cancellation.html#shielding)和[PostgreSQL行锁](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)，不引入原文直连或兼容路径。
+以上并发取消与事务锁模式分别沿用[AnyIO取消屏蔽](https://anyio.readthedocs.io/en/stable/cancellation.html#shielding)和[PostgreSQL行锁](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)。
 
 ## 9. 质量审计与置信区间门禁 (Quality Audit)
 

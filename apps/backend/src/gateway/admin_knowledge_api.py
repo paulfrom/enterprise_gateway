@@ -1,3 +1,4 @@
+from gateway.admin_contract import (ObjectPage, ObjectDetail, GovernanceResult, WithdrawResult, PublishResult, RejectResult, ReviseResult, Revocation, ERROR_RESPONSES)
 """Authenticated knowledge governance; bounded work on a separate admin domain."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -216,61 +217,61 @@ def install_knowledge_admin_routes(app, auth_service, governance):
         result = getattr(governance, method)(object_id, context=scope, **body.model_dump())
         return response(result)
 
-    @app.get('/api/admin/sources')
+    @app.get('/api/admin/sources', response_model=ObjectPage, responses=ERROR_RESPONSES)
     def sources(request: Request, status: str | None = None, use: str | None = None, audience: str | None = None,
                 limit: _Limit = 50, cursor: _Cursor = None, context=Depends(require)):
         return respond(context, request, lambda: listing('list_sources', status=status, use=use, audience=audience, limit=limit, cursor=cursor))
 
-    @app.get('/api/admin/sources/{source_id}')
+    @app.get('/api/admin/sources/{source_id}', response_model=ObjectDetail, responses=ERROR_RESPONSES)
     def source(request: Request, source_id: str, version: str | None = None, context=Depends(require)):
         return respond(context, request, lambda: detail('knowledge_sources', 'source_id', source_id, 'KNOWLEDGE_SOURCE_NOT_FOUND', version=version))
 
-    @app.get('/api/admin/candidates')
+    @app.get('/api/admin/candidates', response_model=ObjectPage, responses=ERROR_RESPONSES)
     def candidates(request: Request, state: str | None = None, source_id: str | None = None, limit: _Limit = 50,
                    cursor: _Cursor = None, consumer: str | None = None, use: str | None = None, context=Depends(require)):
         return respond(context, request, lambda: listing('list_candidates', 'candidate', consumer, use, state=state, source_id=source_id, limit=limit, cursor=cursor))
 
-    @app.get('/api/admin/candidates/{candidate_id}')
+    @app.get('/api/admin/candidates/{candidate_id}', response_model=ObjectDetail, responses=ERROR_RESPONSES)
     def candidate(request: Request, candidate_id: str, consumer: str | None = None, use: str | None = None, context=Depends(require)):
         return respond(context, request, lambda: detail('knowledge_candidates', 'candidate_id', candidate_id, 'KNOWLEDGE_CANDIDATE_NOT_FOUND', kind='candidate', consumer=consumer, use=use))
 
-    @app.get('/api/admin/publications')
+    @app.get('/api/admin/publications', response_model=ObjectPage, responses=ERROR_RESPONSES)
     def publications(request: Request, limit: _Limit = 50, cursor: _Cursor = None, consumer: str | None = None,
                      use: str | None = None, context=Depends(require)):
         return respond(context, request, lambda: listing('list_publications', 'publication', consumer, use, limit=limit, cursor=cursor))
 
-    @app.get('/api/admin/publications/{publication_id}')
+    @app.get('/api/admin/publications/{publication_id}', response_model=ObjectDetail, responses=ERROR_RESPONSES)
     def publication(request: Request, publication_id: str, consumer: str | None = None, use: str | None = None, context=Depends(require)):
         return respond(context, request, lambda: detail('knowledge_publications', 'publication_id', publication_id, 'KNOWLEDGE_PUBLICATION_NOT_FOUND', kind='publication', consumer=consumer, use=use))
 
-    @app.get('/api/admin/observations')
+    @app.get('/api/admin/observations', response_model=ObjectPage, responses=ERROR_RESPONSES)
     def observations(request: Request, limit: _Limit = 50, cursor: _Cursor = None, context=Depends(require)):
         return respond(context, request, lambda: listing('list_observations', limit=limit, cursor=cursor))
 
-    @app.get('/api/admin/observations/{observation_id}')
+    @app.get('/api/admin/observations/{observation_id}', response_model=ObjectDetail, responses=ERROR_RESPONSES)
     def observation(request: Request, observation_id: str, context=Depends(require)):
         return respond(context, request, lambda: detail('knowledge_observations', 'dedup_key', observation_id, 'KNOWLEDGE_SOURCE_NOT_FOUND'))
 
-    @app.post('/api/admin/sources/{source_id}/governance')
+    @app.post('/api/admin/sources/{source_id}/governance', response_model=GovernanceResult, responses=ERROR_RESPONSES)
     def confirm(request: Request, source_id: str, body: Governance, context=Depends(write)):
         return respond(context, request, lambda: action('confirm_source_governance', source_id, body, context, lambda result: {'governance_version_id': result}))
 
-    @app.post('/api/admin/sources/{source_id}/withdraw')
+    @app.post('/api/admin/sources/{source_id}/withdraw', response_model=WithdrawResult, responses=ERROR_RESPONSES)
     def withdraw(request: Request, source_id: str, body: Withdraw, context=Depends(write)):
         return respond(context, request, lambda: action('withdraw_source', source_id, body, context, lambda result: {'source_version': body.source_version, 'withdrawn': True}))
 
-    @app.post('/api/admin/candidates/{candidate_id}/publish')
+    @app.post('/api/admin/candidates/{candidate_id}/publish', response_model=PublishResult, responses=ERROR_RESPONSES)
     def publish(request: Request, candidate_id: str, body: Publish, context=Depends(write)):
         return respond(context, request, lambda: action('publish_candidate', candidate_id, body, context, lambda result: {'publication_id': result}))
 
-    @app.post('/api/admin/candidates/{candidate_id}/reject')
+    @app.post('/api/admin/candidates/{candidate_id}/reject', response_model=RejectResult, responses=ERROR_RESPONSES)
     def reject(request: Request, candidate_id: str, body: Basis, context=Depends(write)):
         return respond(context, request, lambda: action('reject_candidate', candidate_id, body, context, lambda result: {'rejected': True}))
 
-    @app.post('/api/admin/candidates/{candidate_id}/revise')
+    @app.post('/api/admin/candidates/{candidate_id}/revise', response_model=ReviseResult, responses=ERROR_RESPONSES)
     def revise(request: Request, candidate_id: str, body: Revise, context=Depends(write)):
         return respond(context, request, lambda: action('revise_candidate', candidate_id, body, context, lambda result: {'candidate_id': result}))
 
-    @app.post('/api/admin/publications/{publication_id}/revoke')
+    @app.post('/api/admin/publications/{publication_id}/revoke', response_model=Revocation, responses=ERROR_RESPONSES)
     def revoke(request: Request, publication_id: str, body: Basis, context=Depends(write)):
         return respond(context, request, lambda: action('revoke_publication', publication_id, body, context, lambda result: {'revoked': True}))

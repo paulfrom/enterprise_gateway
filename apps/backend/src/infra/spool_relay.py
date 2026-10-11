@@ -1,17 +1,16 @@
-"""K-03 spool relay: at-least-once delivery with idempotent dedup and post-ack delete.
+"""Spool relay: at-least-once delivery with idempotent dedup and post-ack delete.
 
-Relay moves K-02 encrypted spool records into the ledger sink (DESIGN §7:
-来源ID+版本+证据位置+规范编码的候选内容幂等去重；历史重发与重试不增加独
-立来源数). This module does NOT claim distributed exactly-once: the semantic is
+Relay moves encrypted spool records into the ledger sink.
+This module does NOT claim distributed exactly-once: the semantic is
 **at-least-once delivery + idempotent contribution**:
 
 1. read stage — every top-level ``*.env.json`` spool file is strict-parsed
-   (A-02 :func:`parse_record`) and AEAD-decrypted
-   (:func:`decrypt_record`); the plaintext must deserialize as an
-   :class:`ObservationEvent`;
+   (func:`parse_record`) and AEAD-decrypted
+   ( :func:`decrypt_record`); the plaintext must deserialize as an
+:class:`ObservationEvent`;
 2. submit stage — a deterministic :func:`compute_dedup_key` is checked via
-   :meth:`LedgerSink.has_contributed`; only a miss calls
-   :meth:`LedgerSink.submit`;
+:meth:`LedgerSink.has_contributed`; only a miss calls
+:meth:`LedgerSink.submit`;
 3. confirm stage — only after the sink acknowledged (submit returned, or the
    key was already contributed) is the spool file deleted. A crash between
    submit and delete therefore redelivers the record on the next pass; the
@@ -41,7 +40,7 @@ Read-stage failures are classified into two classes:
   or an ``OSError`` while reading the spool file (e.g. the file vanished
   after listing): the failure is transient, so the record is NOT quarantined
   and NOT deleted; it stays in the spool, is counted as a
-  :class:`RelayFailure`, and the pass raises at the end like any other
+:class:`RelayFailure`, and the pass raises at the end like any other
   unconfirmed submission.
 
 Unconfirmed or transiently-failed records leave the spool file in place and
@@ -52,7 +51,7 @@ retained file recovers without double contribution once the infrastructure
 is healthy again.
 
 The sink is an abstract interface; this batch ships only the in-memory test
-sink below. The real PostgreSQL implementation is K-04/K-10.
+sink below. The real PostgreSQL implementation is /.
 """
 
 from __future__ import annotations
@@ -132,8 +131,8 @@ class LedgerSink(ABC):
     never calls ``submit`` for a key with :meth:`has_contributed` true, but a
     crash after ``submit`` can redeliver the same key. The real PostgreSQL
     sink (unique constraint on the dedup key inside the contribution
-    transaction) is K-04/K-10; this batch ships only
-    :class:`InMemoryLedgerSink` for local tests.
+    transaction) is /; this batch ships only
+:class:`InMemoryLedgerSink` for local tests.
     """
 
     @abstractmethod
@@ -283,7 +282,7 @@ class SpoolRelay:
         Every transient stage-1 failure and every stage-2/stage-3 failure
         keeps its spool file (no confirmation) and is counted; the pass
         always attempts the remaining files. If any failure was recorded, a
-        :class:`SafetyError` with code ``RELAY_SUBMIT_FAILED`` is raised at
+:class:`SafetyError` with code ``RELAY_SUBMIT_FAILED`` is raised at
         the end, with the full :class:`RelayStats` attached as ``exc.stats``
         — a retry over the retained files then recovers through the dedup
         key without double contribution. Quarantined records do not raise:

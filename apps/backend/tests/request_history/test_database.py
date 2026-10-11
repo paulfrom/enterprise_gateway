@@ -75,6 +75,29 @@ class HistoryDatabasePostgresTests(unittest.TestCase):
                 conn.execute("SELECT set_config('request_history.domain','foreign-domain',true)")
                 self.assertEqual(0,conn.execute('SELECT count(*) FROM request_records').fetchone()[0])
 
+    def test_shared_schema_contains_all_tables_and_rejects_cross_purpose_grants(self):
+        from knowledge.storage import _ASSET_TABLES, _ADMIN_TABLES
+        from tests.pg_support import get_test_dsn
+        with psycopg.connect(self.config['admin_dsn']) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r'")}
+            self.assertEqual(tables, set((*_ASSET_TABLES, *_ADMIN_TABLES, 'request_records', 'request_stage_contents')))
+            self.assertEqual('enterprise_gateway', conn.info.dbname)
+        with psycopg.connect(get_test_dsn()) as conn:
+            self.assertEqual(self.config['schema'], conn.execute('SELECT current_schema()').fetchone()[0])
+            self.assertFalse(conn.execute("SELECT has_table_privilege(current_user,'request_records','SELECT')").fetchone()[0])
+        # A mistakenly granted knowledge privilege must fail the history gate.
+        from psycopg import sql
+        with psycopg.connect(self.config['admin_dsn']) as owner:
+            owner.execute(sql.SQL('GRANT SELECT ON knowledge_sources TO {}').format(sql.Identifier(self.config['application_role'])))
+        try:
+            with psycopg.connect(self.config['app_dsn']) as conn:
+                with self.assertRaises(HistoryUnavailable):
+                    assert_history_connection(conn)
+        finally:
+            with psycopg.connect(self.config['admin_dsn']) as owner:
+                owner.execute(sql.SQL('REVOKE SELECT ON knowledge_sources FROM {}').format(sql.Identifier(self.config['application_role'])))
+
     def test_existing_namespace_refused_without_ddl_changes(self):
         before = None
         with psycopg.connect(self.config['admin_dsn']) as conn:

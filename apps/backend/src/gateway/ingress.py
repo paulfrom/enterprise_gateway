@@ -1,7 +1,6 @@
-"""Unified ingress validator combining policy (C-01), protocol (C-03), and static exemption (C-04).
+"""Unified ingress validator combining policy, protocol, and static exemption.
 
-Selects supported text for protection while preserving opaque provider fields.
-An explicit strict parser remains available for offline contract checks.
+Validates admitted protocol fields before selecting text for protection.
 Detection and masking apply to user-role and assistant-role message text and
 to tool/MCP results; system prompts, tool definitions and tool arguments pass
 through undetected by design. Results of skill-loading tools are exempt so
@@ -76,22 +75,16 @@ class IngressValidator:
         allowed_models: frozenset[str] | None = None,
         history_adapter: HistoricalStateAdapter | None = None,
         local_collection_only: bool = False,
-        allow_unsupported: bool = True,
     ) -> ValidatedIngressRequest:
-        # 1. Enforce egress classification policy (C-01)
+        # 1. Enforce egress classification policy
         try:
             if not local_collection_only:
                 resolve_egress_policy(policy, category)
         except SafetyError as exc:
             raise SafetyError(SafetyCode.POLICY_REJECTED, exc.code.value) from None
 
-        # 2. Strict candidate protocol parse (C-03)
-        if allow_unsupported:
-            from protocol.passthrough import parse_passthrough_request, text_fragments
-            parsed = parse_passthrough_request(raw_body, protocol, allowed_models)
-            model_name = parsed.model
-            raw_fragments = list(text_fragments(parsed.model_dump(), protocol, SKILL_RESULT_EXEMPT_TOOLS))
-        elif protocol == DEEPSEEK_CHAT_PROTOCOL:
+        # 2. Strict candidate protocol parse
+        if protocol == DEEPSEEK_CHAT_PROTOCOL:
             try:
                 parsed = parse_deepseek_chat_completion(raw_body, allowed_models=allowed_models)
             except SafetyError as exc:
@@ -101,8 +94,6 @@ class IngressValidator:
                           for call in msg.tool_calls or ()}
             raw_fragments = []
             for i, msg in enumerate(parsed.messages):
-                if msg.role == 'assistant' and msg.reasoning_content is not None:
-                    raw_fragments.append((f"messages[{i}].reasoning_content", msg.reasoning_content))
                 if msg.role == 'tool':
                     # Tool/MCP results may carry sensitive file contents and are
                     # detected, except results of skill-loading tools.
@@ -147,13 +138,19 @@ class IngressValidator:
             )
 
         payload = parsed.model_dump(exclude_none=True)
-        if not allow_unsupported and history_adapter is not None:
+        # DeepSeek reasoning history has no admitted proof format. The gateway
+        # must reject it before detection or any upstream release.
+        if any(m.get('reasoning_content') is not None for m in payload['messages']):
+            raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, 'unverified history')
+        if history_adapter is not None:
             history_adapter.validate_message_history(payload['messages'])
-        elif not allow_unsupported and any(isinstance(m.get('content'), list) and any(b.get('type') == 'thinking' for b in m['content']) for m in payload['messages']):
+        elif any(isinstance(m.get('content'), list) and any(
+                b.get('type') in ('thinking', 'thought', 'redacted_thinking')
+                for b in m['content']) for m in payload['messages']):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unverified history')
         # Detection scope is user/assistant message text and tool results;
         # tools and other structure are validated for shape, never scanned.
-        tools = [] if allow_unsupported else (payload.get('tools') or [])
+        tools = payload.get('tools') or []
         names = [t['function']['name'] if protocol == DEEPSEEK_CHAT_PROTOCOL else t['name'] for t in tools]
         if len(names) != len(set(names)):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'duplicate tools')
@@ -180,13 +177,13 @@ class IngressValidator:
             except exceptions.SchemaError: raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid tool schema') from None
             name = tool['function']['name'] if protocol == DEEPSEEK_CHAT_PROTOCOL else tool['name']
             schemas[name] = schema
-        choice=None if allow_unsupported else payload.get('tool_choice')
+        choice=payload.get('tool_choice')
         if choice is not None:
             name=(choice.get('function',{}).get('name') if protocol==DEEPSEEK_CHAT_PROTOCOL else choice.get('name')) if isinstance(choice,dict) else None
             if name is not None and name not in schemas:
                 raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'unknown selected tool')
         from infra.strict_json import parse_strict_json
-        for message in [] if allow_unsupported else payload['messages']:
+        for message in payload['messages']:
             calls = message.get('tool_calls',[]) if protocol == DEEPSEEK_CHAT_PROTOCOL else [b for b in message['content'] if b['type']=='tool_use'] if isinstance(message['content'],list) else []
             for call in calls:
                 name = call['function']['name'] if protocol == DEEPSEEK_CHAT_PROTOCOL else call['name']
@@ -196,7 +193,7 @@ class IngressValidator:
                 if list(validators.validator_for(schemas[name])(schemas[name]).iter_errors(arguments)):
                     raise SafetyError(SafetyCode.CONTRACT_VIOLATION,'historical tool schema')
 
-        # 3. Precise static content exemption evaluation (C-04)
+        # 3. Precise static content exemption evaluation
         processed_fragments: list[BusinessTextFragment] = []
         for path, text in raw_fragments:
             if exemption_registry is not None:

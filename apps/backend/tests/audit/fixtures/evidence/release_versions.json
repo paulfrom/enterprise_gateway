@@ -1,0 +1,7 @@
+{
+  "domain": "scope-hr",
+  "category": "hr-inference",
+  "policy_version": "pol-2026.09-hr",
+  "package_version": "pkg-8fbb791",
+  "purpose": "egress-audit"
+}

@@ -1,10 +1,10 @@
-"""B2 catalog-builder contract tests: trusted links only, idempotent rescans.
+"""Catalog-builder contract tests: trusted links only, idempotent rescans.
 
 The builder is a controlled background primitive: it scans only the
 assembler-fixed intent/evidence roots, accepts a record only when the
 persisted intent carries the exact server-preallocated evidence record_id
 link and the evidence on disk verifies against it, and appends one durable
-catalog file per record_id. Orphans (legacy intents without a record_id
+catalog file per record_id. Orphans (intents without a record_id
 link, cross-linked or tampered evidence, symlink escapes) never reach the
 catalog and never count as success. Every evidence body is a synthetic
 canary; the KMS provider is synthetic and in-memory.
@@ -39,9 +39,6 @@ PACKAGE_VERSION = "pkg-8fbb791"
 CANARY = b"CNRY-B2-catalog-body-41cd"
 STORE = "audit._store"
 
-
-def fixed_lifecycle(record_id: str):
-    return (RETENTION_UNTIL, LIFECYCLE_POLICY)
 
 
 def make_intent(
@@ -92,13 +89,12 @@ def write_evidence(
     return data
 
 
-def make_builder(tmp, *, lifecycle=fixed_lifecycle, batch_limit: int = 200) -> AuditCatalogBuilder:
+def make_builder(tmp, *, batch_limit: int = 200) -> AuditCatalogBuilder:
     roots = Path(tmp)
     return AuditCatalogBuilder(
         intent_root=roots / "intent",
         evidence_root=roots / "evidence",
         catalog_directory=roots / "catalog",
-        lifecycle=lifecycle,
         batch_limit=batch_limit,
     )
 
@@ -184,24 +180,17 @@ class BuilderPositiveTests(unittest.TestCase):
             self.assertEqual(document["lifecycle_policy_version"], LIFECYCLE_POLICY)
             self.assertEqual(document["status"], "available")
 
-    def test_builder_falls_back_to_injected_lifecycle_for_legacy_fields(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            intent_dir, evidence_dir, catalog_dir = prepare_roots(tmp)
-            kms = StaticTestKmsProvider()
-            make_intent(intent_dir, retention_until=None, lifecycle_policy=None)
-            write_evidence(evidence_dir, kms)
-            calls: list[str] = []
-
-            def lifecycle(record_id: str):
-                calls.append(record_id)
-                return (RETENTION_UNTIL, LIFECYCLE_POLICY)
-
-            builder = make_builder(tmp, lifecycle=lifecycle)
-            self.assertEqual(builder.build_once(), 1)
-            self.assertEqual(calls, ["ev-b2-0001"])
-            document = read_catalog_entry(catalog_dir, "ev-b2-0001")
-            self.assertEqual(document["retention_until"], RETENTION_UNTIL.isoformat())
-            self.assertEqual(document["lifecycle_policy_version"], LIFECYCLE_POLICY)
+    def test_builder_rejects_missing_persisted_lifecycle(self):
+        for retention, policy in ((None, None), (None, LIFECYCLE_POLICY), (RETENTION_UNTIL, None)):
+            with self.subTest(retention=retention, policy=policy), tempfile.TemporaryDirectory() as tmp:
+                intent_dir, evidence_dir, catalog_dir = prepare_roots(tmp)
+                kms = StaticTestKmsProvider()
+                make_intent(intent_dir, retention_until=retention, lifecycle_policy=policy)
+                write_evidence(evidence_dir, kms)
+                builder = make_builder(tmp)
+                self.assertEqual(builder.build_once(), 0)
+                self.assertEqual(builder.backlog(), 0)
+                self.assertEqual(list(catalog_dir.glob("*.catalog.json")), [])
 
     def test_builder_marks_past_retention_expired(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,8 +226,8 @@ class BuilderOrphanTests(unittest.TestCase):
             intent_dir, evidence_dir, catalog_dir = prepare_roots(tmp)
             kms = StaticTestKmsProvider()
             # Legacy intent: no server-preallocated record_id link at all.
-            make_intent(intent_dir, intent_id="intent-b2-legacy", record_id=None)
-            write_evidence(evidence_dir, kms, record_id="ev-b2-legacy")
+            make_intent(intent_dir, intent_id="intent-b2-unlinked", record_id=None)
+            write_evidence(evidence_dir, kms, record_id="ev-b2-unlinked")
             # Cross-linked: intent claims ev-alpha, file holds record ev-beta.
             make_intent(
                 intent_dir, intent_id="intent-b2-cross", record_id="ev-b2-alpha"
@@ -295,8 +284,8 @@ class BuilderOrphanTests(unittest.TestCase):
             kms = StaticTestKmsProvider()
             make_intent(intent_dir, intent_id="intent-b2-a", record_id="ev-b2-a")
             write_evidence(evidence_dir, kms, record_id="ev-b2-a")
-            make_intent(intent_dir, intent_id="intent-b2-legacy", record_id=None)
-            write_evidence(evidence_dir, kms, record_id="ev-b2-legacy")
+            make_intent(intent_dir, intent_id="intent-b2-unlinked", record_id=None)
+            write_evidence(evidence_dir, kms, record_id="ev-b2-unlinked")
             builder = make_builder(tmp)
             self.assertEqual(builder.backlog(), 1)
             self.assertEqual(builder.build_once(), 1)
@@ -332,28 +321,12 @@ class BuilderFailureTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, SafetyCode.AUDIT_WRITE_FAILED)
             self.assertEqual(list(Path(catalog_dir).glob("*.catalog.json")), [])
 
-    def test_lifecycle_is_only_policy_source_for_missing_fields(self):
-        # A record_id the injected policy refuses to cover stays invisible;
-        # the builder must not invent retention from client-side values.
-        with tempfile.TemporaryDirectory() as tmp:
-            intent_dir, evidence_dir, catalog_dir = prepare_roots(tmp)
-            kms = StaticTestKmsProvider()
-            make_intent(intent_dir, retention_until=None, lifecycle_policy=None)
-            write_evidence(evidence_dir, kms)
-
-            def no_policy(record_id: str):
-                raise LookupError(record_id)
-
-            builder = make_builder(tmp, lifecycle=no_policy)
-            with self.assertRaises(LookupError):
-                builder.build_once()
-            self.assertEqual(list(Path(catalog_dir).glob("*.catalog.json")), [])
 
 
 class IntentExtensionTests(unittest.TestCase):
-    """The T3 submission-surface extension keeps old intents readable."""
+    """Release intents store evidence metadata only when evidence is required."""
 
-    def test_legacy_intent_without_evidence_fields_still_commits(self):
+    def test_metadata_only_intent_commits_without_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             intent = ReleaseIntent(
                 intent_id="intent-b2-old",

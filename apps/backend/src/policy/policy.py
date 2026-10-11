@@ -1,7 +1,7 @@
 """Strict egress-policy contract; trusted sources only, no detection or I/O.
 
 Policy documents must come from trusted configuration or context objects handed
-over by caller code (for example a configuration loader or, once C-02 exists,
+over by caller code (for example a configuration loader or, once exists,
 an identity adapter). Client request bodies, request headers, and self-declared
 "classified as approved" claims are never a policy source, and this module
 offers no API that reads them.

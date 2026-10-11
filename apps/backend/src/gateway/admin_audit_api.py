@@ -2,8 +2,9 @@
 
 A RELEASED event records the reader's successful decryption/result checkpoint.
 Lifecycle, budget and session checks can still refuse HTTP delivery afterwards.
-Catalog/access logs keep the T3 defaults: 64 MiB each and at most 20,000 scans.
+Catalog/access logs keep the storage limits: 64 MiB each and at most 20,000 scans.
 """
+from gateway.admin_contract import AuditPage, AuditDetail, ObjectPage, ERROR_RESPONSES
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextvars import ContextVar
@@ -101,7 +102,7 @@ def install_audit_admin_routes(app, auth_service, reader, builder):
         except Exception:
             return _error('ADMIN_AUDIT_UNAVAILABLE', 503)
 
-    @app.get('/api/admin/audit/records')
+    @app.get('/api/admin/audit/records', response_model=AuditPage, responses=ERROR_RESPONSES)
     def records(request: Request, purpose: str | None = None,
                 limit: Annotated[int, Query(ge=1, le=100)] = 50,
                 cursor: Annotated[str | None, Query(max_length=128, pattern=r'^[A-Za-z0-9._-]+$')] = None,
@@ -114,7 +115,7 @@ def install_audit_admin_routes(app, auth_service, reader, builder):
                     'catalog_error_code': getattr(app.state, 'audit_catalog_error_code', None)}
         return run(context, request, read)
 
-    @app.get('/api/admin/audit/records/{record_id}')
+    @app.get('/api/admin/audit/records/{record_id}', response_model=AuditDetail, responses=ERROR_RESPONSES)
     def record(request: Request, record_id: str, context=Depends(require)):
         tenant, domain = scope(context)
         release_entry = None
@@ -131,7 +132,7 @@ def install_audit_admin_routes(app, auth_service, reader, builder):
                 raise SafetyError(SafetyCode.AUDIT_RECORD_UNAVAILABLE)
         return run(context, request, read, release_check=check_lifecycle)
 
-    @app.get('/api/admin/audit/events')
+    @app.get('/api/admin/audit/events', response_model=ObjectPage, responses=ERROR_RESPONSES)
     def events(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 50,
                cursor: Annotated[str | None, Query(max_length=128, pattern=r'^[A-Za-z0-9._-]+$')] = None,
                context=Depends(require)):

@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce
 
 WORKDIR /app
 
@@ -13,12 +13,12 @@ RUN pip install --no-cache-dir -r requirements-runtime.txt
 # 2. 复制源码、配置、模型权重与启动入口
 COPY src/ ./src/
 COPY config/ ./config/
-COPY models/ ./models/
+COPY --link models/bert4ner-base-chinese-onnx/ ./models/bert4ner-base-chinese-onnx/
 COPY start_gateway.py start_knowledge_worker.py ./
-COPY scripts/check_gateway_health.py scripts/prepare_admin_state.py scripts/prepare_knowledge_database.py scripts/prepare_request_database.py scripts/purge_request_history.py ./scripts/
+COPY scripts/check_gateway_health.py scripts/check_local_resources.py scripts/prepare_admin_state.py scripts/prepare_gateway_database.py scripts/prepare_knowledge_database.py scripts/prepare_request_database.py scripts/purge_request_history.py ./scripts/
 
 # 3. 创建运行时状态目录并切换非 root 用户 (UID 65532)
-RUN mkdir -p /app/state && chown -R 65532:65532 /app
+RUN mkdir -p /app/state/admin && chown -R 65532:65532 /app/state
 USER 65532:65532
 
 EXPOSE 8080

@@ -256,7 +256,7 @@ class BoundEgressClient:
 
     There is deliberately no ``url``/``host`` parameter: callers pass only a
     method, a bound-relative path, optional caller headers (filtered through
-    :data:`EGRESS_HEADER_WHITELIST`), and content bytes."""
+:data:`EGRESS_HEADER_WHITELIST`), and content bytes."""
 
     def __init__(
         self,

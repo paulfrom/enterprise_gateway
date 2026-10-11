@@ -1,4 +1,4 @@
-"""Verify actual local HTTPS processes and an explicitly prepared remote PG schema.
+"""Verify actual local HTTPS processes and an explicitly prepared PostgreSQL schema.
 
 No public supplier is contacted. The only simulated components are the finite
 test classifier and the loopback supplier. Detection, encryption, storage,
@@ -76,8 +76,7 @@ def free_port():
 
 
 def port_is_closed(port):
-    # Windows tree termination precedes final kernel socket teardown. Require
-    # the listener actually to disappear, within a finite time budget.
+    # Verify listener shutdown within a finite time budget.
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         with socket.socket() as sock:
@@ -110,14 +109,13 @@ class Verification:
     def __init__(self, output):
         self.output = output
         self.processes = []
-        self.result = {"task_id": "P-18/K-02/K-10-local-deployment", "run_id": output.parent.parent.name,
-            "target_level": "L2", "achieved_level": None, "result": "fail", "started_at": now(),
+        self.result = {"verification": "local-deployment",
+            "result": "fail", "started_at": now(),
             "environment": {"os": platform.platform(), "python": sys.version,
                             "docker": "not_run", "public_supplier": "not_called"},
             "commands": [], "assertions": [], "artifacts": [],
-            "review": {"mode": "pending", "unresolved": []},
             "limitations": ["Synthetic finite classifier and loopback supplier; no production admission.",
-                            "Native Windows processes; Docker and public supplier not verified."]}
+                            "Native Linux processes; Docker and public supplier not verified."]}
 
     def check(self, name, condition, **observed):
         self.result["assertions"].append({"test": name, "result": "pass" if condition else "fail",
@@ -137,9 +135,7 @@ class Verification:
     def start(self, name, args, env):
         log = self.output / (name + ".log")
         handle = log.open("wb")
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        process = subprocess.Popen(args, cwd=ROOT, env=env, stdout=handle, stderr=handle,
-                                   creationflags=flags)
+        process = subprocess.Popen(args, cwd=ROOT, env=env, stdout=handle, stderr=handle)
         command = {"kind": name, "cwd": str(ROOT), "argv": list(args), "started_at": now(),
                    "pid": process.pid, "exit_code": None, "output": str(log)}
         self.result["commands"].append(command)
@@ -152,14 +148,7 @@ class Verification:
         if handle.closed:
             return
         if process.poll() is None:
-            if os.name == "nt":
-                # A Windows venv redirector can launch a separate interpreter;
-                # stop the entire owned tree, not merely its launcher PID.
-                stopped = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                         capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-                command["tree_stop_exit_code"] = stopped.returncode
-            else:
-                process.terminate()
+            process.terminate()
             try:
                 process.wait(timeout=20)
             except subprocess.TimeoutExpired:
@@ -167,7 +156,7 @@ class Verification:
                 process.wait(timeout=10)
         command["exit_code"] = process.returncode
         command["stopped_at"] = now()
-        command["shutdown"] = "controlled_tree_termination" if os.name == "nt" else "controlled_termination"
+        command["shutdown"] = "controlled_termination"
         handle.close()
 
     def close(self):
@@ -437,7 +426,7 @@ def main():
         if not all(isinstance(config.get(key), str) and config[key] for key in ("app_dsn", "schema")):
             raise ValueError("invalid controlled PostgreSQL config")
         execute(verify, config, ROOT / ".runtime_state" / ("local-deploy-" + uuid4().hex))
-        verify.result.update(result="pass", achieved_level="L2")
+        verify.result.update(result="pass")
     except Exception as error:
         # Exception messages can contain DSNs/inputs; preserve only static type.
         verify.result["failure_type"] = type(error).__name__

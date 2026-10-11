@@ -1,4 +1,4 @@
-"""D-12 必需检测编排器：规则 + 词典 + NER 三路必需检测的 fail-closed 编排。
+"""必需检测编排器：规则 + 词典 + NER 三路必需检测的 fail-closed 编排。
 
 对单字段文本执行三条必需检测路并合并为最终跨度集合：
 
@@ -134,7 +134,7 @@ class DetectionOrchestrator:
         ``compile_dictionary`` 产物；``None`` 表示词典路未配置，
         ``detect`` 时拒绝（``DETECTION_INCOMPLETE``），不降级。
     ner_package_dir:
-        D-08 NER 包目录；``None`` 表示 NER 路未配置，``detect`` 时
+        NER 包目录；``None`` 表示 NER 路未配置，``detect`` 时
         拒绝（``DETECTION_INCOMPLETE``），不降级为两路。包的真实
         校验在 worker 进程内由 ``load_model_package`` 完成。
     executor:

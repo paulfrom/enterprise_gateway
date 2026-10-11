@@ -9,7 +9,7 @@ from infra.errors import SafetyCode, SafetyError
 from masking.mapping import MappingContext, reject_reserved_literals
 from detection.span_resolver import DetectionCandidate, resolve_spans
 
-_LEGACY_SOURCE = "span"
+_SPAN_SOURCE = "span"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,7 @@ def merge_spans(spans: Iterable[Span], *, text_length: int) -> tuple[Span, ...]:
             raise SafetyError(SafetyCode.INVALID_SPAN)
     resolved = resolve_spans(
         [
-            DetectionCandidate(span.start, span.end, span.entity_type, span.priority, _LEGACY_SOURCE)
+            DetectionCandidate(span.start, span.end, span.entity_type, span.priority, _SPAN_SOURCE)
             for span in candidates
         ],
         text_length=text_length,

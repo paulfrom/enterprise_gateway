@@ -1,4 +1,4 @@
-"""A-08 audit watermark guard.
+"""Audit watermark guard.
 
 Guards audit/evidence storage by verifying disk volume capacity prior to
 granting outbound egress permits. When capacity hits or exceeds the injected
@@ -7,8 +7,8 @@ with ``AUDIT_WATERMARK_BLOCKED``.
 
 Capacity boundaries and policies are injected by the caller. This guard
 operates as a pre-flight capacity check; real I/O write failures (e.g. ENOSPC
-during durable fsync) are preserved as ``AUDIT_WRITE_FAILED`` (A-01) or
-``EVIDENCE_GATE_FAILED`` (A-03).
+during durable fsync) are preserved as ``AUDIT_WRITE_FAILED`` or
+``EVIDENCE_GATE_FAILED``.
 """
 
 from __future__ import annotations
