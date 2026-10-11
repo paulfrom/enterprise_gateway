@@ -8,7 +8,7 @@ async function login(page: Page) {
   await expect(page).toHaveURL(/\/admin$/);
 }
 async function history(page: Page) {
-  await login(page); await page.getByRole('link', { name: '请求历史', exact: true }).click();
+  await login(page); await page.getByRole('menuitem', { name: /请求历史$/ }).click();
   await expect(page.getByRole('button', { name: '查看详情' })).toHaveCount(4);
 }
 test('anonymous redirect, wrong credentials, actual login and refresh restore', async ({ page }) => {
@@ -20,7 +20,7 @@ test('anonymous redirect, wrong credentials, actual login and refresh restore', 
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: /登\s*录/ }).click();
   await expect(page).toHaveURL(/\/admin$/); await page.reload();
-  await expect(page.getByText('管理 API 已连接，会话有效')).toBeVisible();
+  await expect(page.getByText('网关控制台概览', { exact: true })).toBeVisible();
   const cookies = await page.context().cookies();
   expect(cookies.some(c => c.httpOnly && c.sameSite === 'Strict')).toBeTruthy();
   expect(await page.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
@@ -92,7 +92,7 @@ test('dependency failure is visible and retry restores real history', async ({ p
   await page.route('**/api/admin/requests?*', route => route.fulfill({
     status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'HISTORY_UNAVAILABLE' } }),
   }));
-  await page.getByRole('link', { name: '请求历史', exact: true }).click();
+  await page.getByRole('menuitem', { name: /请求历史$/ }).click();
   await expect(page.getByText('请求历史暂不可用，请检查数据库与密钥配置')).toBeVisible();
   await expect(page.getByRole('button', { name: '查看详情' })).toHaveCount(0);
   await page.unroute('**/api/admin/requests?*');
@@ -107,7 +107,7 @@ test('unavailable session store exposes the actual failure', async ({ page }) =>
   await page.goto('/admin');
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByText('管理员状态存储不可用')).toBeVisible();
-  await expect(page.getByText('管理 API 已连接，会话有效')).toHaveCount(0);
+  await expect(page.getByText('网关控制台概览', { exact: true })).toHaveCount(0);
 });
 
 test('logout cancels a pending detail and drops previously loaded bodies', async ({ page }) => {
