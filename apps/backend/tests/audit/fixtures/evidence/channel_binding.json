@@ -1,0 +1,8 @@
+{
+  "channel_id": "synthetic-evidence-loopback",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path_prefix": "/",
+  "timeout_seconds": 2.0,
+  "max_redirects": 0
+}

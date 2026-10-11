@@ -86,6 +86,15 @@ try {
         throw "Failed to execute '$pythonCmd --version'."
     }
     Write-Host "    Python: $pythonVersion ($pythonCmd)"
+    & $pythonCmd scripts/check_structure.py
+    if ($LASTEXITCODE -ne 0) { throw 'Monorepo structure verification failed.' }
+
+    if (-not $env:GATEWAY_HISTORY_PG_CONFIG -or -not (Test-Path -LiteralPath $env:GATEWAY_HISTORY_PG_CONFIG -PathType Leaf)) {
+        throw 'Set GATEWAY_HISTORY_PG_CONFIG to an explicit private local PG 5433 test configuration.'
+    }
+
+    if (-not $env:GATEWAY_TEST_PG_CONFIG) { $env:GATEWAY_TEST_PG_CONFIG = $env:GATEWAY_HISTORY_PG_CONFIG }
+    if (-not $env:GATEWAY_DATABASE_DEPLOYMENT_CONFIG) { $env:GATEWAY_DATABASE_DEPLOYMENT_CONFIG = $env:GATEWAY_HISTORY_PG_CONFIG }
 
     # 3. 串联后端检查：调用 check.ps1 执行后端冻结离线依赖安装与 unittest 门禁
     Write-Host '==> [2/4] Calling backend check (apps/backend/scripts/check.ps1)...'
@@ -105,6 +114,8 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "npm ci failed with exit code $LASTEXITCODE."
     }
+    & npm audit --audit-level=high
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency audit failed.' }
 
     Write-Host '==> [4/4] Running frontend gates and contract checks...'
 
@@ -142,7 +153,27 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Production build (npm run build) failed with exit code $LASTEXITCODE."
     }
+    & $pythonCmd scripts/check_typecheck.py
+    if ($LASTEXITCODE -ne 0) { throw 'TypeScript failure gate verification failed.' }
 
+    if ($env:GATEWAY_CHECK_BROWSER -eq '1') {
+        & npm run test:e2e --workspace apps/admin-web
+        if ($LASTEXITCODE -ne 0) { throw 'Browser verification failed.' }
+    }
+    if ($env:GATEWAY_CHECK_DOCKER -eq '1') {
+        & $pythonCmd scripts/check_docker_context.py
+        if ($LASTEXITCODE -ne 0) { throw 'Docker context verification failed.' }
+        & docker build -f apps/backend/Dockerfile -t enterprise-privacy-gateway:local apps/backend
+        if ($LASTEXITCODE -ne 0) { throw 'Backend image build failed.' }
+        & docker build -f apps/admin-web/Dockerfile -t enterprise-admin-web:local .
+        if ($LASTEXITCODE -ne 0) { throw 'Frontend image build failed.' }
+        & $pythonCmd scripts/check_images.py
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime image verification failed.' }
+        & $pythonCmd scripts/check_proxy.py
+        if ($LASTEXITCODE -ne 0) { throw 'Proxy verification failed.' }
+        & $pythonCmd scripts/run_nginx_e2e.py
+        if ($LASTEXITCODE -ne 0) { throw 'Nginx browser verification failed.' }
+    }
     Write-Host '==> All checks completed successfully.'
 } finally {
     Pop-Location

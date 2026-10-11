@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 
 from knowledge.knowledge import KnowledgeError, Role, Source, SourceKind, TrustedActor
 from knowledge.storage import PostgresKnowledgeStorage, _ASSET_TABLES
@@ -153,12 +154,22 @@ class DatabaseDeploymentTests(unittest.TestCase):
     def setUpClass(cls):
         path = os.environ.get("GATEWAY_DATABASE_DEPLOYMENT_CONFIG")
         if not path:
-            raise unittest.SkipTest("Explicit private remote deployment configuration required")
+            raise unittest.SkipTest("Explicit private local PG 5433 deployment test configuration required")
         cls.base = load_configuration(Path(path))
 
     def config(self):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-        return dict(self.base, schema="gw_test_" + stamp + "_" + uuid4().hex[:12])
+        schema = "gw_test_" + stamp + "_" + uuid4().hex[:12]
+        # Prove absence before tracking this invocation's randomly owned name.
+        with psycopg.connect(self.base["admin_dsn"]) as conn:
+            if conn.execute("SELECT to_regnamespace(%s)", (schema,)).fetchone()[0] is not None:
+                raise RuntimeError("Test namespace collision; existing objects preserved")
+        self.addCleanup(self._drop_created_namespace, schema)
+        return dict(self.base, schema=schema)
+
+    def _drop_created_namespace(self, schema):
+        with psycopg.connect(self.base["admin_dsn"]) as conn:
+            conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
     def test_fresh_schema_forced_rls_and_cross_scope_access(self):
         config, report = prepare_database(self.config())

@@ -1,40 +1,81 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: Python package
-
+name: Monorepo checks
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
-
+    branches: [main]
 jobs:
-  build:
-
+  verify:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11"]
-
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: synthetic-ci-postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
-      run: |
-        pytest
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.21'
+      - name: Prepare isolated runner PostgreSQL configuration
+        working-directory: apps/backend
+        run: |
+          uv sync --frozen --group dev --no-editable --cache-dir .uv-cache
+          .venv/bin/python - <<'PY'
+          import json, os, psycopg
+          from pathlib import Path
+          admin = 'host=127.0.0.1 port=5433 dbname=postgres user=postgres password=synthetic-ci-postgres'
+          with psycopg.connect(admin) as conn:
+              conn.execute("CREATE ROLE gw_ci_app LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'synthetic-ci-app'")
+          config = dict(admin_dsn=admin, app_dsn='host=127.0.0.1 port=5433 dbname=postgres user=gw_ci_app password=synthetic-ci-app', schema='gw_test_ci', application_role='gw_ci_app')
+          path = Path('/tmp/gateway-ci-pg.json')
+          path.write_text(json.dumps(config)); path.chmod(0o600)
+          PY
+      - uses: actions/cache@v4
+        with:
+          path: apps/backend/models
+          key: ner-${{ runner.os }}-5d660ed2aa9da482-${{ hashFiles('apps/backend/uv.lock', 'apps/backend/scripts/ner/*.py') }}
+      - name: Prepare pinned local model package
+        working-directory: apps/backend
+        env:
+          GATEWAY_NER_DOWNLOAD_BASE: https://huggingface.co
+        run: |
+          uv run --frozen --offline --group dev python scripts/ner/fetch_model.py
+          uv run --frozen --offline --group dev python scripts/ner/export_onnx.py
+      - name: Frontend dependencies and browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Linux aggregate verification
+        env:
+          GATEWAY_TEST_PG_CONFIG: /tmp/gateway-ci-pg.json
+          GATEWAY_DATABASE_DEPLOYMENT_CONFIG: /tmp/gateway-ci-pg.json
+          GATEWAY_HISTORY_PG_CONFIG: /tmp/gateway-ci-pg.json
+          GATEWAY_CHECK_BROWSER: '1'
+          GATEWAY_TEST_TIMEOUT_SECONDS: '1800'
+        run: bash scripts/check.sh
+      - name: Build context, TypeScript failure gates and images
+        run: |
+          python scripts/check_docker_context.py
+          python scripts/check_typecheck.py
+          docker build -f apps/admin-web/Dockerfile -t enterprise-admin-web:local .
+          docker build -f apps/backend/Dockerfile -t enterprise-privacy-gateway:local apps/backend
+          python scripts/check_images.py
+          python scripts/check_proxy.py
+      - name: Browser through Nginx
+        env:
+          GATEWAY_HISTORY_PG_CONFIG: /tmp/gateway-ci-pg.json
+        run: python scripts/run_nginx_e2e.py

@@ -1,4 +1,4 @@
-"""M3 HTTP lifecycle assertions with trained NER and synthetic provider bytes.
+"""Strict-profile HTTP lifecycle assertions with trained NER and synthetic provider bytes.
 
 The direct ASGI harness sends an actual http.disconnect into the public app;
 it does not bypass authentication, inference, audit, spool or stream protection.
@@ -60,7 +60,20 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
     tearDown = matrix.ProtocolHttpMatrix.tearDown
     request = matrix.ProtocolHttpMatrix.request
     response = matrix.ProtocolHttpMatrix.response
-    call = matrix.ProtocolHttpMatrix.call
+    async def call(self, protocol, body, handler, **options):
+        # These cases assert schema/receipt rejection and ProtectedStream cleanup.
+        # The compatible profile deliberately has different admission semantics.
+        spy = UpstreamSpyTransport(handler)
+        pipeline = self.fixture._create_pipeline(protocol, spy, **options)
+        app = create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}),
+                         authenticator=ByokAuthenticator(domain=self.fixture.identity.domain,
+                             tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY),
+                         classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY,
+                         client_profile='strict')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://gateway') as client:
+            result = await client.post(pipeline.path, json=body,
+                                       headers={'authorization': 'Bearer enterprise-token'})
+        return result, spy
 
     async def test_http_disconnect_before_stream_delivery_closes_abandoned_response(self):
         for protocol in PROTOCOLS:
@@ -75,7 +88,7 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
                     return httpx.Response(200,headers={'content-type':'text/event-stream'},stream=provider)
                 spy=UpstreamSpyTransport(respond)
                 pipeline=self.fixture._create_pipeline(protocol,spy)
-                app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+                app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
                 async def receive():
                     nonlocal received
                     if not received:
@@ -199,7 +212,7 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
                     return self.response(req, protocol, False, False)
                 spy = UpstreamSpyTransport(respond)
                 pipeline = self.fixture._create_pipeline(protocol, spy)
-                app = create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+                app = create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
                 body = self.request(protocol)
                 with patch('gateway.app.MappingContext', side_effect=new_context):
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://gateway') as client:
@@ -285,7 +298,7 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
                     return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=provider)
                 spy = UpstreamSpyTransport(respond)
                 pipeline = self.fixture._create_pipeline(protocol, spy)
-                app = create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+                app = create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
                 received_body = False
                 async def receive():
                     nonlocal received_body

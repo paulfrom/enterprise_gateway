@@ -272,6 +272,7 @@ class ProtectedPipeline:
         deadline_at: float | None = None,
         cancel=None,
         history_recorder=None,
+        allow_unsupported: bool = True,
     ) -> PipelineResult:
         """Execute the end-to-end protected pipeline for an incoming request.
 
@@ -340,7 +341,7 @@ class ProtectedPipeline:
                 local = IngressValidator.validate_request(raw_body=raw_body, protocol=route.protocol,
                     domain=route.domain, category=category, policy=self.policy,
                     exemption_registry=self.exemption_registry, allowed_models=route.allowed_models,
-                    history_adapter=history_adapter, local_collection_only=True)
+                    history_adapter=history_adapter, local_collection_only=True, allow_unsupported=allow_unsupported)
                 local_bytes = raw_body.encode('utf-8') if isinstance(raw_body, str) else raw_body
                 self.admission_limiter.admit(local_bytes, history_messages=len(local.fragments),
                     text_chars=sum(len(f.content) for f in local.fragments))
@@ -367,6 +368,7 @@ class ProtectedPipeline:
             exemption_registry=self.exemption_registry,
             allowed_models=route.allowed_models,
             history_adapter=history_adapter,
+            allow_unsupported=allow_unsupported,
         )
 
         raw_bytes = raw_body.encode("utf-8") if isinstance(raw_body, str) else raw_body
@@ -542,7 +544,7 @@ class ProtectedPipeline:
                 allowed_models=frozenset(route.allowed_models | {provider_model}),
                 allowed_tools=self.tool_schemas(redacted_request, protocol=route.protocol),
                 state_validator=history_adapter.validator if history_adapter is not None else None,
-                allow_unsupported=True,
+                allow_unsupported=allow_unsupported,
             )
             restored_response = restored_response.model_copy(update={'model':validated.model})
             check_deadline()

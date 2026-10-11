@@ -134,13 +134,14 @@ def prepare_database(config: dict[str, str]) -> tuple[dict[str, str], dict]:
             for function in ("invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ)", "read_authorized_knowledge_candidate(UUID)"):
                 # Function names/signatures are fixed trusted SQL, identifiers remain quoted.
                 admin.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {}." + function + " TO {}").format(sql.Identifier(schema), sql.Identifier(grant_role)))
-        asset_count = _verify_schema_contract(admin, schema, role, admin_role)
+        table_count = _verify_schema_contract(admin, schema, role, admin_role)
         ssl = admin.execute("SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()").fetchone()
         version = admin.info.server_version
     bound = dict(config, admin_dsn=make_conninfo(admin_dsn, options="-c search_path=" + schema),
                  app_dsn=make_conninfo(app_dsn, options="-c search_path=" + schema))
     return bound, {"initialized": True, "server_version": version, "tls": bool(ssl and ssl[0]),
-                   "asset_count": asset_count, "forced_rls": True, "application_restricted": True}
+                   "asset_count": len(_ASSET_TABLES), "admin_table_count": len(_ADMIN_TABLES),
+                   "table_count": table_count, "forced_rls": True, "application_restricted": True}
 
 
 def main(argv: list[str] | None = None) -> int:

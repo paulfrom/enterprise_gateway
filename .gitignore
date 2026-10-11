@@ -23,8 +23,15 @@ models/
 apps/backend/models/*
 !apps/backend/models/.gitkeep
 evidence/
+!apps/backend/tests/audit/fixtures/evidence/
+!apps/backend/tests/audit/fixtures/evidence/release_versions.json
+!apps/backend/tests/audit/fixtures/evidence/channel_binding.json
+!apps/backend/tests/audit/fixtures/evidence/evidence_plaintext.txt
+!apps/backend/tests/audit/fixtures/evidence/chat_request.json
 reports/
 *.log
+# ONNX runtime may persist this local telemetry identifier when importing.
+:memory:.ses
 .runtime_state/
 runtime_state/
 *.env.json

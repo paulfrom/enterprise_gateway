@@ -82,31 +82,32 @@ class AdminApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()["csrf_token"]
 
-    async def test_login_page_is_public_html_with_security_headers(self):
-        response = await self.client.get("/login")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("text/html", response.headers["content-type"])
-        self.assertEqual(response.headers["cache-control"], "no-store")
-        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
-        self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
-
-    async def test_login_page_redirects_authenticated_admin_to_console(self):
+    async def test_backend_does_not_serve_frontend_pages_or_legacy_assets(self):
         token = issue_session(self.store)
-        response = await self.client.get("/login", headers=self.cookie(token))
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["location"], "/admin")
+        for path in ('/login', '/admin', '/admin/requests', '/login/assets/login.js',
+                     '/admin/assets/admin.js'):
+            for headers in ({}, self.cookie(token)):
+                response = await self.client.get(path, headers=headers)
+                self.assertEqual(404, response.status_code, path)
+                self.assertIn('application/json', response.headers['content-type'])
 
-    async def test_admin_pages_redirect_anonymous_and_serve_authenticated(self):
-        for path in ("/admin", "/admin/requests"):
-            response = await self.client.get(path)
-            self.assertEqual(response.status_code, 302, path)
-            self.assertEqual(response.headers["location"], "/login")
-        token = issue_session(self.store)
-        for path in ("/admin", "/admin/requests"):
-            response = await self.client.get(path, headers=self.cookie(token))
-            self.assertEqual(response.status_code, 200, path)
-            self.assertIn("text/html", response.headers["content-type"])
-            self.assertEqual(response.headers["cache-control"], "no-store")
+    async def test_origin_validation_keeps_port_scheme_and_rejects_ambiguity(self):
+        from starlette.requests import Request
+        from gateway.admin_api import _same_origin
+        def request(headers):
+            return Request({'type': 'http', 'scheme': 'http', 'path': '/', 'headers': headers})
+        authority = (b'host', b'127.0.0.1:4174')
+        self.assertTrue(_same_origin(request([authority, (b'origin', b'http://127.0.0.1:4174')])))
+        for headers in (
+            [authority, (b'origin', b'http://127.0.0.1:3000')],
+            [authority, (b'origin', b'https://127.0.0.1:4174')],
+            [authority, (b'origin', b'null')],
+            [authority, (b'origin', b'http://127.0.0.1:4174/path')],
+            [authority, (b'origin', b'http://127.0.0.1:4174'), (b'origin', b'http://foreign.test'),
+             (b'referer', b'http://127.0.0.1:4174/login')],
+            [authority, authority, (b'origin', b'http://127.0.0.1:4174')],
+        ):
+            self.assertFalse(_same_origin(request(headers)))
 
     async def test_session_payload_shape_and_poll_variant(self):
         token = issue_session(self.store)

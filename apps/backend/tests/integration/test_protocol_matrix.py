@@ -34,7 +34,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                     return outcomes
                 self.fixture.detector.detect_many=replace_live_assembly
                 try:
-                    app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+                    app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
                         path='/v1/messages' if protocol==CLAUDE_MESSAGES_PROTOCOL else '/v1/chat/completions'
                         response=await client.post(path,json=self.request(protocol,True),headers={'authorization':'Bearer enterprise-token'})
@@ -67,7 +67,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                 'usage':{'input_tokens':1,'output_tokens':2}})
         spy=UpstreamSpyTransport(respond)
         p=self.fixture._create_pipeline(CLAUDE_MESSAGES_PROTOCOL,spy,history_adapter=trust)
-        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='compatible')
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
             body=self.request(CLAUDE_MESSAGES_PROTOCOL)
             first=await client.post('/v1/messages',json=body,headers={'authorization':'Bearer enterprise-token'})
@@ -137,10 +137,10 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
             events += [{'type':'content_block_stop','index':0},{'type':'message_delta','delta':{'stop_reason':'tool_use' if tools else 'end_turn','stop_sequence':None},'usage':{'output_tokens':2}},{'type':'message_stop'}]
             frames=[frame(e,e['type']) for e in events]
         return httpx.Response(200,headers={'content-type':'text/event-stream'},content=b''.join(frames))
-    async def call(self,protocol,body,handler,**options):
+    async def call(self,protocol,body,handler,*,client_profile='compatible',**options):
         spy=UpstreamSpyTransport(handler)
         pipeline=self.fixture._create_pipeline(protocol,spy,**options)
-        app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+        app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile=client_profile)
         path='/v1/chat/completions' if protocol==DEEPSEEK_CHAT_PROTOCOL else '/v1/messages'
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
             response=await client.post(path,json=body,headers={'authorization':'Bearer enterprise-token'})
@@ -241,7 +241,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                 # Deliberate private package corruption, not a supported live
                 # configuration update; public bound routes are immutable.
                 p._route=replace(p._route,model_mapping={'deepseek-flash':'other-provider'})
-            app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+            app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
                 r=await client.post('/v1/chat/completions',json=self.request(DEEPSEEK_CHAT_PROTOCOL),headers={'authorization':'Bearer enterprise-token'})
             self.assertEqual(r.status_code,500 if failure=='route' else 503,r.text)
@@ -251,7 +251,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
         spy=UpstreamSpyTransport(lambda _:self.fail('deadline must prevent egress'))
         self.fixture.detector._ner_worker=hanging_ner
         p=self.fixture._create_pipeline(DEEPSEEK_CHAT_PROTOCOL,spy,request_timeout=1.0)
-        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
+        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
             started=time.monotonic()
             pending=asyncio.create_task(client.post('/v1/chat/completions',json=self.request(DEEPSEEK_CHAT_PROTOCOL),headers={'authorization':'Bearer enterprise-token'}))

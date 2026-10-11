@@ -83,11 +83,42 @@ class ExportAdminOpenApiTests(unittest.TestCase):
             "Publish",
             "Revise",
             "Withdraw",
-            "ValidationError",
-            "HTTPValidationError",
+            "AdminError",
+            "AdminSession",
+            "HistoryPage",
+            "HistoryDetail",
         }
         for name in expected_schemas:
             self.assertIn(name, schemas, f"Missing expected schema: {name}")
+
+    def test_login_history_and_errors_declare_real_contract(self):
+        schema = generate_admin_openapi()
+        login = schema['paths']['/api/admin/login']['post']
+        body = login['requestBody']['content']['application/json']['schema']
+        self.assertEqual({'username', 'password'}, set(body['required']))
+        self.assertFalse(body['additionalProperties'])
+        listing = schema['paths']['/api/admin/requests']['get']
+        self.assertEqual({'limit', 'cursor', 'model', 'protocol', 'status', 'error_code',
+                          'created_after', 'created_before'},
+                         {p['name'] for p in listing['parameters']})
+        self.assertEqual('#/components/schemas/HistoryPage',
+                         listing['responses']['200']['content']['application/json']['schema']['$ref'])
+        for operation in (login, listing):
+            self.assertEqual('#/components/schemas/AdminError',
+                             operation['responses']['422']['content']['application/json']['schema']['$ref'])
+
+    def test_history_schema_reuses_domain_values_and_audit_entry(self):
+        from request_history.models import PROTOCOLS, STATUSES, STAGES, ERROR_CODES
+        schemas = generate_admin_openapi()['components']['schemas']
+        metadata = schemas['HistoryMetadata']['properties']
+        self.assertEqual(PROTOCOLS, set(metadata['protocol']['enum']))
+        self.assertEqual(STATUSES, set(metadata['status']['enum']))
+        self.assertEqual(set(STAGES), set(schemas['HistoryStage']['properties']['stage']['enum']))
+        self.assertEqual('#/components/schemas/CatalogEntry', schemas['AuditDetail']['properties']['item']['$ref'])
+        self.assertIn('blocking_reasons', schemas['ErrorDetail']['properties'])
+        listing = generate_admin_openapi()['paths']['/api/admin/requests']['get']
+        error_filter = next(p for p in listing['parameters'] if p['name'] == 'error_code')
+        self.assertEqual(ERROR_CODES, set(error_filter['schema']['enum']))
 
     def test_stable_unique_operation_ids(self):
         schema = generate_admin_openapi()

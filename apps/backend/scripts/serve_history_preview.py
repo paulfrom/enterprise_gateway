@@ -62,7 +62,7 @@ def main(argv=None):
         with synthetic_history_runtime() as runtime:
             phase = "seed"
             seed(runtime)
-            print(json.dumps({"login_url": "http://127.0.0.1:" + str(args.port) + "/login",
+            print(json.dumps({"api_base_url": "http://127.0.0.1:" + str(args.port),
                               "synthetic_only": True, "retention_days": 1,
                               "seeded_records": 4}), flush=True)
             phase = "serve"

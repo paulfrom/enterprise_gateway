@@ -97,7 +97,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 * 依赖管理工具：`uv`
 
 ### 1. 安装与同步依赖
-~~~powershell
+~~~bash
 git clone git@github.com:paulfrom/enterprise_gateway.git
 cd enterprise_gateway/apps/backend
 uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
@@ -106,9 +106,9 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 ### 2. 运行自动化测试套件
 完整测试需要真实隔离PostgreSQL及非owner、无superuser/BYPASSRLS的应用角色。通过`GATEWAY_TEST_PG_CONFIG`指定受控JSON配置文件，或使用被Git忽略的`.env.test`；字段为`app_dsn`、`admin_dsn`、`schema`、`application_role`。`schema`必须使用`gw_test_`前缀；每个测试进程创建新的随机schema，缺配置直接失败。管理连接需有创建schema和定义受限函数的权限；管理owner与应用角色分别使用独立连接，不使用生产数据库替代隔离测试。
 
-~~~powershell
-# Windows 快速验证脚本
-.\scripts\check.ps1
+~~~bash
+# Linux 后端检查（从 apps/backend 执行）
+bash scripts/check.sh
 
 # 或直接使用 uv 执行全量测试
 uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -t . -v
@@ -151,26 +151,29 @@ DeepSeek响应恢复支持普通 `content`、`reasoning_content`、`reasoning_de
 | `GATEWAY_DETECTION_FAILURE_MODE` | 默认 `error`；`passthrough` 在请求检测故障时透传未脱敏文本，客户端无法通过请求切换 |
 | `GATEWAY_SSL_CERTFILE` / `GATEWAY_SSL_KEYFILE` | 可选的原生 HTTPS PEM 证书与私钥；启用时必须成对提供，也可用同名命令行参数；未配置时使用 HTTP |
 
-Compose 使用一个受控只读 `GATEWAY_OPERATOR_DIR`，其中放置 `dictionary.json`、`policy.json`、受信分类器模块和可选 TLS 文件。该目录加入容器 Python 模块路径；例如 `deployment_classifier.py` 的 `classify` 函数对应 `GATEWAY_CLASSIFIER=deployment_classifier:classify`。这是部署方受信代码，会执行 Python 导入；不得挂载用户上传文件或把合成测试分类器用于真实业务。密钥仍使用独立 Docker secrets。端口默认只绑定 `127.0.0.1:8080`；对外监听须显式设置 `GATEWAY_BIND_ADDRESS` 与 `GATEWAY_PUBLISHED_PORT`，并配置入口访问控制。入口允许 HTTP；需要原生 HTTPS 时再配置证书对。
+Compose 使用一个受控只读 `GATEWAY_OPERATOR_DIR`，其中放置 `dictionary.json`、`policy.json`、受信分类器模块和可选 TLS 文件。该目录加入容器 Python 模块路径；例如 `deployment_classifier.py` 的 `classify` 函数对应 `GATEWAY_CLASSIFIER=deployment_classifier:classify`。这是部署方受信代码，会执行 Python 导入；不得挂载用户上传文件或把合成测试分类器用于真实业务。密钥仍使用独立 Docker secrets。Compose 与启动脚本默认开通外部访问（绑定 `0.0.0.0`，网关端口 8080，前端端口 80）；若仅需限制本机环回访问，可显式指定 `GATEWAY_BIND_ADDRESS=127.0.0.1` 与 `FRONTEND_BIND_ADDRESS=127.0.0.1`。入口允许 HTTP；需要原生 HTTPS 时再配置证书对。
 
 本机启动时，受信分类器须安装到运行环境，或将其受控目录加入 `PYTHONPATH`；仅设置模块名称不会创建分类逻辑。路径和证书使用本机实际文件，容器内使用 `/app/operator/...`。
 
 `FileKmsProvider`是受控本地文件后端，使用随机独立 KEK、进程锁、认证包封和持久销毁墓碑；不等同企业 KMS，也不证明备份/快照已删除。首次使用必须显式初始化密钥，常规启动绝不补建丢失的密钥。有任何历史意图/证据/spool记录时，初始化命令仅验证既有键，缺键拒绝。应备份受控密钥状态与主密钥；不能通过重新初始化恢复丢键后的密文。
 
-~~~powershell
+~~~bash
 # 已设置上表所需环境后，首次显式初始化
 python start_gateway.py --provision-keys
 
 # 常规启动；缺可信服务端分类时健康200、就绪/模型接口503
-python start_gateway.py --host 0.0.0.0 --port 8080
+python start_gateway.py --host 127.0.0.1 --port 8080
 
 # 配齐受信模块及正式证书后，原生 HTTPS 示例
 python start_gateway.py --host 127.0.0.1 --port 8443 --classifier deployment_classifier:classify --ssl-certfile <certificate.pem> --ssl-keyfile <private-key.pem>
 
 # Compose 使用必填 _FILE 密钥路径与 GATEWAY_OPERATOR_DIR，另准备受限 PG 连接（仓库根执行）
-docker compose -f deploy/compose.yaml build gateway
-docker compose -f deploy/compose.yaml run --rm --no-deps gateway python start_gateway.py --provision-keys
-docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml config --quiet
+docker compose -f deploy/compose.yaml build backend frontend
+docker compose -f deploy/compose.yaml run --rm --no-deps backend python start_gateway.py --provision-keys
+docker compose -f deploy/compose.yaml run --rm --no-deps backend python scripts/check_local_resources.py --role backend
+docker compose -f deploy/compose.yaml run --rm --no-deps knowledge-worker python scripts/check_local_resources.py --role worker
+docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 ~~~
 
 启动器调用同一工厂；不创建示例词典、默认获准分类或长期企业身份。受信 Python 集成可调用 `start_gateway.build_app(classifier=approved_classifier)`，CLI/镜像可通过上述运维模块引用装配同一分类器。配置模块引用只解决装配，不提供业务外发批准；无分类器保持503，错误引用、异步/错误签名函数或无效 TLS 证书对安全退出。有效 BYOK、合法协议与可信分类结果已到达时，高敏/禁止外发或未知分类输入可先形成受限加密观察，再拒绝外发；秘密检测/协议/存储失败仍拒绝采集。就绪会检查路由完整版本、分类接入、存储/密钥和真实水位；通过技术就绪仍不代表生产准入。容器探针适配 HTTP/HTTPS，仅表示本机存活；选择 HTTPS 时客户端须校验证书链与服务域名。
@@ -181,8 +184,8 @@ docker compose -f deploy/compose.yaml up -d
 
 首次部署 PostgreSQL 时，管理方使用受控 JSON 文件（`schema`、`application_role`、`admin_role`、`admin_dsn`、`app_dsn`；`admin_role` 为预建专用受限角色）显式初始化一个尚不存在的 v2 schema：
 
-~~~powershell
-.\.venv\Scripts\python.exe scripts/prepare_knowledge_database.py --config <private-input.json> --output-config <new-private-bound-config.json>
+~~~bash
+.venv/bin/python scripts/prepare_knowledge_database.py --config <private-input.json> --output-config <new-private-bound-config.json>
 ~~~
 
 工具复用当前数据库定义，在一个管理事务中建立表、受限授权与 forced RLS；拒绝已有 schema、特权应用角色和可切换到管理角色的账号，不修改既有数据或提供迁移。输出文件包含连接秘密，必须置于受限、Git 忽略的目录；取其 `app_dsn` 写入 worker 的 DSN 秘密文件，不能把 `admin_dsn`交给 worker。真实远端部署必须启用并验证数据库 TLS（如 `sslmode=verify-full` 与受信 CA）；仅完成连接或建表不能证明传输安全。
@@ -204,6 +207,8 @@ docker compose -f deploy/compose.yaml up -d
 ---
 
 ## 管理员登录与请求历史网页
+
+页面由 `apps/admin-web` 的 React 应用提供，后端不托管旧 HTML/DOM 资源。本机开发使用 HTTP，Compose 与本地拉起脚本默认开通外部访问（默认绑定 `0.0.0.0`），管理入口默认发布为 80 端口（访问 `http://<主机IP>/login` 或本机 `http://127.0.0.1/login`），后端探针默认发布为 8080 端口；不发布 443。Vite 开发入口默认 `http://127.0.0.1:3000`，代理保留原始 Host（含端口），可用 `GATEWAY_ADMIN_PROXY_TARGET` 指定本机后端。
 
 管理控制台仅供固定管理员账号使用。访问同源 `/login` 以 admin 登录（密码由部署方在初始化时设定），服务端校验后签发 HttpOnly 会话 Cookie；登录后进入 `/admin` 管理壳，`/admin/requests` 可查看当前租户/保护域内全部未过期请求的输入、脱敏外发、供应商回复、还原输出，不按用户或供应商 Key 分组，也不再使用独立查询 Key。四阶段可用正文默认直接展示和复制，无遮挡开关；列表支持模型/协议/状态/错误码/时间窗筛选和游标分页，部分或未产生的阶段单独标记，网关拒绝正文不会标成成功模型回复。未登录访问管理页面会跳转登录页；退出或会话失效后页面清除正文并回到登录页。
 
@@ -241,4 +246,18 @@ docker compose -f deploy/compose.yaml up -d
 2. **内存物理擦除限制**：原值映射在请求结束时由 Python 垃圾回收机制释放对象引用，在解释器层面不保证物理 RAM 位的硬件擦除。
 3. **推断风险防范**：文本实体替换能够消除直接标识符泄露，但不能完全阻止模型基于上下文语境产生的反向间接推断，高敏绝密数据应直接配置为 `LOCAL_ONLY` 强阻断。
 4. **知识数据库权限**：候选读取核验自身和全部来源权限，拒绝状态持久化。归一描述表不并集ACL；固定search_path、撤销PUBLIC执行权的受限管理函数需要专用管理owner，应用角色不得继承其BYPASSRLS权限。读取与来源撤回/到期通过行锁明确事务顺序。
-5. **客观限制**：不支持任意协议或未知字段透传；没有真实供应商签名接受、实际WorkBuddy组合、企业IAM/KMS、生产网络与发布的通用通过声明。具体验签算法及信任材料仍须审查准入，语法守卫不能证明任意Python算法安全。
+5. **客观限制**：兼容模式扫描可检测文本并保留 JSON 扩展字段，严格模式按已准入协议拒绝未知字段；不支持任意协议。没有真实供应商签名接受、实际WorkBuddy组合、企业IAM/KMS、生产网络与发布的通用通过声明。具体验签算法及信任材料仍须审查准入，语法守卫不能证明任意Python算法安全。
+
+## Linux 本机检查与资源配置
+
+仓库只有根 npm workspace 锁文件和 `apps/backend` Python 项目。`.node-version` 固定已验证的 Node 22 补丁版本，Python 3.11，冻结 uv 依赖；从根运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> bash scripts/check.sh`，PowerShell 可运行 `pwsh -NoProfile -File scripts/check.ps1`。检查同时核对结构、wheel 与源码、Docker 运行依赖和锁文件；后端 OpenAPI 与前端生成类型分别检查漂移，构建前实际检查 app/node TypeScript 项目，并验证类型错误能阻断构建。npm 审计的 high/critical 问题返回非零退出码。
+
+数据库复用本机已有 PostgreSQL 5433。原生进程使用 `127.0.0.1:5433`，Compose 提供 `host.docker.internal:host-gateway` 映射，容器 DSN 指向宿主 5433，不能使用容器自身的回环地址。连接文件与模型、operator、密钥、持久状态均使用本机受控资源，不创建替代 PG 服务、不使用旧 Windows 路径。历史与知识使用独立的 schema 和受限连接，worker 不得绑定历史 schema；禁止将 DDL 管理连接交给应用。
+
+`bash rebuild_and_run.sh` 使用已有本地启动配置（如存在）或标准 Compose 配置；标准部署可显式运行 `bash rebuild_and_run.sh --env-file <受控绝对配置路径>`。默认绑定 `0.0.0.0` 开通外部访问，先校验再构建/更新，不先停止全栈。支持 `--export [tar_path]` 导出本地构建镜像为归档文件，支持 `--export-only [tar_path]` 仅构建/导出，不依赖运行秘密或拉起容器。已有密钥和管理员状态直接复用；初始化工具只用于尚未初始化的资源。持久卷显式绑定 `enterprise_gateway_gateway-state` 与 `enterprise_gateway_gateway-admin-state`，镜像预建 `/app/state/admin` 并使用 UID 65532。前后端基础镜像均固定 digest；后端只打包已准备的 ONNX 制品。
+
+浏览器回归执行 `GATEWAY_HISTORY_PG_CONFIG=<受控本机PG测试配置> npm run test:e2e --workspace apps/admin-web`。它启动真实后端和 Chrome，使用新的随机测试 schema、合成供应商及历史，结束后仅清理本轮创建的对象。`CHROME_PATH` 可指定本机 Chrome；无本机 Chrome 时使用 Playwright 安装的 Chromium。全量检查可设置 `GATEWAY_CHECK_BROWSER=1`，同一私有 PG 文件也可通过 `GATEWAY_TEST_PG_CONFIG` 提供知识测试配置。构建后的 Nginx 浏览器流程运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> python3 scripts/run_nginx_e2e.py`；代理故障检查运行 `python3 scripts/check_proxy.py`。TypeScript 拒绝 canary 运行 `python3 scripts/check_typecheck.py`。Docker 输入隔离检查为 `python3 scripts/check_docker_context.py`，仅构建合成 canary，不复制真实秘密。
+
+当前 React 管理端提供登录、会话恢复、退出和请求历史筛选/分页/四阶段正文。其他既有管理 API 仍保留认证与授权，尚未实现的管理页面不算作已交付能力。
+
+设置 `GATEWAY_CHECK_DOCKER=1` 可在聚合入口追加两端 context canary、镜像构建与实际内容/hash、代理错误及 Nginx 浏览器检查。独立镜像核验入口为 `python3 scripts/check_images.py`，需先在相同源码上构建本机 dist 和两端镜像。退出请求失败时，网页立即清除历史与正文并提示服务端注销未确认。

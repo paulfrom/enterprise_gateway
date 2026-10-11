@@ -101,8 +101,6 @@ class IngressValidator:
                           for call in msg.tool_calls or ()}
             raw_fragments = []
             for i, msg in enumerate(parsed.messages):
-                if msg.role == 'assistant' and msg.reasoning_content is not None:
-                    raw_fragments.append((f"messages[{i}].reasoning_content", msg.reasoning_content))
                 if msg.role == 'tool':
                     # Tool/MCP results may carry sensitive file contents and are
                     # detected, except results of skill-loading tools.
@@ -147,10 +145,17 @@ class IngressValidator:
             )
 
         payload = parsed.model_dump(exclude_none=True)
-        if not allow_unsupported and history_adapter is not None:
-            history_adapter.validate_message_history(payload['messages'])
-        elif not allow_unsupported and any(isinstance(m.get('content'), list) and any(b.get('type') == 'thinking' for b in m['content']) for m in payload['messages']):
-            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unverified history')
+        if not allow_unsupported:
+            # DeepSeek reasoning history has no admitted proof format. The strict
+            # profile must reject it before detection or any upstream release.
+            if any(m.get('reasoning_content') is not None for m in payload['messages']):
+                raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, 'unverified history')
+            if history_adapter is not None:
+                history_adapter.validate_message_history(payload['messages'])
+            elif any(isinstance(m.get('content'), list) and any(
+                    b.get('type') in ('thinking', 'thought', 'redacted_thinking')
+                    for b in m['content']) for m in payload['messages']):
+                raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unverified history')
         # Detection scope is user/assistant message text and tool results;
         # tools and other structure are validated for shape, never scanned.
         tools = [] if allow_unsupported else (payload.get('tools') or [])

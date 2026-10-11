@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import urllib.request
 from datetime import datetime, timezone
@@ -33,7 +34,7 @@ from pathlib import Path
 REPO_ID = "shibing624/bert4ner-base-chinese"
 REVISION = "5d660ed2aa9da482bf2d99c6bc8cf2ce66758f6a"
 SOURCE_URL = f"https://huggingface.co/{REPO_ID}"
-MIRROR_URL = "https://hf-mirror.com"
+MIRROR_URL = os.environ.get("GATEWAY_NER_DOWNLOAD_BASE", "https://hf-mirror.com").rstrip("/")
 NERPY_REPO_URL = "https://github.com/shibing624/nerpy"
 RESOLVE_URL = f"{MIRROR_URL}/{REPO_ID}/resolve/{REVISION}"
 

@@ -1,9 +1,9 @@
-"""Admin console HTTP assembly: login/session/logout, page guard, origin and CSRF.
+"""Admin console HTTP assembly: login/session/logout, origin and CSRF.
 
 All admin data routes authenticate through :class:`gateway.admin_auth.AdminAuthService`
 dependencies; this module adds the browser-facing rules around them: same-origin
 enforcement, the session-bound ``X-Admin-CSRF`` header for writes, strict login
-payloads, uniform error bodies, and the page redirect contract. The CSRF token is
+payloads, uniform error bodies. Browser pages are served by the React frontend. The CSRF token is
 derived from the server-side session digest, so it is session-bound, needs no
 storage of its own, and dies with revocation. Errors use the shared
 ``{"error": {"code": ...}}`` shape with ``_SECURITY_HEADERS``.
@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, Response
 
 from gateway.admin_auth import (
     SESSION_COOKIE_NAME, AdminAuthService, AdminContext, AdminLoginFailed,
@@ -25,6 +24,7 @@ from gateway.admin_auth import (
 from gateway.admin_storage import AdminStorageUnavailable, SessionInvalid
 from gateway.history_api import _SECURITY_HEADERS, _error, _source
 from infra.strict_json import parse_strict_json
+from gateway.admin_contract import AdminSession, Revocation, ERROR_RESPONSES, LOGIN_BODY
 
 CSRF_HEADER = "x-admin-csrf"
 _CSRF_HMAC_LABEL = b"enterprise-gateway-admin-csrf-v1"
@@ -59,23 +59,6 @@ ADMIN_ERROR_CODES = frozenset({
 
 })
 
-_LOGIN_ASSETS = frozenset({"login.css", "login.js"})
-_ADMIN_ASSETS = frozenset({
-    "admin.css", "admin.js", "admin-session.js", "operations.js", "settings.js",
-    "knowledge.js", "audit.js", "history.css", "history.js",
-})
-
-_LOGIN_PLACEHOLDER = (
-    "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-    "<title>企业隐私网关管理登录</title></head><body>"
-    "<p>登录页面资源尚未发布。</p></body></html>"
-)
-_ADMIN_PLACEHOLDER = (
-    "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-    "<title>企业隐私网关管理控制台</title></head><body>"
-    "<p>管理页面资源尚未发布。</p></body></html>"
-)
-
 
 def _csrf_token(context: AdminContext) -> str:
     """Session-bound token derived from the persisted digest; never stored itself."""
@@ -104,13 +87,26 @@ def _same_origin(request: Request) -> bool:
     host = _single_header(request, "host")
     if not host:
         return False
+    if any(len(request.headers.getlist(name)) > 1 for name in ('origin', 'referer')):
+        return False
     origin = _single_header(request, "origin")
     referer = _single_header(request, "referer")
     signal = origin if origin is not None else referer
     if signal is None:
         return False
-    parsed = urlsplit(signal)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    try:
+        parsed = urlsplit(signal)
+        authority = urlsplit('//' + host)
+        # Accessing port also validates its syntax and range.
+        parsed.port
+        authority.port
+    except ValueError:
+        return False
+    if (parsed.scheme != request.url.scheme or not parsed.netloc or not authority.hostname
+            or parsed.username is not None or parsed.password is not None
+            or authority.username is not None or authority.password is not None
+            or authority.path or authority.query or authority.fragment
+            or origin is not None and (parsed.path or parsed.query or parsed.fragment)):
         return False
     return parsed.netloc.lower() == host.lower()
 
@@ -130,23 +126,6 @@ class _LoginPayloadInvalid(Exception):
     """Strict-parse failure; never carries submitted content."""
 
 
-class _LoginRedirect(Exception):
-    """Internal control flow: an unauthenticated page request goes to /login."""
-
-
-def _page_dependency(service: AdminAuthService):
-    authenticate = service.require_admin()
-
-    async def dependency(request: Request) -> AdminContext:
-        try:
-            return await authenticate(request)
-        except HTTPException as refused:
-            if refused.status_code == 401:
-                raise _LoginRedirect() from None
-            raise
-
-    return dependency
-
 
 def write_dependency(service: AdminAuthService):
     authenticate = service.require_admin()
@@ -163,35 +142,10 @@ def write_dependency(service: AdminAuthService):
     return dependency
 
 
-def _page_response(assets: Path, name: str, placeholder: str) -> Response:
-    path = assets / name
-    try:
-        if path.is_file() and not path.is_symlink():
-            return FileResponse(path, headers=_SECURITY_HEADERS)
-    except OSError:
-        pass
-    # Page files ship with the frontend worker; the route contract is final now.
-    return Response(content=placeholder, media_type="text/html", headers=_SECURITY_HEADERS)
-
-
-def _asset_response(assets: Path, name: str, allowed: frozenset) -> Response:
-    if name not in allowed:
-        return _error("ADMIN_ASSET_NOT_FOUND", 404)
-    path = assets / name
-    try:
-        if path.is_file() and not path.is_symlink():
-            return FileResponse(path, headers=_SECURITY_HEADERS)
-    except OSError:
-        pass
-    return _error("ADMIN_ASSET_NOT_FOUND", 404)
-
-
 def install_admin_routes(app: FastAPI, auth_service: AdminAuthService) -> None:
-    """Mount the console pages and session API; every route is fixed in the contract."""
+    """Mount only session APIs; the React application owns browser pages."""
     if not isinstance(auth_service, AdminAuthService):
         raise TypeError("auth_service must be an AdminAuthService")
-    assets = Path(__file__).with_name("web")
-    require_page = _page_dependency(auth_service)
     require_write = write_dependency(auth_service)
     require_poll = auth_service.require_admin_poll()
 
@@ -205,33 +159,7 @@ def install_admin_routes(app: FastAPI, auth_service: AdminAuthService) -> None:
             response.headers.update(_SECURITY_HEADERS)
         return response
 
-    @app.exception_handler(_LoginRedirect)
-    async def login_redirect(_request: Request, _exc: _LoginRedirect) -> RedirectResponse:
-        return RedirectResponse("/login", status_code=302, headers=_SECURITY_HEADERS)
-
-    @app.get("/login")
-    async def login_page(request: Request):
-        try:
-            await auth_service.authenticate(request.cookies.get(SESSION_COOKIE_NAME),
-                                            source=_source(request), refresh_idle=True)
-        except Exception:
-            return _page_response(assets, "login.html", _LOGIN_PLACEHOLDER)
-        return RedirectResponse("/admin", status_code=302, headers=_SECURITY_HEADERS)
-
-    @app.get("/login/assets/{asset}")
-    async def login_asset(asset: str):
-        return _asset_response(assets, asset, _LOGIN_ASSETS)
-
-    @app.get("/admin")
-    @app.get("/admin/requests")
-    async def admin_page(context: AdminContext = Depends(require_page)):
-        return _page_response(assets, "admin.html", _ADMIN_PLACEHOLDER)
-
-    @app.get("/admin/assets/{asset}")
-    async def admin_asset(asset: str):
-        return _asset_response(assets, asset, _ADMIN_ASSETS)
-
-    @app.post("/api/admin/login")
+    @app.post("/api/admin/login", response_model=AdminSession, responses=ERROR_RESPONSES, openapi_extra=LOGIN_BODY)
     async def admin_login(request: Request):
         if not _same_origin(request):
             return _error("ADMIN_ORIGIN_REJECTED", 403)
@@ -269,11 +197,11 @@ def install_admin_routes(app: FastAPI, auth_service: AdminAuthService) -> None:
         _set_session_cookie(response, request, token)
         return response
 
-    @app.get("/api/admin/session")
+    @app.get("/api/admin/session", response_model=AdminSession, responses=ERROR_RESPONSES)
     async def admin_session(context: AdminContext = Depends(require_poll)):
         return JSONResponse(content=_session_payload(context), headers=_SECURITY_HEADERS)
 
-    @app.post("/api/admin/logout")
+    @app.post("/api/admin/logout", response_model=Revocation, responses=ERROR_RESPONSES)
     async def admin_logout(request: Request,
                            context: AdminContext = Depends(require_write)):
         try:
