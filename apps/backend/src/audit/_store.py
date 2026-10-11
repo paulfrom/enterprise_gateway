@@ -1,4 +1,4 @@
-"""Private storage primitives shared by the B2 audit catalog and access traces.
+"""Private storage primitives shared by the audit catalog and access traces.
 
 Both writers are controlled background/management surfaces: every mutation is
 serialized through an OS advisory lock (same pattern as
@@ -15,7 +15,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 from pathlib import Path
-import time
 
 from infra.durable_write import DurableWriteError, durable_commit
 
@@ -40,7 +39,7 @@ def read_capped(path: Path, max_bytes: int) -> bytes | None:
     try:
         if path.is_symlink():
             return None
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             raw = stream.read(max_bytes + 1)
     except OSError:
@@ -87,27 +86,14 @@ class LockedDirectory:
             path = self._directory / ".audit-store.lock"
             if path.is_symlink():
                 raise AuditStoreError("lock path is a symlink")
-            fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             handle = os.fdopen(fd, "r+b", buffering=0)
             # OS locks can cover a byte beyond EOF. Never write a sentinel
             # before acquiring it: another handle may already own that byte.
             handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
+            import fcntl
 
-                deadline = time.monotonic() + 30
-                while True:
-                    try:
-                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                        break
-                    except OSError:
-                        if time.monotonic() >= deadline:
-                            raise AuditStoreError("lock timeout") from None
-                        time.sleep(0.02)
-            else:
-                import fcntl
-
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_EX)
             acquired = True
         except (OSError, ValueError):
             if handle is not None:
@@ -119,14 +105,9 @@ class LockedDirectory:
             if handle is not None:
                 if acquired:
                     handle.seek(0)
-                    if os.name == "nt":
-                        import msvcrt
+                    import fcntl
 
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        import fcntl
-
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
 
 

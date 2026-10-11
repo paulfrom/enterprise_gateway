@@ -1,6 +1,6 @@
 """Durable single-file commit primitive: temp write + flush + fsync + atomic rename + directory fsync.
 
-Shared by the A-01 release-intent ledger and the K-02 encrypted spool. The
+Shared by the release-intent ledger and the encrypted spool. The
 primitive is storage-agnostic: any failure raises its own controlled
 :class:`DurableWriteError` and no commit is ever fabricated. Callers map
 failures to their contract codes (``AUDIT_WRITE_FAILED`` /
@@ -8,7 +8,7 @@ failures to their contract codes (``AUDIT_WRITE_FAILED`` /
 injected ``capacity_check`` hook so each caller owns its own ``SPOOL_FULL``
 semantics.
 
-Commit protocol (DESIGN §6):
+Commit protocol:
 
 1. Optional caller water-mark hook runs before anything is created on disk;
 2. body is written to a unique temp file in the SAME directory (rename is only
@@ -23,10 +23,7 @@ removal also fails, the temp file remains carrying its unique ``.tmp`` suffix
 but is never renamed to the final name, so no consumer can mistake it for a
 committed document. Only a path that completed every step is returned.
 
-Directory fsync is best effort on platforms that cannot open a directory
-handle (Windows raises ``PermissionError``); there the rename durability is
-delegated to the filesystem and documented as such. File fsync and rename are
-never skipped.
+Both file and directory fsync are required for a successful commit.
 """
 
 from __future__ import annotations
@@ -72,15 +69,8 @@ def _replace(src: Path, dst: Path) -> None:
 
 
 def _fsync_directory(directory: Path) -> None:
-    """fsync a directory entry; unsupported platforms skip with a comment."""
-    try:
-        fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        if os.name == "nt":
-            # Windows cannot open a directory handle: rename durability is
-            # delegated to the filesystem; see module docstring.
-            return
-        raise
+    """Persist the renamed directory entry."""
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
     finally:
@@ -91,7 +81,7 @@ def _remove_quietly(path: Path) -> None:
     try:
         os.remove(path)
     except OSError:
-        pass  # best effort; residual temp keeps its .tmp suffix
+        pass  # best effort; residual temp keeps its.tmp suffix
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +108,7 @@ def durable_commit(
 
     Returns :class:`CommittedDocument` only after write + fsync + rename +
     directory fsync all succeeded. Any failure raises
-    :class:`DurableWriteError` and guarantees the final name does not exist.
+:class:`DurableWriteError` and guarantees the final name does not exist.
     """
     if not isinstance(data, bytes):
         raise TypeError("data must be bytes")

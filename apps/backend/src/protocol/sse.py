@@ -1,4 +1,4 @@
-"""P-07 SSE incremental parser and state machine.
+"""SSE incremental parser and state machine.
 
 Implements byte-level incremental chunk buffering, UTF-8 boundary handling,
 CRLF/LF line normalization, multi-line `data:` concatenation, comment ignoring,
@@ -27,7 +27,7 @@ class ServerSentEvent:
 
 
 class SseIncrementalParser:
-    """Incremental byte-level Server-Sent Events parser (P-07).
+    """Incremental byte-level Server-Sent Events parser.
 
     Accepts arbitrary byte chunks, handles partial UTF-8 sequences at chunk
     boundaries, splits lines on \\r\\n, \\r, or \\n, and accumulates fields

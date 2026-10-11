@@ -2,7 +2,7 @@
 
 A RELEASED event records the reader's successful decryption/result checkpoint.
 Lifecycle, budget and session checks can still refuse HTTP delivery afterwards.
-Catalog/access logs keep the T3 defaults: 64 MiB each and at most 20,000 scans.
+Catalog/access logs keep the storage limits: 64 MiB each and at most 20,000 scans.
 """
 from gateway.admin_contract import AuditPage, AuditDetail, ObjectPage, ERROR_RESPONSES
 import asyncio

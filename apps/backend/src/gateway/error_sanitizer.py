@@ -1,4 +1,4 @@
-"""Upstream error sanitizer and response mapper (P-13).
+"""Upstream error sanitizer and response mapper.
 
 Purges raw error bodies, credentials, prompts, internal IPs, and stack traces
 emitted by upstream providers or proxy layers. Preserves authorized status codes

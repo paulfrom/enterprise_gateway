@@ -5,7 +5,7 @@ behavior for individual records — per-record random 256-bit DEK, single-shot
 AES-256-GCM with 96-bit random nonces, AAD bound to domain/record/purpose/
 format version, and DEK wrapping behind an abstract :class:`KmsProvider`.
 Enterprise KMS integration, production storage semantics, and full-copy
-destruction belong to R-05/A-05; this module performs no real KMS calls and
+destruction belong to R-05/; this module performs no real KMS calls and
 offers no configuration switching layer. :class:`StaticTestKmsProvider`
 holds explicitly synthetic KEKs for local tests and must never back a
 production code path. The controlled local file backend is implemented in

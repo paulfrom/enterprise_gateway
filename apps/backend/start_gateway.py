@@ -198,11 +198,8 @@ def _assemble_admin_audit(kms, state):
     from audit.catalog import AuditCatalogBuilder
     from audit.admin_reader import AdminReviewService
     from gateway.admin_audit_api import revalidate_audit_session
-    def no_legacy_lifecycle(record_id):
-        # Only trusted lifecycle metadata submitted with new intents is eligible.
-        raise ValueError('legacy record has no lifecycle basis')
     builder = AuditCatalogBuilder(intent_root=state / 'intents', evidence_root=state / 'evidence',
-        catalog_directory=state / 'audit-catalog', lifecycle=no_legacy_lifecycle, batch_limit=200)
+        catalog_directory=state / 'audit-catalog', batch_limit=200)
     reader = AdminReviewService(catalog_directory=state / 'audit-catalog', evidence_root=state / 'evidence',
         kms=kms, revalidate=revalidate_audit_session, review_purpose='model-query',
         access_log_directory=state / 'audit-access')
@@ -327,7 +324,6 @@ def build_app(*, providers_config_path: Path | None = None,
         dictionary=dictionary, ner_package_dir=Path(_required("GATEWAY_NER_PACKAGE_DIR")),
         state_directory=state, policy=policy, watermark_policy=WatermarkPolicy(),
         evidence_bucket=evidence_bucket, classifier=classifier,
-        client_profile=os.environ.get('GATEWAY_CLIENT_PROFILE') or 'compatible',
         detection_failure_mode=os.environ.get('GATEWAY_DETECTION_FAILURE_MODE', 'error'),
         quick_screen=quick_screen,
         history_store=history_store, admin_service=admin_service,

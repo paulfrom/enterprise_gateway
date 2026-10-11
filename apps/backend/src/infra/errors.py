@@ -30,7 +30,7 @@ class SafetyCode(StrEnum):
     INVALID_TEXT_LENGTH = "INVALID_TEXT_LENGTH"
     INVALID_SPAN = "INVALID_SPAN"
     SECRET_DETECTED = "SECRET_DETECTED"
-    # C-01 egress-policy contract
+    # egress-policy contract
     POLICY_NOT_JSON = "POLICY_NOT_JSON"
     POLICY_NESTING_TOO_DEEP = "POLICY_NESTING_TOO_DEEP"
     DUPLICATE_POLICY_KEY = "DUPLICATE_POLICY_KEY"
@@ -39,7 +39,7 @@ class SafetyCode(StrEnum):
     MISSING_CATEGORY = "MISSING_CATEGORY"
     UNKNOWN_CATEGORY = "UNKNOWN_CATEGORY"
     CATEGORY_NOT_APPROVED = "CATEGORY_NOT_APPROVED"
-    # C-02 identity contract
+    # identity contract
     UNTRUSTED_HEADER_REJECTED = "UNTRUSTED_HEADER_REJECTED"
     MISSING_IDENTITY = "MISSING_IDENTITY"
     INVALID_IDENTITY = "INVALID_IDENTITY"
@@ -49,26 +49,26 @@ class SafetyCode(StrEnum):
     MISSING_REQUIRED_ROLE = "MISSING_REQUIRED_ROLE"
     AUTH_EXPIRED = "AUTH_EXPIRED"
     FUTURE_DATED_AUTH = "FUTURE_DATED_AUTH"
-    # C-03 protocol contracts
+    # protocol contracts
     MALFORMED_JSON = "MALFORMED_JSON"
     INVALID_UTF8 = "INVALID_UTF8"
     DUPLICATE_JSON_KEY = "DUPLICATE_JSON_KEY"
     CONTRACT_VIOLATION = "CONTRACT_VIOLATION"
-    # C-04 static exemption contract
+    # static exemption contract
     INVALID_REGISTRY = "INVALID_REGISTRY"
     INVALID_TEMPLATE = "INVALID_TEMPLATE"
     REGISTRY_PARSE_FAILED = "REGISTRY_PARSE_FAILED"
-    # C-05 package manifest contract
+    # package manifest contract
     INVALID_MANIFEST = "INVALID_MANIFEST"
     CORRUPTED_PACKAGE = "CORRUPTED_PACKAGE"
     VERSION_MISMATCH = "VERSION_MISMATCH"
-    # C-06 quality audit contract
+    # quality audit contract
     DATASET_CONTAMINATION = "DATASET_CONTAMINATION"
     INVALID_SAMPLE = "INVALID_SAMPLE"
     UNAPPROVED_THRESHOLDS = "UNAPPROVED_THRESHOLDS"
     SECRET_LEAKAGE_HARD_FAILURE = "SECRET_LEAKAGE_HARD_FAILURE"
     THRESHOLD_NOT_MET = "THRESHOLD_NOT_MET"
-    # P-04 ingress gate
+    # ingress gate
     POLICY_REJECTED = "POLICY_REJECTED"
     PROTOCOL_VIOLATION = "PROTOCOL_VIOLATION"
     UNSUPPORTED_PROTOCOL = "UNSUPPORTED_PROTOCOL"
@@ -77,49 +77,49 @@ class SafetyCode(StrEnum):
     INVALID_DETECTOR_RESULTS = "INVALID_DETECTOR_RESULTS"
     # D-group recognizer contracts
     INVALID_RECOGNIZER = "INVALID_RECOGNIZER"
-    # A-02 envelope encryption contract
+    # envelope encryption contract
     INVALID_CIPHERTEXT = "INVALID_CIPHERTEXT"
     DECRYPTION_FAILED = "DECRYPTION_FAILED"
     KMS_UNAVAILABLE = "KMS_UNAVAILABLE"
     INVALID_WRAPPED_KEY = "INVALID_WRAPPED_KEY"
-    # D-06/D-07 dictionary contracts
+    # /dictionary contracts
     DICTIONARY_INVALID = "DICTIONARY_INVALID"
     DICTIONARY_CONFLICT = "DICTIONARY_CONFLICT"
-    # A-01 durable intent writer
+    # durable intent writer
     AUDIT_WRITE_FAILED = "AUDIT_WRITE_FAILED"
-    # A-09 audit catalog / admin direct-read contract
+    # audit catalog / admin direct-read contract
     AUDIT_RECORD_NOT_FOUND = "AUDIT_RECORD_NOT_FOUND"
     AUDIT_RECORD_UNAVAILABLE = "AUDIT_RECORD_UNAVAILABLE"
     AUDIT_EVIDENCE_CORRUPTED = "AUDIT_EVIDENCE_CORRUPTED"
     AUDIT_ACCESS_REJECTED = "AUDIT_ACCESS_REJECTED"
-    # A-07 observability whitelist
+    # observability whitelist
     OBSERVABILITY_VIOLATION = "OBSERVABILITY_VIOLATION"
-    # K-01 observation event contract
+    # observation event contract
     EVENT_INVALID = "EVENT_INVALID"
     COLLECTION_NOT_AUTHORIZED = "COLLECTION_NOT_AUTHORIZED"
-    # K-02 encrypted spool writer
+    # encrypted spool writer
     SPOOL_FULL = "SPOOL_FULL"
     SPOOL_WRITE_FAILED = "SPOOL_WRITE_FAILED"
-    # P-17 bound egress client
+    # bound egress client
     UPSTREAM_BINDING_VIOLATION = "UPSTREAM_BINDING_VIOLATION"
     INVALID_UPSTREAM = "INVALID_UPSTREAM"
-    # A-03 evidence gate
+    # evidence gate
     EVIDENCE_GATE_FAILED = "EVIDENCE_GATE_FAILED"
-    # K-03 spool relay
+    # spool relay
     RELAY_SUBMIT_FAILED = "RELAY_SUBMIT_FAILED"
-    # D-08 NER model artifact contract
+    # NER model artifact contract
     NER_MODEL_INVALID = "NER_MODEL_INVALID"
     NER_EVALUATION_FAILED = "NER_EVALUATION_FAILED"
-    # D-09 NER windowing offset recovery
+    # NER windowing offset recovery
     NER_OFFSET_UNRECOVERABLE = "NER_OFFSET_UNRECOVERABLE"
-    # D-10 bounded inference executor
+    # bounded inference executor
     INFERENCE_TIMEOUT = "INFERENCE_TIMEOUT"
     INFERENCE_QUEUE_FULL = "INFERENCE_QUEUE_FULL"
-    # P-16 admission limiter
+    # admission limiter
     ADMISSION_LIMIT_EXCEEDED = "ADMISSION_LIMIT_EXCEEDED"
-    # P-05 request replacer
+    # request replacer
     UNSAFE_REPLACEMENT = "UNSAFE_REPLACEMENT"
-    # A-08 audit watermark guard
+    # audit watermark guard
     AUDIT_WATERMARK_BLOCKED = "AUDIT_WATERMARK_BLOCKED"
 
 

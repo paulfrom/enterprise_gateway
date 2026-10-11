@@ -1,8 +1,8 @@
-"""P-09 and P-10 bounded tool call parameter buffer and release verifier.
+"""And bounded tool call parameter buffer and release verifier.
 
 Enforces:
-- P-09: Strict per-tool (64KB = 65536 bytes) and request-wide parameter size bounds.
-- P-10: Complete parameter buffering, token restoration, strict JSON validation,
+- Strict per-tool (64KB = 65536 bytes) and request-wide parameter size bounds.
+- Complete parameter buffering, token restoration, strict JSON validation,
   and schema verification before any executable arguments are released. Zero release on failure.
 """
 
@@ -33,7 +33,7 @@ def _reject_tool_json(kind: JsonRejectKind) -> NoReturn:
 
 
 class BoundedToolCallBuffer:
-    """Buffers, bounds, and verifies tool call arguments prior to release (P-09, P-10)."""
+    """Buffers, bounds, and verifies tool call arguments prior to release."""
 
     def __init__(
         self,
@@ -64,7 +64,7 @@ class BoundedToolCallBuffer:
             self._buffers[tool_id] = bytearray()
 
     def feed_argument_delta(self, tool_id: str, delta: str | bytes) -> None:
-        """Feed an incremental chunk of tool arguments for a specific tool call (P-09)."""
+        """Feed an incremental chunk of tool arguments for a specific tool call."""
         if tool_id not in self._buffers:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unregistered tool invocation")
         if tool_id in self._restored_sizes:
@@ -101,7 +101,7 @@ class BoundedToolCallBuffer:
         context: MappingContext,
         allowed_tools: Mapping[str, type | dict] | None = None,
     ) -> dict[str, Any]:
-        """Verify, restore tokens, and validate schema before releasing arguments (P-10).
+        """Verify, restore tokens, and validate schema before releasing arguments.
 
         Zero arguments are released if JSON parsing, token restoration, or
         schema verification fails.
@@ -201,7 +201,7 @@ class BoundedToolCallBuffer:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unsupported tool schema")
 
     def cancel_tool(self, tool_id: str) -> None:
-        """P-14: Clear resources for canceled tool call."""
+        """Clear resources for canceled tool call."""
         buf = self._buffers.pop(tool_id, None)
         if buf:
             self._total_bytes -= len(buf)
@@ -209,7 +209,7 @@ class BoundedToolCallBuffer:
         self._restored_sizes.pop(tool_id, None)
 
     def cancel_all(self) -> None:
-        """P-14: Clean up all tool buffers."""
+        """Clean up all tool buffers."""
         self._buffers.clear()
         self._tool_names.clear()
         self._total_bytes = 0

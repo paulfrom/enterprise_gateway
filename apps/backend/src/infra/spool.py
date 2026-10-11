@@ -1,9 +1,8 @@
-"""K-02 encrypted spool: policy-mandated collection lands durably BEFORE use.
+"""Encrypted spool: policy-mandated collection lands durably BEFORE use.
 
-When a channel policy mandates knowledge collection (DESIGN §8), the K-01
-observation event is envelope-encrypted (A-02: per-record random DEK,
+When a channel policy mandates knowledge collection, the observation event is envelope-encrypted (per-record random DEK,
 AES-256-GCM, KMS-wrapped DEK keyed by purpose/retention bucket) and committed
-through the :mod:`enterprise_gateway.durable_write` primitive. Only after the
+through the :mod:`infra.durable_write` primitive. Only after the
 persistence boundary is reached does :meth:`SpoolWriter.collect` return a
 permit. Write/fsync failures map to ``SPOOL_WRITE_FAILED``; capacity
 water-marks (total bytes / file count) map to ``SPOOL_FULL``; both fail with

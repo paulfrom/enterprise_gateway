@@ -1,7 +1,6 @@
 """Replace only ingress-classified editable leaves; detected structure blocks."""
 from __future__ import annotations
 import re
-import json
 from collections.abc import Iterable, Mapping
 from infra.errors import SafetyCode, SafetyError
 from gateway.ingress import BusinessTextFragment, ValidatedIngressRequest
@@ -92,8 +91,5 @@ def replace_request(
         if not fragment.requires_detection and spans:
             raise SafetyError(SafetyCode.UNSAFE_REPLACEMENT, 'exempt_fragment')
         set_path(path, redact_text(fragment.content, spans, context))
-    from protocol.passthrough import PassthroughPayload, parse_passthrough_request
-    if isinstance(parsed, PassthroughPayload):
-        return parse_passthrough_request(json.dumps(payload), protocol, frozenset({parsed.model}))
     return model_cls.model_validate(payload)
 

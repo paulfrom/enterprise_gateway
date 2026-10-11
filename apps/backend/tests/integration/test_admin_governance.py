@@ -45,7 +45,7 @@ def synthetic_governance_runtime(*, enable_management=True):
         root = fixture.root/'state'
         # Runtime owns these exact directories; the assembler supplies lifecycle.
         builder = AuditCatalogBuilder(intent_root=root/'intents', evidence_root=root/'evidence',
-            catalog_directory=root/'catalog', lifecycle=lambda _id: (datetime.now(timezone.utc)+timedelta(days=1), 'synthetic-retention-v1'))
+            catalog_directory=root/'catalog')
         reader = AdminReviewService(catalog_directory=root/'catalog', evidence_root=root/'evidence',
             kms=fixture.kms, revalidate=revalidate_audit_session, review_purpose='model-query',
             access_log_directory=root/'access-events')

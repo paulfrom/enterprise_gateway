@@ -39,7 +39,7 @@ class IngressValidatorTests(unittest.TestCase):
         }
         self.exemption_registry = load_exemption_registry(exemption_data)
 
-    def test_strict_unproven_reasoning_is_rejected_but_compatible_text_is_scanned(self):
+    def test_unproven_reasoning_history_is_rejected(self):
         raw = json.dumps({'model': 'deepseek-flash', 'messages': [
             {'role': 'assistant', 'content': 'hello', 'reasoning_content': 'synthetic-unproven'},
             {'role': 'user', 'content': 'hello'}]})
@@ -47,10 +47,8 @@ class IngressValidatorTests(unittest.TestCase):
                        category='cat-approved', policy=self.policy,
                        allowed_models=frozenset({'deepseek-flash'}))
         with self.assertRaises(SafetyError) as refused:
-            IngressValidator.validate_request(**options, allow_unsupported=False)
+            IngressValidator.validate_request(**options)
         self.assertEqual(SafetyCode.PROTOCOL_VIOLATION, refused.exception.code)
-        compatible = IngressValidator.validate_request(**options, allow_unsupported=True)
-        self.assertIn('synthetic-unproven', [fragment.content for fragment in compatible.fragments])
 
     def test_deepseek_valid_request_admission(self) -> None:
         with open(FIXTURES_DIR / "deepseek_valid_request.json", "r", encoding="utf-8") as f:
@@ -211,7 +209,6 @@ class IngressValidatorTests(unittest.TestCase):
                 domain="test-domain",
                 category="cat-approved",
                 policy=self.policy,
-                allow_unsupported=False,
             allowed_models=frozenset({"deepseek-flash","deepseek-v4-pro","claude-sonnet-5-5","claude-fable-5-1","claude-opus-5-5"}))
         self.assertEqual(ctx.exception.code, SafetyCode.PROTOCOL_VIOLATION)
 

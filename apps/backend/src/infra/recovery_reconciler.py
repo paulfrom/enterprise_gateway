@@ -1,7 +1,7 @@
-"""A-06 crash-recovery reconciler: keep unknown results unknown, preserve real ones.
+"""Crash-recovery reconciler: keep unknown results unknown, preserve real ones.
 
-DESIGN §6: exactly-once cannot be built from two independent writes, so the
-gateway never fabricates success. After a crash the A-01 intent ledger is
+Exactly-once cannot be built from two independent writes, so the
+gateway never fabricates success. After a crash the intent ledger is
 reconciled: an intent whose send outcome was durably recorded keeps its real
 result (``SENT`` / ``FAILED``); an intent with no result record is
 adjudicated ``RESULT_UNKNOWN`` — never promoted to success, never demoted to
@@ -9,15 +9,15 @@ failure. The adjudication itself is durable (``durable_commit``) and
 re-entry is idempotent: an intent that already has a reconcile record is
 never re-judged, even if new facts (e.g. a late result record) appear later.
 
-Ledger layout (one directory, the A-01 audit ledger):
+Ledger layout (one directory, the audit ledger):
 
-- ``{intent_id}.intent.json``      — A-01 release intent (audit_intent)
-- ``{intent_id}.result.json``      — send outcome recorded after the attempt
-- ``{intent_id}.reconcile.json``   — crash-reconciliation adjudication
+- ``{intent_id}.intent.json`` — release intent (audit_intent)
+- ``{intent_id}.result.json`` — send outcome recorded after the attempt
+- ``{intent_id}.reconcile.json`` — crash-reconciliation adjudication
 - ``{intent_id}.intent.quarantined`` — corrupt intent, isolated from the scan
 
 All three active records are canonical JSON (sorted keys, compact separators,
-UTF-8) committed through :mod:`enterprise_gateway.durable_write`.
+UTF-8) committed through :mod:`infra.durable_write`.
 
 Record formats (fixed):
 
@@ -40,7 +40,7 @@ adjudication is written. Any durable-write failure while committing a
 reconcile record raises ``AUDIT_WRITE_FAILED``; the entry keeps its prior
 state and a re-run continues with the remaining entries.
 
-:func:`record_send_result` is the minimal write side for P-18/R-02 wiring:
+:func:`record_send_result` is the minimal write side for /R-02 wiring:
 after a send attempt completes, record its real outcome durably. It refuses
 to overwrite an existing result record — a recorded outcome is an audit fact
 and is never rewritten.
@@ -197,7 +197,7 @@ def serialize_reconcile(record: ReconcileRecord) -> bytes:
 def record_send_result(directory: str | Path, result: SendResult) -> Path:
     """Durably record the real outcome of one send attempt.
 
-    The caller (P-18/R-02 wiring) invokes this only after the attempt
+    The caller (/R-02 wiring) invokes this only after the attempt
     completed, passing the outcome it actually observed. An existing result
     record is never overwritten: a recorded outcome is an audit fact, so a
     duplicate registration is refused with ``CONTRACT_VIOLATION``.
@@ -270,7 +270,7 @@ _ALL_ALLOWED_INTENT_FIELDS = set(_REQUIRED_INTENT_FIELDS) | set(_OPTIONAL_INTENT
 
 
 def _valid_intent_payload(payload: object) -> bool:
-    """Structural revalidation of one A-01 intent document."""
+    """Structural revalidation of one intent document."""
     if not isinstance(payload, dict):
         return False
     keys = set(payload)

@@ -147,25 +147,17 @@ class FileKmsTests(unittest.TestCase):
             self.assertEqual(self.kms.unwrap(value, purpose="model-query", bucket="restricted-retention"), bytes(32))
 
     def test_empty_lock_held_by_other_process_waits_without_prelock_write(self):
-        # Windows byte locks may cover EOF; writing a sentinel before owning
-        # that byte fails with EACCES when another process owns the empty file.
+        # The empty lock file must remain unchanged while another process owns it.
         script = """
 import os,sys
 from pathlib import Path
 path=Path(sys.argv[1])/'.kms.lock'
 fd=os.open(path,os.O_RDWR|os.O_CREAT,0o600)
-if os.name=='nt':
- import msvcrt
- msvcrt.locking(fd,msvcrt.LK_NBLCK,1)
-else:
- import fcntl
- fcntl.flock(fd,fcntl.LOCK_EX)
+import fcntl
+fcntl.flock(fd,fcntl.LOCK_EX)
 print('owned',flush=True)
 sys.stdin.readline()
-if os.name=='nt':
- msvcrt.locking(fd,msvcrt.LK_UNLCK,1)
-else:
- fcntl.flock(fd,fcntl.LOCK_UN)
+fcntl.flock(fd,fcntl.LOCK_UN)
 os.close(fd)
 """
         child = subprocess.Popen([sys.executable, "-c", script, str(self.directory)],
@@ -234,14 +226,10 @@ os.close(fd)
             self.provision()
 
     def test_symlink_directory_key_record_and_lock_reject(self):
-        # Windows hosts without symlink privileges report this specific limit.
         target = Path(self.temp.name) / "real"
         target.mkdir()
         link = Path(self.temp.name) / "linked"
-        try:
-            link.symlink_to(target, target_is_directory=True)
-        except OSError as exc:
-            self.skipTest(f"symlink creation unavailable: {type(exc).__name__}")
+        link.symlink_to(target, target_is_directory=True)
         with self.assertRaises(KmsUnavailableError):
             self.provider_type(link, self.master)
         self.provision()

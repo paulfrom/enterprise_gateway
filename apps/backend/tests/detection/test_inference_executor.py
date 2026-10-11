@@ -5,17 +5,9 @@ hanging work functions (infinite sleep loops), never with fake timeout
 stubs. All work functions are module-level so they pickle under the
 multiprocessing spawn context.
 
-Windows pid-reclamation semantics (measured, see D-10 evidence): after a
-worker exits and its handle is released, ``os.kill(pid, 0)`` may keep
-succeeding for an unbounded period — the kernel process object can stay
-referenced by other components (console host, security tooling). Tests
-therefore separate two claims: "the worker has terminated" (deterministic,
-read from the process exit code via ``_pid_exited``) and "the pid became
-unopenable" (OS teardown schedule, polled via ``_pid_exists``).
 """
 
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -24,25 +16,6 @@ from pathlib import Path
 
 from infra.errors import SafetyCode, SafetyError
 from detection.inference_executor import InferenceExecutor
-
-if sys.platform == "win32":
-    import ctypes
-    import ctypes.wintypes
-
-    _STILL_ACTIVE = 259  # Windows GetExitCodeProcess marker for a running process
-    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-
-    _kernel32 = ctypes.windll.kernel32
-    _kernel32.OpenProcess.restype = ctypes.c_void_p
-    _kernel32.OpenProcess.argtypes = [
-        ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD,
-    ]
-    _kernel32.GetExitCodeProcess.restype = ctypes.wintypes.BOOL
-    _kernel32.GetExitCodeProcess.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD),
-    ]
-    _kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
-    _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
 
 CANARY = "d10-canary-9f3a2b1c"  # synthetic marker; must never appear in public messages
 
@@ -83,16 +56,6 @@ def _raise_safety():
 def _pid_exists(pid):
     if pid <= 0:
         return False
-    if sys.platform == "win32":
-        handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        code = ctypes.wintypes.DWORD(0)
-        try:
-            _kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        finally:
-            _kernel32.CloseHandle(handle)
-        return code.value == _STILL_ACTIVE
     try:
         os.kill(pid, 0)
     except OSError:
@@ -101,26 +64,9 @@ def _pid_exists(pid):
 
 
 def _pid_exited(pid):
-    """True once the process behind ``pid`` has terminated.
-
-    This is the deterministic reclaim guarantee: close() and timeout reaping
-    join the worker, so by the time they return the process has exited. On
-    Windows the exit code is read directly because ``os.kill(pid, 0)`` can
-    succeed on a dead-but-still-referenced process object. On POSIX a
-    killable pid means alive — executor children are joined, never zombies.
-    """
+    """True after the joined worker is no longer visible to the OS."""
     if pid <= 0:
         return True
-    if sys.platform == "win32":
-        handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return True  # process object already destroyed
-        code = ctypes.wintypes.DWORD(0)
-        try:
-            _kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        finally:
-            _kernel32.CloseHandle(handle)
-        return code.value != _STILL_ACTIVE
     try:
         os.kill(pid, 0)
     except OSError:
@@ -128,8 +74,7 @@ def _pid_exited(pid):
     return False
 
 
-# Widely observed disappearance deadline for a reaped Windows pid (see
-# module docstring); generous on purpose — teardown is OS-scheduled.
+# Bound the wait for worker disappearance.
 _PID_GONE_TIMEOUT = 15.0
 
 
@@ -176,9 +121,7 @@ class ExecutorLifecycleTests(unittest.TestCase):
             # The work really ran in a separate worker process, not here.
             self.assertNotEqual(pid, os.getpid())
         # Deterministic reclaim guarantee: close() joins the worker, so it
-        # has exited. The pid then becomes unopenable — but on Windows that
-        # teardown is OS-scheduled (dead pid can stay referenced), so the
-        # disappearance is polled rather than asserted one-shot.
+        # has exited and its pid is no longer visible.
         self.assertTrue(_pid_exited(pid), f"worker pid {pid} still running after close()")
         self.assertTrue(
             _wait_for(lambda: not _pid_exists(pid), timeout=_PID_GONE_TIMEOUT),
@@ -227,7 +170,7 @@ class TimeoutReclaimTests(unittest.TestCase):
                 old_pid = int(pid_file.read_text(encoding="ascii"))
                 # The timed-out worker has actually terminated (reaping runs
                 # before the timeout is reported); its pid then disappears
-                # from the OS on Windows' own schedule.
+                # after joining the process.
                 self.assertTrue(_pid_exited(old_pid), f"hung worker pid {old_pid} still running")
                 self.assertTrue(
                     _wait_for(lambda: not _pid_exists(old_pid), timeout=_PID_GONE_TIMEOUT),

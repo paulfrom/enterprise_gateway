@@ -1,28 +1,23 @@
-"""A-01 release-intent ledger: minimal egress metadata, durable commit, permit handle.
+"""Release-intent ledger: minimal egress metadata, durable commit, permit handle.
 
 Before any egress attempt the gateway must durably commit the minimal release
-intent (DESIGN §6): who/what category leaves, under which policy and package
+intent: who/what category leaves, under which policy and package
 version, for what purpose. The record contains metadata only — never request
 bodies, prompts, secrets, or detector findings.
 
 Flow: the caller builds a :class:`ReleaseIntent` (strict pydantic schema,
 ``extra="forbid"``, no body fields exist), then :func:`commit_release_intent`
 serializes canonical JSON and commits it through
-:mod:`enterprise_gateway.durable_write` (temp write + fsync + atomic rename +
+:mod:`infra.durable_write` (temp write + fsync + atomic rename +
 directory fsync). Only after that persistence boundary is reached is an
 immutable :class:`ReleasePermit` returned — "persisted, may attempt send".
 Any write/fsync/ENOSPC failure maps to ``AUDIT_WRITE_FAILED`` and no permit
 handle is produced; the failure never fabricates the "persisted" state.
 
-B2 extension (design §4.1): when the channel policy requires original-text
-evidence, the same single intent commit may carry the server-preallocated
-evidence link — ``evidence_record_id`` (the same identifier the
-:class:`enterprise_gateway.evidence_gate.EvidenceSpec` uses), plus the
-server-authoritative ``evidence_retention_until`` and
-``evidence_lifecycle_policy_version``. All three are optional trusted
-metadata persisted inside the existing intent document; they add no extra
-write and no gate step, and intents without them (legacy records) parse
-unchanged.
+When original-text evidence is required, the intent commit stores its
+server-preallocated record identifier, retention deadline and lifecycle policy.
+Metadata-only intents have no evidence link. The catalog requires persisted
+lifecycle metadata and never fabricates it.
 """
 
 from __future__ import annotations

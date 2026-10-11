@@ -1,4 +1,4 @@
-"""P-11 Contract-governed SSE keep-alive scheduler.
+"""Contract-governed SSE keep-alive scheduler.
 
 Emits standard comment keepalives (: keep-alive\\n\\n) during long waits, enforces
 an unextendable absolute deadline, and terminates cleanly without post-termination emissions.
@@ -15,7 +15,7 @@ DEFAULT_ABSOLUTE_DEADLINE = 120.0  # seconds
 
 
 class SseKeepAliveScheduler:
-    """Schedules SSE comment keepalives and strictly enforces absolute deadlines (P-11)."""
+    """Schedules SSE comment keepalives and strictly enforces absolute deadlines."""
 
     def __init__(
         self,

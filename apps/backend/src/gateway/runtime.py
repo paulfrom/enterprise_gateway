@@ -41,7 +41,6 @@ def create_runtime_app(
     resolver: Resolver | None = None,
     history_store=None, admin_service=None,
     knowledge_governance=None, audit_reader=None, audit_builder=None,
-    client_profile: str = 'compatible',
     detection_failure_mode: str = 'error',
     quick_screen: QuickScreenConfig | None = None,
 ) -> FastAPI:
@@ -100,7 +99,7 @@ def create_runtime_app(
                          classifier=classifier, hmac_key=hmac_key,
                          history_store=history_store, admin_service=admin_service,
                          knowledge_governance=knowledge_governance, audit_reader=audit_reader, audit_builder=audit_builder,
-                         client_profile=client_profile)
+                         )
 
         import threading
         builder_stop = threading.Event()

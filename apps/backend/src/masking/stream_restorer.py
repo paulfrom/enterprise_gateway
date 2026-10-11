@@ -1,4 +1,4 @@
-"""P-08 Branch streaming restorer with token defragmentation.
+"""Branch streaming restorer with token defragmentation.
 
 Buffers partial token prefixes (e.g., '<<', '<<ENT_v1_...') across streaming
 delta chunks, restores complete tokens atomically via MappingContext, isolates
@@ -13,7 +13,7 @@ _RESERVED_PREFIX = "<<ENT"
 
 
 class BranchStreamingRestorer:
-    """Defragments and restores redacted tokens in streaming responses per branch (P-08)."""
+    """Defragments and restores redacted tokens in streaming responses per branch."""
 
     def __init__(self, context: MappingContext) -> None:
         if not isinstance(context, MappingContext):
@@ -102,9 +102,9 @@ class BranchStreamingRestorer:
         return tail
 
     def cancel_branch(self, branch_id: str) -> None:
-        """Clean up resources for a canceled branch (P-14)."""
+        """Clean up resources for a canceled branch."""
         self._buffers.pop(branch_id, None)
 
     def cancel_all(self) -> None:
-        """Clean up all buffers on stream termination or disconnect (P-14)."""
+        """Clean up all buffers on stream termination or disconnect."""
         self._buffers.clear()

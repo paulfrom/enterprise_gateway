@@ -1,24 +1,24 @@
-"""A-03 evidence gate: durable intent plus encrypted evidence before any egress.
+"""Evidence gate: durable intent plus encrypted evidence before any egress.
 
-DESIGN §6: before any egress attempt the gateway must durably commit the
+before any egress attempt the gateway must durably commit the
 minimal release-intent metadata event; when channel policy requires original-
 text evidence retention, the encrypted evidence record must be durably
 committed first as well. Only when every required step has reached the
 persistence boundary is an immutable :class:`EvidencePermit` returned —
 "persisted, may attempt send". The gate never fabricates success and never
-retries or auto-resends (DESIGN §6): any failure fails the whole gate closed,
+retries or auto-resends: any failure fails the whole gate closed,
 and a retry is an explicit new call by the caller.
 
-Gate flow (:meth:`EvidenceGate.admit`):
+Gate flow ( :meth:`EvidenceGate.admit`):
 
-1. A-01: :func:`enterprise_gateway.audit_intent.commit_release_intent`
+1. :func:`enterprise_gateway.audit_intent.commit_release_intent`
    durably commits the intent metadata (temp write + fsync + atomic rename +
    directory fsync). Only after that boundary is an evidence step attempted.
 2. When the caller supplies an :class:`EvidenceSpec` (channel policy requires
-   original-text evidence): A-02 :func:`enterprise_gateway.envelope_crypto.encrypt_record`
+   original-text evidence): func:`enterprise_gateway.envelope_crypto.encrypt_record`
    produces the per-record envelope (random DEK, AES-256-GCM, KMS-wrapped DEK),
    then the serialized record is committed through
-   :func:`enterprise_gateway.durable_write.durable_commit` into the evidence
+:func:`enterprise_gateway.durable_write.durable_commit` into the evidence
    directory — the persistence boundary for evidence.
 3. Only when all required steps succeeded is :class:`EvidencePermit` returned.
 
@@ -26,19 +26,19 @@ Failure-code contract (all raised as fresh ``SafetyError`` with no exception
 chain; no permit handle exists on any failure):
 
 - ``AUDIT_WRITE_FAILED`` — intent commit failure (write/fsync/rename/ENOSPC),
-  preserved unchanged from A-01.
+  preserved unchanged from.
 - ``KMS_UNAVAILABLE`` / ``CONTRACT_VIOLATION`` — evidence encryption failure,
-  preserved unchanged from A-02.
+  preserved unchanged from.
 - ``EVIDENCE_GATE_FAILED`` — evidence record durable-commit failure after
   encryption (write/fsync/rename/directory fsync). Encryption itself already
   succeeded; only the persistence boundary failed.
 
 Residual state is real, never fabricated: if the intent committed and a later
-evidence step failed, the committed intent file stays on disk (A-01 truth) but
+evidence step failed, the committed intent file stays on disk (truth) but
 no permit is issued and no evidence final name exists. Callers must not infer
-"sent" from any partial state; post-crash reconciliation belongs to A-06.
+"sent" from any partial state; post-crash reconciliation belongs to.
 
-Combination with P-17: :func:`gated_send` runs the gate first and only invokes
+Combination with :func:`gated_send` runs the gate first and only invokes
 the bound client's ``request`` after a permit exists, so any gate failure
 leaves upstream egress calls at zero. There is deliberately no retry inside
 the gate or :func:`gated_send`; a caller that wants to retry constructs a new
@@ -130,9 +130,9 @@ class GatedSendResult:
 
 
 class EvidenceGate:
-    """Two-step persistence gate: A-01 intent, then encrypted evidence.
+    """Two-step persistence gate: intent, then encrypted evidence.
 
-    The gate itself performs no retries (DESIGN §6): a failed step raises the
+    The gate itself performs no retries: a failed step raises the
     contract code and the whole call produces no permit. The caller decides
     whether and when to retry explicitly.
     """
@@ -161,8 +161,8 @@ class EvidenceGate:
     def admit(self, intent: ReleaseIntent, evidence: EvidenceSpec | None = None) -> EvidencePermit:
         """Run the gate; return a permit only after every required boundary.
 
-        Steps, in order: (1) durable intent commit (A-01); (2) when ``evidence``
-        is given, envelope-encrypt it (A-02) and durably commit the serialized
+        Steps, in order: (1) durable intent commit; (2) when ``evidence``
+        is given, envelope-encrypt it and durably commit the serialized
         record into the evidence directory. Any failure raises the mapped
         ``SafetyError`` and returns no permit; see the module docstring for the
         code contract. No retry happens here — a retry is a new explicit call.
@@ -171,13 +171,13 @@ class EvidenceGate:
             raise TypeError("intent must be a ReleaseIntent")
         if evidence is not None and not isinstance(evidence, EvidenceSpec):
             raise TypeError("evidence must be an EvidenceSpec or None")
-        # Step 1 — A-01 persistence boundary. AUDIT_WRITE_FAILED propagates.
+        # Step 1 — persistence boundary. AUDIT_WRITE_FAILED propagates.
         intent_permit = commit_release_intent(self._intent_directory, intent)
         evidence_ref: EvidenceRef | None = None
         if evidence is not None:
             if self._kms is None or self._evidence_directory is None:
                 raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "evidence requires kms and evidence_directory")
-            # Step 2a — A-02 envelope encryption. KMS_UNAVAILABLE /
+            # Step 2a — envelope encryption. KMS_UNAVAILABLE /
             # CONTRACT_VIOLATION propagate unchanged.
             record = encrypt_record(
                 self._kms,
@@ -191,7 +191,7 @@ class EvidenceGate:
             # Step 2b — evidence persistence boundary (write + fsync + rename
             # + directory fsync). Encryption already succeeded; only the
             # durable commit failing maps to EVIDENCE_GATE_FAILED. The raise
-            # happens outside the except block (flag pattern, as in A-01) so
+            # happens outside the except block (flag pattern, as in ) so
             # no exception chain survives at all.
             commit_failed = False
             try:
@@ -230,10 +230,10 @@ def gated_send(
 ) -> GatedSendResult:
     """Gate first, egress second: one permit, at most one send attempt.
 
-    The gate runs to its persistence boundary before the bound client (P-17)
+    The gate runs to its persistence boundary before the bound client
     is invoked at all, so any gate failure leaves upstream egress calls at
     zero and no partial permit exists. The send itself is attempted exactly
-    once — no auto-resend (DESIGN §6); the caller owns explicit retries.
+    once — no auto-resend; the caller owns explicit retries.
     """
     if not isinstance(gate, EvidenceGate):
         raise TypeError("gate must be an EvidenceGate")

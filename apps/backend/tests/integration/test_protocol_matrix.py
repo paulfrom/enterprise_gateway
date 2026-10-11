@@ -34,7 +34,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                     return outcomes
                 self.fixture.detector.detect_many=replace_live_assembly
                 try:
-                    app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
+                    app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
                         path='/v1/messages' if protocol==CLAUDE_MESSAGES_PROTOCOL else '/v1/chat/completions'
                         response=await client.post(path,json=self.request(protocol,True),headers={'authorization':'Bearer enterprise-token'})
@@ -47,7 +47,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                 finally:
                     self.fixture.detector.detect_many=original
 
-    async def test_opaque_signed_history_does_not_require_gateway_receipts(self):
+    async def test_signed_history_requires_version_bound_gateway_receipts(self):
         provider_key=b'synthetic-provider-signature-key-32'
         thinking='public synthetic reasoning'
         signature=hmac.digest(provider_key,thinking.encode(),'sha256').hex()
@@ -67,14 +67,13 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                 'usage':{'input_tokens':1,'output_tokens':2}})
         spy=UpstreamSpyTransport(respond)
         p=self.fixture._create_pipeline(CLAUDE_MESSAGES_PROTOCOL,spy,history_adapter=trust)
-        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='compatible')
+        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
             body=self.request(CLAUDE_MESSAGES_PROTOCOL)
             first=await client.post('/v1/messages',json=body,headers={'authorization':'Bearer enterprise-token'})
             self.assertEqual(200,first.status_code,first.text)
             proof=first.json()['content'][0]
-            self.assertNotIn('metadata',proof)
-            proof['metadata'] = {'version': 'opaque-provider-metadata'}
+            self.assertIn('receipt', proof['metadata'])
             body['messages']=[*body['messages'],{'role':'assistant','content':first.json()['content']},
                               {'role':'user','content':'请核对阿尔法科技。'}]
             second=await client.post('/v1/messages',json=body,headers={'authorization':'Bearer enterprise-token'})
@@ -83,8 +82,8 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
             proof['metadata']['version']='different-complete-package'
             body['messages'][1]['content'][0]=proof
             rejected=await client.post('/v1/messages',json=body,headers={'authorization':'Bearer enterprise-token'})
-            self.assertEqual(200,rejected.status_code,rejected.text)
-            self.assertEqual(3,len(spy.calls))
+            self.assertEqual(400,rejected.status_code,rejected.text)
+            self.assertEqual(2,len(spy.calls))
 
     def setUp(self):
         self.fixture = fixture_module.IntegrationRoundtripTests()
@@ -137,10 +136,10 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
             events += [{'type':'content_block_stop','index':0},{'type':'message_delta','delta':{'stop_reason':'tool_use' if tools else 'end_turn','stop_sequence':None},'usage':{'output_tokens':2}},{'type':'message_stop'}]
             frames=[frame(e,e['type']) for e in events]
         return httpx.Response(200,headers={'content-type':'text/event-stream'},content=b''.join(frames))
-    async def call(self,protocol,body,handler,*,client_profile='compatible',**options):
+    async def call(self,protocol,body,handler,**options):
         spy=UpstreamSpyTransport(handler)
         pipeline=self.fixture._create_pipeline(protocol,spy,**options)
-        app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile=client_profile)
+        app=create_app(router=ProviderRouter({model: pipeline for model in pipeline.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
         path='/v1/chat/completions' if protocol==DEEPSEEK_CHAT_PROTOCOL else '/v1/messages'
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
             response=await client.post(path,json=body,headers={'authorization':'Bearer enterprise-token'})
@@ -156,17 +155,15 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn('STREAM_PROTECTION_FAILED',response.text)
                     self.assertEqual(len(spy.calls),1)
                     self.assertTrue(list(self.fixture.spool_dir.glob('*.json')))
-    async def test_unknown_fields_and_history_pass_through_but_unbound_models_do_not_route(self):
+    async def test_unknown_fields_and_unbound_models_have_zero_egress(self):
         for protocol in (DEEPSEEK_CHAT_PROTOCOL,CLAUDE_MESSAGES_PROTOCOL):
             response,spy=await self.call(protocol,{**self.request(protocol),'model':'unadmitted'},lambda req:self.fail('unbound model may not route'))
             self.assertEqual(response.status_code,400,response.text)
             self.assertEqual(len(spy.calls),0)
             for change in ({'unknown':'canary'},{'messages':[{'role':'user','content':'hi','compression':'unproved'}]}):
-                response,spy=await self.call(protocol,{**self.request(protocol),**change},lambda req:self.response(req,protocol,False,False))
-                self.assertEqual(response.status_code,200,response.text)
-                self.assertEqual(len(spy.calls),1)
-                sent=json.loads(spy.calls[0].content)
-                for key,value in change.items(): self.assertEqual(sent[key],value)
+                response,spy=await self.call(protocol,{**self.request(protocol),**change},lambda req:self.fail('invalid fields must not leave'))
+                self.assertEqual(response.status_code,400,response.text)
+                self.assertEqual(len(spy.calls),0)
     async def test_stop_parameters_pass_through_undetected(self):
         # stop/stop_sequences are protocol structure outside detection scope.
         for protocol in (DEEPSEEK_CHAT_PROTOCOL,CLAUDE_MESSAGES_PROTOCOL):
@@ -176,14 +173,19 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(200,response.status_code,response.text)
                 self.assertEqual(1,len(spy.calls))
                 self.assertIn('合成停止标记',spy.calls[0].content.decode())
-    async def test_provider_tool_parameters_are_not_subject_to_gateway_schema_admission(self):
+    async def test_provider_tool_parameters_must_match_admitted_schema(self):
         for protocol in (DEEPSEEK_CHAT_PROTOCOL,CLAUDE_MESSAGES_PROTOCOL):
             for stream in (False,True):
-                response,spy=await self.call(protocol,self.request(protocol,stream,True),lambda req:self.response(req,protocol,stream,True,bad=True))
-                self.assertEqual(response.status_code,200,response.text)
-                self.assertNotIn('STREAM_PROTECTION_FAILED',response.text)
-                self.assertIn('unknown',response.text)
-                self.assertEqual(len(spy.calls),1)
+                with self.subTest(protocol=protocol, stream=stream):
+                    response,spy=await self.call(protocol,self.request(protocol,stream,True),lambda req:self.response(req,protocol,stream,True,bad=True))
+                    self.assertEqual(len(spy.calls),1)
+                    self.assertNotIn('unknown',response.text)
+                    if stream:
+                        self.assertEqual(response.status_code,200,response.text)
+                        self.assertIn('STREAM_PROTECTION_FAILED',response.text)
+                    else:
+                        self.assertEqual(response.status_code,400,response.text)
+                        self.assertIn('CONTRACT_VIOLATION',response.text)
     async def test_upstream_status_retry_after_and_error_body_are_sanitized_once(self):
         response,spy=await self.call(DEEPSEEK_CHAT_PROTOCOL,self.request(DEEPSEEK_CHAT_PROTOCOL),lambda req:httpx.Response(429,headers={'retry-after':'12'},content=b'CANARY_RAW_ERROR'))
         self.assertEqual(response.status_code,429)
@@ -220,15 +222,16 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('deepseek-flash',response.text)
             self.assertEqual(len(spy.calls),1)
 
-    async def test_response_model_metadata_does_not_block_restoration(self):
+    async def test_unadmitted_response_model_blocks_restoration(self):
         body=self.request(DEEPSEEK_CHAT_PROTOCOL)
         def handler(req):
             payload=json.loads(self.response(req,DEEPSEEK_CHAT_PROTOCOL,False,False).content)
             payload['model']='unadmitted-model'
             return httpx.Response(200,json=payload)
         response,spy=await self.call(DEEPSEEK_CHAT_PROTOCOL,body,handler)
-        self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(response.json()["model"],body["model"])
+        self.assertEqual(response.status_code,400,response.text)
+        self.assertIn("CONTRACT_VIOLATION",response.text)
+        self.assertNotIn("unadmitted-model",response.text)
         self.assertEqual(len(spy.calls),1)
 
     async def test_tampered_package_and_missing_required_spool_have_zero_egress(self):
@@ -241,7 +244,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
                 # Deliberate private package corruption, not a supported live
                 # configuration update; public bound routes are immutable.
                 p._route=replace(p._route,model_mapping={'deepseek-flash':'other-provider'})
-            app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
+            app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
                 r=await client.post('/v1/chat/completions',json=self.request(DEEPSEEK_CHAT_PROTOCOL),headers={'authorization':'Bearer enterprise-token'})
             self.assertEqual(r.status_code,500 if failure=='route' else 503,r.text)
@@ -251,7 +254,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
         spy=UpstreamSpyTransport(lambda _:self.fail('deadline must prevent egress'))
         self.fixture.detector._ner_worker=hanging_ner
         p=self.fixture._create_pipeline(DEEPSEEK_CHAT_PROTOCOL,spy,request_timeout=1.0)
-        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY, client_profile='strict')
+        app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:
             started=time.monotonic()
             pending=asyncio.create_task(client.post('/v1/chat/completions',json=self.request(DEEPSEEK_CHAT_PROTOCOL),headers={'authorization':'Bearer enterprise-token'}))

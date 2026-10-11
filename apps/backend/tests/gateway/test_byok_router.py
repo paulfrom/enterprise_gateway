@@ -110,8 +110,7 @@ class TestMultiProviderRouting(unittest.TestCase):
             self.addCleanup(pipeline.egress_client.close)
         # This category approval exists solely in the controlled synthetic fixture.
         self.client = TestClient(create_app(router=ProviderRouter(pipelines),
-            authenticator=authenticator(), classifier=lambda raw: "STANDARD", hmac_key=HMAC_KEY,
-            client_profile='strict'))
+            authenticator=authenticator(), classifier=lambda raw: "STANDARD", hmac_key=HMAC_KEY))
         self.addCleanup(self.client.close)
 
     def post(self, model, headers, path="/v1/chat/completions"):

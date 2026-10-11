@@ -19,10 +19,9 @@ class ByokAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.router = ProviderRouter({'test-model': self.pipeline})
         self.auth = ByokAuthenticator(domain='corp.test', tenant_id='test-tenant', correlation_key=b'c'*32)
 
-    def app(self, classifier=None, router=None, client_profile='compatible'):
+    def app(self, classifier=None, router=None):
         return create_app(router=router if router is not None else self.router,
-                          authenticator=self.auth, classifier=classifier, hmac_key=b'h'*32,
-                          client_profile=client_profile)
+                          authenticator=self.auth, classifier=classifier, hmac_key=b'h'*32)
 
     async def post(self, app, *, headers=None, content=None):
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
@@ -69,6 +68,6 @@ class ByokAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_classification_and_forged_source_header_rejected(self):
         res = await self.post(self.app(lambda raw: ''))
         self.assertEqual(res.status_code, 403)
-        res = await self.post(self.app(lambda raw: 'TEST', client_profile='strict'), headers={'authorization': 'Bearer synthetic', 'x-domain': 'other'})
+        res = await self.post(self.app(lambda raw: 'TEST'), headers={'authorization': 'Bearer synthetic', 'x-domain': 'other'})
         self.assertEqual(res.status_code, 400)
         self.pipeline.process_request.assert_not_called()

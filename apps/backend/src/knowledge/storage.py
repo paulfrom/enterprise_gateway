@@ -1,4 +1,4 @@
-"""PostgreSQL storage adapter for enterprise knowledge domain (K-04, K-12, K-14).
+"""PostgreSQL storage adapter for enterprise knowledge domain.
 
 Provides relational persistence for knowledge sources, entities, claims,
 evidence, transactional outbox events, and consumer receipts.
@@ -527,7 +527,7 @@ RLS_SETUP_SQL = '\n'.join(
 
 
 class PostgresKnowledgeStorage:
-    """Relational knowledge repository implementing K-04, K-12, K-14."""
+    """Relational knowledge repository implementing,,."""
 
     def __init__(self, connection_uri: str, *, tenant_id: str | None = None, domain: str | None = None,
                  admin_dsn: str | None = None, admin_role: str | None = None) -> None:
@@ -880,7 +880,7 @@ class PostgresKnowledgeStorage:
         conn: psycopg.Connection,
         tombstone: Tombstone,
     ) -> None:
-        """Revoke a publication and write outbox tombstone in ONE transaction (K-12, K-13)."""
+        """Revoke a publication and write outbox tombstone in ONE transaction."""
         with conn.cursor() as cur:
             role_row = cur.execute("SELECT current_setting('app.roles',true)::text[]").fetchone()
             if not role_row or Role.DATA_STEWARD.value not in (role_row[0] or []) or not tombstone.reason.strip():

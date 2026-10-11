@@ -1,4 +1,4 @@
-"""P-15 Multi-turn conversation processing and historical re-detection.
+"""Multi-turn conversation processing and historical re-detection.
 
 Ensures that in multi-turn conversations:
 1. Historical messages are re-evaluated through the detection orchestrator on every turn.
@@ -22,7 +22,7 @@ from protocol.identity import TrustedIdentity
 
 
 class MultiTurnConversationSession:
-    """Manages multi-turn state while ensuring per-turn isolation and re-detection (P-15)."""
+    """Manages multi-turn state while ensuring per-turn isolation and re-detection."""
 
     def __init__(self, pipeline: ProtectedPipeline, identity: TrustedIdentity) -> None:
         self.pipeline = pipeline

@@ -6,7 +6,7 @@ enforcement, the session-bound ``X-Admin-CSRF`` header for writes, strict login
 payloads, uniform error bodies. Browser pages are served by the React frontend. The CSRF token is
 derived from the server-side session digest, so it is session-bound, needs no
 storage of its own, and dies with revocation. Errors use the shared
-``{"error": {"code": ...}}`` shape with ``_SECURITY_HEADERS``.
+``{"error": {"code":...}}`` shape with ``_SECURITY_HEADERS``.
 """
 from __future__ import annotations
 

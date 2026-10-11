@@ -1,4 +1,4 @@
-"""D-08 NER model artifact contract and load-time qualification gate.
+"""NER model artifact contract and load-time qualification gate.
 
 A production NER package is a self-contained directory whose integrity,
 task head, license attestation, and ONNX payload are all verified before
@@ -8,11 +8,11 @@ the package is allowed to load. Loading fails closed with
 Package layout::
 
     <package>/
-      manifest.json         artifact manifest (schema below)
-      config.json           HF token-classification config (id2label, architectures)
-      tokenizer.json        tokenizers-library tokenizer with offset mapping
-      model.onnx            exported token-classification model
-      license-excerpt.json  machine-readable license attestation
+      manifest.json artifact manifest (schema below)
+      config.json HF token-classification config (id2label, architectures)
+      tokenizer.json tokenizers-library tokenizer with offset mapping
+      model.onnx exported token-classification model
+      license-excerpt.json machine-readable license attestation
 
 ``manifest.json`` schema (``manifest_version`` == 1)::
 
@@ -296,7 +296,7 @@ def _validate_onnx(onnx_path: Path) -> ort.InferenceSession:
 
 @dataclass(frozen=True, slots=True)
 class LoadedNerPackage:
-    """A fully verified NER package ready for inference wiring (D-09/D-10)."""
+    """A fully verified NER package ready for inference wiring."""
 
     package_dir: Path
     manifest: ArtifactManifest

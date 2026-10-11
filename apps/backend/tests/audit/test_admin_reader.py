@@ -1,6 +1,6 @@
-"""B2 admin direct-read contract tests: no release without paired durable traces.
+"""Admin direct-read contract tests: no release without paired durable traces.
 
-The service is assembled exactly as T4 will assemble it: a controlled catalog
+The service uses: a controlled catalog
 directory, a fixed evidence root, a synthetic in-memory KMS provider, an
 injected session-revalidation callback, one fixed review purpose, and an
 independent access-event directory. Every rejection path must return no
@@ -46,9 +46,6 @@ OTHER_PURPOSE = "other-evidence-purpose"
 STORE = "audit._store"
 AR = "audit.admin_reader"
 
-
-def fixed_lifecycle(record_id: str):
-    return (RETENTION_UNTIL, LIFECYCLE_POLICY)
 
 
 def make_context(**overrides) -> AdminAuditContext:
@@ -119,13 +116,12 @@ def write_record(
     return data
 
 
-def build_catalog(tmp, *, lifecycle=fixed_lifecycle) -> int:
+def build_catalog(tmp) -> int:
     roots = Path(tmp)
     builder = AuditCatalogBuilder(
         intent_root=roots / "intent",
         evidence_root=roots / "evidence",
         catalog_directory=roots / "catalog",
-        lifecycle=lifecycle,
     )
     return builder.build_once()
 

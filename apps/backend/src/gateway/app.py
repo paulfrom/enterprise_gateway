@@ -20,7 +20,6 @@ from gateway.admin_api import ADMIN_ERROR_CODES, CSRF_HEADER
 from gateway.admin_auth import AdminAuthService
 from gateway.provider_router import ProviderRouter
 from gateway.pipeline import ProtectedPipeline
-from gateway.client_compatibility import compatible_headers, compatible_payload
 from infra.strict_json import parse_strict_json, JsonRejectKind
 from typing import Callable
 
@@ -95,11 +94,8 @@ def create_app(
     history_store=None,
     admin_service=None,
     knowledge_governance=None, audit_reader=None, audit_builder=None,
-    client_profile: str = 'compatible',
 ) -> FastAPI:
     """BYOK ingress. Classification is supplied only by trusted server integration."""
-    if client_profile not in ('compatible', 'strict'):
-        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'unknown client profile')
     if admin_service is not None and not isinstance(admin_service, AdminAuthService):
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'explicit admin authentication service')
     settings = settings or ReviewSettings()
@@ -112,7 +108,6 @@ def create_app(
     app.state.hmac_key = hmac_key
     app.state.history_store = history_store
     app.state.admin_service = admin_service
-    app.state.client_profile = client_profile
     if admin_service is not None:
         from gateway.admin_api import install_admin_routes
         install_admin_routes(app, admin_service)
@@ -245,8 +240,6 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": {"code": "CLASSIFICATION_NOT_CONFIGURED"}})
         p = None
         headers = dict(request.headers)
-        if client_profile == 'compatible':
-            headers = compatible_headers(headers)
         if not isinstance(app.state.authenticator, ByokAuthenticator):
             return JSONResponse(
                 status_code=401,
@@ -279,7 +272,7 @@ def create_app(
             identity = app.state.authenticator.authenticate(headers)
             if not isinstance(key, bytes) or len(key) < 32:
                 raise SafetyError(SafetyCode.INVALID_HMAC_KEY)
-            
+
             body_limit = p.body_limit if p is not None else 10485760 # 10MB default
             raw = bytearray()
             incoming = request.stream().__aiter__()
@@ -307,12 +300,6 @@ def create_app(
                 raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED)
             if p.path != request.url.path:
                 raise SafetyError(SafetyCode.UNSUPPORTED_PROTOCOL, 'endpoint binding')
-            processing_body = raw_body
-            if client_profile == 'compatible':
-                processing_body = json.dumps(compatible_payload(payload), ensure_ascii=False,
-                                             separators=(',', ':')).encode('utf-8')
-                if len(processing_body) > p.body_limit:
-                    raise SafetyError(SafetyCode.ADMISSION_LIMIT_EXCEEDED)
             if app.state.history_store is not None:
                 await asyncio.to_thread(app.state.history_store.check_ready)
                 history_recorder = await asyncio.to_thread(app.state.history_store.begin,
@@ -323,7 +310,7 @@ def create_app(
             context = MappingContext(p.domain, 'v1', key)
             context.__enter__()
             work = asyncio.create_task(asyncio.to_thread(p.process_request,
-                    raw_body=processing_body,
+                    raw_body=raw_body,
                     headers=headers,
                     identity=identity,
                     category=category,
@@ -332,7 +319,6 @@ def create_app(
                     deadline_at=deadline_at,
                     cancel=cancel,
                       history_recorder=history_recorder,
-                      allow_unsupported=client_profile == 'compatible',
                 ))
             try:
                 while not work.done():
@@ -357,10 +343,9 @@ def create_app(
                             await asyncio.to_thread(abandoned.upstream_stream.close)
                 raise
             if res.upstream_stream is not None:
-                from gateway.streaming import PassthroughStream, ProtectedStream, iter_protected_stream
+                from gateway.streaming import ProtectedStream, iter_protected_stream
                 client_model=res.client_model
-                stream_class = PassthroughStream if client_profile == 'compatible' else ProtectedStream
-                stream = stream_class(protocol=res.protocol,expected_model=res.redacted_request.model,client_model=client_model,context=context,allowed_tools=res.allowed_tools,deadline_at=deadline_at,state_validator=res.state_validator,state_version=res.state_version,allowed_models=(frozenset(p.allowed_models) | {res.redacted_request.model}) if p is not None else None)
+                stream = ProtectedStream(protocol=res.protocol,expected_model=res.redacted_request.model,client_model=client_model,context=context,allowed_tools=res.allowed_tools,deadline_at=deadline_at,state_validator=res.state_validator,state_version=res.state_version,allowed_models=(frozenset(p.allowed_models) | {res.redacted_request.model}) if p is not None else None)
                 upstream = res.upstream_stream
                 iterator = upstream.iter_bytes()
                 marker = object()

@@ -26,8 +26,8 @@ def main():
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
         for label, target, content in (
-            ('app', frontend / 'src/__migration_canary.ts', 'export const migrationCanary: string = 42;\n'),
-            ('node', frontend / 'vite.config.ts', '\nexport const migrationCanary: string = 42;\n'),
+            ('app', frontend / 'src/__typecheck_canary.ts', 'export const typecheckCanary: string = 42;\n'),
+            ('node', frontend / 'vite.config.ts', '\nexport const typecheckCanary: string = 42;\n'),
         ):
             previous = target.read_text() if target.exists() else None
             target.write_text((previous or '') + content)

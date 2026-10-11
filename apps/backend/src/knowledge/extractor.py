@@ -1,4 +1,4 @@
-"""Local relation extraction and candidate generation (K-05, K-11).
+"""Local relation extraction and candidate generation.
 
 Extracts business relations (such as Predicate.SUPPLIES) from observed text with:
 - Exact directional mapping (Supplier supplies Customer)
@@ -41,7 +41,7 @@ _QUESTION_MARKERS = ("吗", "？", "?", "是否", "能否", "可否", "请问", 
 
 
 class RelationExtractor:
-    """Extracts typed claims from verified entities in text (K-11)."""
+    """Extracts typed claims from verified entities in text."""
 
     def __init__(self, domain: str) -> None:
         self.domain = domain
@@ -124,7 +124,7 @@ class RelationExtractor:
         entities: Sequence[Entity],
         content_sha256: str,
     ) -> list[Candidate]:
-        """Extract co-occurrence relations between entities appearing in the same context (K-05).
+        """Extract co-occurrence relations between entities appearing in the same context.
 
         Co-occurrence is explicitly Predicate.CO_OCCURS_WITH and NEVER Predicate.SUPPLIES.
         """
