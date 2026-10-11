@@ -1,0 +1,19 @@
+{
+  "name": "enterprise-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "apps/admin-web"
+  ],
+  "scripts": {
+    "generate:api": "npm run generate:api --workspace apps/admin-web",
+    "check:api": "npm run check:api --workspace apps/admin-web",
+    "typecheck": "npm run typecheck --workspace apps/admin-web",
+    "lint": "npm run lint --workspace apps/admin-web",
+    "test": "npm run test --workspace apps/admin-web",
+    "build": "npm run build --workspace apps/admin-web"
+  }
+}
