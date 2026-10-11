@@ -1,5 +1,6 @@
 # BYOK来源与独立进程持久密钥
 
+命名空间布局已由 [ADR 0008](0008-unified-database-namespace.md) 更新；角色、密钥和访问隔离要求继续成立。
 供应商凭据只由客户端按请求提供，网关不保存供应商付费Key，不承担模型费用或模型推理算力。供应商协议、地址和模型由服务端固定；无凭据或失败时拒绝，不切换到其他账户、模型或直连出口。
 
 Key持有证明不能转化为企业身份。BYOK入口构造UnverifiedSourceContext，以服务端秘密HMAC关联来源，租户与保护域绑定在服务端。来源可信度为unverified，知识归属为unassigned，ACL限制在域的restricted-candidate处理范围。管理入口使用独立的管理员会话与AdminContext（见ADR 0007），不将客户端头或BYOK凭据升级为管理权限；真实企业身份契约仅保留给既有受信内部流程。

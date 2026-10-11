@@ -104,7 +104,7 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 ~~~
 
 ### 2. 运行自动化测试套件
-完整测试需要真实隔离PostgreSQL及非owner、无superuser/BYPASSRLS的应用角色。通过`GATEWAY_TEST_PG_CONFIG`指定受控JSON配置文件，或使用被Git忽略的`.env.test`；字段为`app_dsn`、`admin_dsn`、`schema`、`application_role`。`schema`必须使用`gw_test_`前缀；每个测试进程创建新的随机schema，缺配置直接失败。管理连接需有创建schema和定义受限函数的权限；管理owner与应用角色分别使用独立连接，不使用生产数据库替代隔离测试。
+完整测试需要真实隔离PostgreSQL及非owner、无superuser/BYPASSRLS的应用角色。通过`GATEWAY_TEST_PG_CONFIG`指定受控JSON配置文件，或使用被Git忽略的`.env.test`；字段为`app_dsn`、`admin_dsn`、`schema`、`application_role`。`admin_dsn`和`app_dsn`必须指向`enterprise_gateway`数据库，`schema`固定为`gw_test_gateway`；历史与知识测试共用这一schema，缺配置直接失败。常规测试进程通过数据库锁串行化，遇到已有schema拒绝自动重置；退出时清理本进程对象，清理失败明确报错。初始化回滚和结构漂移测试可以创建短暂schema并清理。管理连接需有创建schema和定义受限函数的权限；管理owner与应用角色分别使用独立连接，测试会修改结构和权限，不得连接正在服务的业务表。
 
 ~~~bash
 # Linux 后端检查（从 apps/backend 执行）
@@ -181,6 +181,8 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 数据库初始化与 worker 启动共享最小权限检查：应用角色不能具有创建数据库/角色、复制能力、切换到特权角色或直接/间接成为 PostgreSQL `pg_*` 全局预定义角色的成员。登录用户、会话用户与当前 SQL 用户须一致，不接受管理连接降级成应用角色。worker 对全部资产表检查 forced RLS，且应用角色不能拥有表或成为表 owner 的成员。单次执行 `--once` 在提交失败或隔离异常时返回非零；成功提交或幂等跳过返回0，失败记录仍保留以便重放。
 
+新部署优先使用 `scripts/prepare_gateway_database.py --config <private-input.json> --output-config <new-private-bound-config.json>`，在一个事务中初始化同一 schema 内的全部17张表。输入字段为 `schema`、DDL owner 的 `admin_dsn`、知识 `application_role` / `app_dsn`、历史 `history_role` / `history_dsn`、知识管理 `admin_role` / `admin_app_dsn`；三个应用角色须预建、分别登录且没有属主或管理角色可达路径。输出包含秘密，应放在受限且 Git 忽略的目录。该工具拒绝已有 schema，不负责业务数据迁移。结构合并与未来正文去重、知识图迁移的设计分别见 [ADR 0008](docs/adr/0008-unified-database-namespace.md) 和[数据库设计审查](docs/database-design.md)。以下独立知识/历史初始化入口仍适用于单模块部署和契约验证。
+
 首次部署 PostgreSQL 时，管理方使用受控 JSON 文件（`schema`、`application_role`、`admin_role`、`admin_dsn`、`app_dsn`；`admin_role` 为预建专用受限角色）显式初始化一个尚不存在的 v2 schema：
 
 ~~~bash
@@ -211,17 +213,17 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 管理控制台仅供固定管理员账号使用。访问同源 `/login` 以 admin 登录（密码由部署方在初始化时设定），服务端校验后签发 HttpOnly 会话 Cookie；登录后进入 `/admin` 管理壳，`/admin/requests` 可查看当前租户/保护域内全部未过期请求的输入、脱敏外发、供应商回复、还原输出，不按用户或供应商 Key 分组。四阶段可用正文默认直接展示和复制，无遮挡开关；列表支持模型/协议/状态/错误码/时间窗筛选和游标分页，部分或未产生的阶段单独标记，网关拒绝正文不会标成成功模型回复。未登录访问管理页面会跳转登录页；退出或会话失效后页面清除正文并回到登录页。
 
-历史使用独立 PostgreSQL schema、用途为 `request-history` 的加密密钥和访问留痕；访问审计绑定操作者 admin 及会话关联摘要，不记录正文、密码或会话令牌。完整四阶段可推断原值关系，须按原文敏感级别治理。供应商 Key 不作为查询凭据，不保存到历史；会话令牌只经 Cookie 携带，服务端仅存摘要，不进入浏览器持久存储。
+历史与知识使用同一 PostgreSQL schema、分别限定表权限；历史使用用途为 `request-history` 的加密密钥和访问留痕；访问审计绑定操作者 admin 及会话关联摘要，不记录正文、密码或会话令牌。完整四阶段可推断原值关系，须按原文敏感级别治理。供应商 Key 不作为查询凭据，不保存到历史；会话令牌只经 Cookie 携带，服务端仅存摘要，不进入浏览器持久存储。
 
 部署须显式提供以下整组配置，缺项拒绝启动；未选择历史装配时不采集四阶段正文：
 
 | 设置 | 内容 |
 |---|---|
-| `GATEWAY_HISTORY_PG_DSN` 或 `_FILE` | 独立历史 schema 的受限应用连接，不是管理连接 |
+| `GATEWAY_HISTORY_PG_DSN` 或 `_FILE` | 统一 schema 内仅有历史表权限的受限应用连接，不是管理连接 |
 | `GATEWAY_HISTORY_RETENTION_DAYS` | 明确的留存天数，范围1～36500，无默认值 |
 | `GATEWAY_HISTORY_BUCKET` | 历史加密用途的受控留存桶 |
 
-先使用 `scripts/prepare_request_database.py --config <private-input.json> --output-config <new-private-bound.json>` 初始化尚不存在的历史 schema。输入字段为 `schema`、`application_role`、`admin_dsn`、`app_dsn`；应用账号须预先具备数据库连接权限且不能拥有或切换到管理角色。工具在事务内建立2张表及forced RLS，拒绝已有 schema，不提供迁移。将输出的应用连接存入受限秘密文件；管理连接不交给服务。管理员状态由 `scripts/prepare_admin_state.py` 一次性显式初始化（保存随机盐与 scrypt 派生值，不保存明文密码；已存在时拒绝覆盖），管理员状态目录独立于历史数据库，历史未启用时仍可登录管理控制台。
+历史与知识一起部署时，使用上述统一初始化入口。单独部署历史模块时，可使用 `scripts/prepare_request_database.py --config <private-input.json> --output-config <new-private-bound.json>` 初始化尚不存在的历史 schema。输入字段为 `schema`、`application_role`、`admin_dsn`、`app_dsn`；应用账号须预先具备数据库连接权限且不能拥有或切换到管理角色。工具在事务内建立2张表及forced RLS，拒绝已有 schema，不提供迁移。将输出的应用连接存入受限秘密文件；管理连接不交给服务。管理员状态由 `scripts/prepare_admin_state.py` 一次性显式初始化（保存随机盐与 scrypt 派生值，不保存明文密码；已存在时拒绝覆盖），管理员状态目录独立于历史数据库，历史未启用时仍可登录管理控制台。
 
 历史配置完成后，首次显式执行 `start_gateway.py --provision-keys` 初始化用途密钥，再正常启动。已有历史（包括过期但未删除的记录）而密钥丢失时拒绝补建。查询 API 是 `GET /api/admin/requests?limit=50&status=&cursor=` 和 `GET /api/admin/requests/{request_id}`，仅接受同源管理员会话 Cookie，管理写操作另需会话绑定的 `X-Admin-CSRF` 头。模型调用返回 `x-request-id`。筛选仅针对元数据，不索引正文。
 
@@ -251,11 +253,11 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 仓库只有根 npm workspace 锁文件和 `apps/backend` Python 项目。`.node-version` 固定已验证的 Node 22 补丁版本，Python 3.11，冻结 uv 依赖；从根运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> bash scripts/check.sh`。检查同时核对结构、wheel 与源码、Docker 运行依赖和锁文件；后端 OpenAPI 与前端生成类型分别检查漂移，构建前实际检查 app/node TypeScript 项目，并验证类型错误能阻断构建。npm 审计的 high/critical 问题返回非零退出码。
 
-数据库复用本机已有 PostgreSQL 5433。原生进程使用 `127.0.0.1:5433`，Compose 提供 `host.docker.internal:host-gateway` 映射，容器 DSN 指向宿主 5433，不能使用容器自身的回环地址。连接文件与模型、operator、密钥、持久状态均使用本机受控资源，不创建替代 PG 服务。历史与知识使用独立的 schema 和受限连接，worker 不得绑定历史 schema；禁止将 DDL 管理连接交给应用。
+数据库复用本机已有 PostgreSQL 5433。原生进程使用 `127.0.0.1:5433`，Compose 提供 `host.docker.internal:host-gateway` 映射，容器 DSN 指向宿主 5433，不能使用容器自身的回环地址。连接文件与模型、operator、密钥、持久状态均使用本机受控资源，不创建替代 PG 服务。历史与知识的17张表集中在同一 schema，分别使用受限连接和表级授权；worker 不得获得历史表权限。禁止将 DDL 管理连接交给应用。测试使用专用 `enterprise_gateway` 数据库与固定 `gw_test_gateway` schema，不再逐进程创建两套随机 schema。业务与故障注入测试属于独立环境，不能共用正在服务的表。
 
 `bash rebuild_and_run.sh` 使用已有本地启动配置（如存在）或标准 Compose 配置；标准部署可显式运行 `bash rebuild_and_run.sh --env-file <受控绝对配置路径>`。默认绑定 `0.0.0.0` 开通外部访问，先校验再构建/更新，不先停止全栈。支持 `--export [tar_path]` 导出本地构建镜像为归档文件，支持 `--export-only [tar_path]` 仅构建/导出，不依赖运行秘密或拉起容器。已有密钥和管理员状态直接复用；初始化工具只用于尚未初始化的资源。持久卷显式绑定 `enterprise_gateway_gateway-state` 与 `enterprise_gateway_gateway-admin-state`，镜像预建 `/app/state/admin` 并使用 UID 65532。前后端基础镜像均固定 digest；后端只打包已准备的 ONNX 制品。
 
-浏览器回归执行 `GATEWAY_HISTORY_PG_CONFIG=<受控本机PG测试配置> npm run test:e2e --workspace apps/admin-web`。它启动真实后端和 Chrome，使用新的随机测试 schema、合成供应商及历史，结束后仅清理本轮创建的对象。`CHROME_PATH` 可指定本机 Chrome；无本机 Chrome 时使用 Playwright 安装的 Chromium。全量检查可设置 `GATEWAY_CHECK_BROWSER=1`，同一私有 PG 文件也可通过 `GATEWAY_TEST_PG_CONFIG` 提供知识测试配置。构建后的 Nginx 浏览器流程运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> python3 scripts/run_nginx_e2e.py`；代理故障检查运行 `python3 scripts/check_proxy.py`。TypeScript 拒绝 canary 运行 `python3 scripts/check_typecheck.py`。Docker 输入隔离检查为 `python3 scripts/check_docker_context.py`，仅构建合成 canary，不复制真实秘密。
+浏览器回归执行 `GATEWAY_HISTORY_PG_CONFIG=<受控本机PG测试配置> npm run test:e2e --workspace apps/admin-web`。它启动真实后端和 Chrome，使用固定的 `gw_test_gateway` schema、合成供应商及历史，结束后仅清理本轮创建的对象。`CHROME_PATH` 可指定本机 Chrome；无本机 Chrome 时使用 Playwright 安装的 Chromium。全量检查可设置 `GATEWAY_CHECK_BROWSER=1`，同一私有 PG 文件也可通过 `GATEWAY_TEST_PG_CONFIG` 提供知识测试配置。构建后的 Nginx 浏览器流程运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> python3 scripts/run_nginx_e2e.py`；代理故障检查运行 `python3 scripts/check_proxy.py`。TypeScript 拒绝 canary 运行 `python3 scripts/check_typecheck.py`。Docker 输入隔离检查为 `python3 scripts/check_docker_context.py`，仅构建合成 canary，不复制真实秘密。
 
 当前 React 管理端提供登录、会话恢复、退出和请求历史筛选/分页/四阶段正文。其他既有管理 API 仍保留认证与授权，尚未实现的管理页面不算作已交付能力。
 

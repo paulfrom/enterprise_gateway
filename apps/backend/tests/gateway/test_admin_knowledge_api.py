@@ -894,14 +894,10 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
     def test_runtime_restricted_pool_preserves_schema_limits_connections_and_recovers(self):
         import psycopg
         from psycopg import sql
-        from psycopg.conninfo import make_conninfo
+        from tests.pg_support import gateway_configuration
         import start_gateway
         config = test_configuration()
-        password = uuid4().hex
-        with psycopg.connect(config['admin_app_dsn']) as owner:
-            owner.execute(sql.SQL('ALTER ROLE {} LOGIN PASSWORD {}').format(
-                sql.Identifier(config['admin_role']), sql.Literal(password)))
-        dsn = make_conninfo(config['admin_app_dsn'], user=config['admin_role'], password=password)
+        dsn = gateway_configuration()['admin_app_dsn']
         governance = start_gateway._assemble_admin_knowledge({'connection_uri': dsn}, tenant=self.tenant, domain=self.domain)
         storage = governance._storage
         self.addCleanup(storage.close)
@@ -931,15 +927,13 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
     def test_runtime_rejects_management_ownership_of_non_sources_objects(self):
         import psycopg
         from psycopg import sql
-        from psycopg.conninfo import make_conninfo
+        from tests.pg_support import gateway_configuration
         import start_gateway
+        from knowledge.storage import _ASSET_TABLES, _ADMIN_TABLES
         config = test_configuration()
-        password = uuid4().hex
         with psycopg.connect(config['admin_app_dsn']) as owner:
             owner_role = owner.execute('SELECT current_user').fetchone()[0]
-            owner.execute(sql.SQL('ALTER ROLE {} LOGIN PASSWORD {}').format(
-                sql.Identifier(config['admin_role']), sql.Literal(password)))
-        dsn = make_conninfo(config['admin_app_dsn'], user=config['admin_role'], password=password)
+        dsn = gateway_configuration()['admin_app_dsn']
         for table in ('knowledge_publications', 'knowledge_governance_versions', 'knowledge_admin_actions'):
             with self.subTest(table=table):
                 try:
@@ -952,8 +946,9 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
                     with psycopg.connect(config['admin_app_dsn']) as owner:
                         owner.execute(sql.SQL('ALTER TABLE {} OWNER TO {}').format(
                             sql.Identifier(table), sql.Identifier(owner_role)))
-                        owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(
-                            sql.Identifier(config['schema']), sql.Identifier(config['admin_role'])))
+                        owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}').format(
+                            sql.SQL(',').join(sql.Identifier(config['schema'], name) for name in (*_ASSET_TABLES, *_ADMIN_TABLES)),
+                            sql.Identifier(config['admin_role'])))
         # An indirect NOINHERIT path to a non-privileged table owner is equally forbidden.
         reachable_owner = 'owner_' + uuid4().hex[:16]
         try:
@@ -967,8 +962,9 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
         finally:
             with psycopg.connect(config['admin_app_dsn']) as owner:
                 owner.execute(sql.SQL('ALTER TABLE knowledge_publications OWNER TO {}').format(sql.Identifier(owner_role)))
-                owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(
-                    sql.Identifier(config['schema']), sql.Identifier(config['admin_role'])))
+                owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}').format(
+                    sql.SQL(',').join(sql.Identifier(config['schema'], name) for name in (*_ASSET_TABLES, *_ADMIN_TABLES)),
+                    sql.Identifier(config['admin_role'])))
                 owner.execute(sql.SQL('REVOKE {} FROM {}').format(sql.Identifier(reachable_owner), sql.Identifier(config['admin_role'])))
                 owner.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(reachable_owner)))
                 owner.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(reachable_owner)))

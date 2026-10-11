@@ -123,3 +123,5 @@ DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`kno
 审计记录不存在为 404 `AUDIT_RECORD_NOT_FOUND`，到期或不可用为 409 `AUDIT_RECORD_UNAVAILABLE`，摘要/AAD/密文损坏为 409 `AUDIT_EVIDENCE_CORRUPTED`，读取权限或预算拒绝为 403 `AUDIT_ACCESS_REJECTED`，关键留痕失败为 503 `AUDIT_WRITE_FAILED`。最终认证失败保留认证错误语义；最终复检跨过读取预算或记录期限时不释放正文。
 
 管理 PG、目录构建与解密队列独立于模型检测/NER；知识能力故障不关闭审计能力，新增管理能力故障不改变模型准入。既有必需加密留证、密钥、水位和 Spool 门禁仍执行。独立目录配额限制新增使用量，不承诺共享磁盘、共享 KMS 或整机完全故障时仍可外发。
+
+知识管理与历史共用部署 schema，知识管理角色不得获得历史表权限；启动与取连接时同时检查跨用途授权。知识 v2 指纹仅排除两张已知历史表及其元数据，未知知识结构漂移仍拒绝。完整布局见 [ADR 0008](../adr/0008-unified-database-namespace.md)。

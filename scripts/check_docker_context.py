@@ -23,7 +23,7 @@ EXCLUDED = ('apps/backend/src/canary.py', 'apps/backend/.env', 'apps/unknown/can
 BACKEND_REQUIRED = ('requirements-runtime.txt', 'start_gateway.py', 'start_knowledge_worker.py',
                     'src/gateway/app.py', 'config/providers.json', 'config/local-review.json',
                     'scripts/check_gateway_health.py', 'scripts/check_local_resources.py',
-                    'scripts/prepare_admin_state.py', 'scripts/prepare_knowledge_database.py',
+                    'scripts/prepare_admin_state.py', 'scripts/prepare_gateway_database.py', 'scripts/prepare_knowledge_database.py',
                     'scripts/prepare_request_database.py', 'scripts/purge_request_history.py',
                     *(f'models/bert4ner-base-chinese-onnx/{name}' for name in
                       ('manifest.json', 'config.json', 'license-excerpt.json', 'model.onnx', 'tokenizer.json')))

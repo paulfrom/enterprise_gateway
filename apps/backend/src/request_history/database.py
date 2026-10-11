@@ -11,6 +11,12 @@ from knowledge.database_security import assert_restricted_application_role
 from request_history.models import ERROR_CODES, HistoryUnavailable
 
 TABLES = ("request_records", "request_stage_contents")
+EXPECTED_POLICIES = {
+    ('request_records', 'history_read'), ('request_records', 'history_insert'),
+    ('request_records', 'history_update'), ('request_records', 'history_purge'),
+    ('request_stage_contents', 'stage_read'), ('request_stage_contents', 'stage_insert'),
+    ('request_stage_contents', 'stage_update'),
+}
 
 SCHEMA_SQL = """
 CREATE TABLE request_records (
@@ -101,12 +107,16 @@ def assert_history_connection(conn: psycopg.Connection, *, expected_schema: str 
     ).fetchone()
     if not namespace or any(namespace):
         raise HistoryUnavailable()
-    # This namespace is purpose-exclusive; never point history at the knowledge layout.
+    # A shared namespace does not confer access to the knowledge tables.
+    from knowledge.storage import _ASSET_TABLES, _ADMIN_TABLES
+    knowledge_tables = set((*_ASSET_TABLES, *_ADMIN_TABLES))
     actual = conn.execute(
-        "SELECT relname FROM pg_class WHERE relnamespace=%s::regnamespace AND relkind IN ('r','p','v','m','f')",
+        "SELECT relname,has_table_privilege(current_user,oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') "
+        "FROM pg_class WHERE relnamespace=%s::regnamespace AND relkind IN ('r','p','v','m','f')",
         (schema,),
     ).fetchall()
-    if {row[0] for row in actual} != set(TABLES):
+    if (not {row[0] for row in actual} <= set(TABLES) | knowledge_tables
+            or any(name in knowledge_tables and accessible for name, accessible in actual)):
         raise HistoryUnavailable()
     return schema, role
 
@@ -149,18 +159,12 @@ def prepare_database(config: dict[str, str]) -> tuple[dict[str, str], dict]:
                 "SELECT pg_has_role(%s,nspowner,'MEMBER'),has_schema_privilege(%s,oid,'CREATE') "
                 "FROM pg_namespace WHERE nspname=%s", (role,role,schema),
             ).fetchone()
-            expected_policies = {
-                ('request_records','history_read'),('request_records','history_insert'),
-                ('request_records','history_update'),('request_records','history_purge'),
-                ('request_stage_contents','stage_read'),('request_stage_contents','stage_insert'),
-                ('request_stage_contents','stage_update'),
-            }
             policies = admin.execute(
                 'SELECT tablename,policyname FROM pg_policies WHERE schemaname=%s',(schema,),
             ).fetchall()
             if (len(rows)!=len(TABLES) or {row[0] for row in rows}!=set(TABLES)
                     or any(not row[1] or not row[2] or row[3] or row[4]!='r' for row in rows)
-                    or not namespace or any(namespace) or set(policies)!=expected_policies):
+                    or not namespace or any(namespace) or set(policies)!=EXPECTED_POLICIES):
                 raise HistoryUnavailable()
             version = admin.info.server_version
             ssl = admin.execute('SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()').fetchone()

@@ -18,7 +18,7 @@
 
 模块为 `request_history`。`HistoryUnavailable` 与 `HistoryNotFound` 使用固定错误信息，不能附带正文、Key、DSN或上游错误原文。
 
-`PostgresHistoryStore(connection_uri, kms, *, tenant_id, domain, retention_days, bucket, audit_directory, max_stage_bytes=16777216)` 要求显式正整数留存天数、已初始化的 request-history 用途 KEK、专用 schema 和普通受限应用连接。
+`PostgresHistoryStore(connection_uri, kms, *, tenant_id, domain, retention_days, bucket, audit_directory, max_stage_bytes=16777216)` 要求显式正整数留存天数、已初始化的 request-history 用途 KEK、统一 schema 内仅有历史表权限的普通受限应用连接。
 
 - `check_ready()`：实际校验受限角色、独立历史表的 forced RLS/不可达 owner、作用域与 KMS。失败拒绝，不能创建缺失结构或补建已有记录对应的丢失密钥。
 - `begin(*, protocol, model, raw_body: bytes) -> HistoryRecorder`：生成 request_id，事务保存 processing 元数据及 input 加密正文。
@@ -39,4 +39,4 @@ API正文和页面使用 no-store，设置同源CSP、nosniff、frame-ancestors 
 
 ## 部署与验证边界
 
-历史采用独立 PostgreSQL schema，新namespace事务初始化，拒绝不符合当前结构的布局与权限绕过；沿用现有psycopg/受限角色校验/信封加密，不修改知识worker的13表契约。留存期必须明确配置；没有业务期限不启用真实正文采集。合成测试可使用明确的测试期限，不代表生产留存政策。启动CLI可显式选择历史装配，历史装配缺少任何必需设置/资源即拒绝，初始化仅创建新 schema。历史是否启用不决定管理员能否登录；会话存储失效时管理 API 拒绝查询。
+历史与知识集中在同一 PostgreSQL schema，以明确的表级授权隔离；统一初始化在新namespace事务内完成，拒绝不符合当前结构的布局与权限绕过；沿用现有psycopg/受限角色校验/信封加密，不修改知识模块的15表结构契约。留存期必须明确配置；没有业务期限不启用真实正文采集。合成测试可使用明确的测试期限，不代表生产留存政策。启动CLI可显式选择历史装配，历史装配缺少任何必需设置/资源即拒绝，初始化仅创建新 schema。历史是否启用不决定管理员能否登录；会话存储失效时管理 API 拒绝查询。

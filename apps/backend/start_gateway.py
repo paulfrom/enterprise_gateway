@@ -107,7 +107,7 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
     from psycopg import sql
     from knowledge.storage import PostgresKnowledgeStorage
     from knowledge.governance import KnowledgeGovernanceService
-    from knowledge.database_security import assert_restricted_application_role
+    from knowledge.database_security import assert_restricted_application_role, assert_no_history_access
 
     def assert_no_owned_objects(connection):
         # Ownership is not part of the v2 fingerprint. Every protected object's
@@ -126,6 +126,7 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
         connection = psycopg.connect(spec['connection_uri'], connect_timeout=5)
         try:
             assert_restricted_application_role(connection)
+            assert_no_history_access(connection)
             role = connection.execute('SELECT current_user').fetchone()[0]
             assert_no_owned_objects(connection)
             connection.rollback()
@@ -168,6 +169,7 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
                         connection.close()
                         raise ValueError('management role changed')
                 assert_restricted_application_role(connection, expected_role=self.admin_role)
+                assert_no_history_access(connection)
                 assert_no_owned_objects(connection)
                 connection.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.admin_role)))
                 connection.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))

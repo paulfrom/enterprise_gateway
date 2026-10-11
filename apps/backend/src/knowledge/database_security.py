@@ -64,3 +64,15 @@ def assert_no_privilege_path(conn: psycopg.Connection, *, role: str, forbidden_r
         " SELECT count(*) FROM chain WHERE rolname=%s", (role, forbidden_role)).fetchone()
     if row[0]:
         raise KnowledgeSchemaError(f'KNOWLEDGE_ROLE_PATH_FORBIDDEN:{role}->{forbidden_role}')
+
+
+def assert_no_history_access(conn: psycopg.Connection) -> None:
+    """Knowledge logins must not acquire history privileges in a shared schema."""
+    accessible = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM pg_class c WHERE "
+        "c.relnamespace=current_schema()::regnamespace "
+        "AND c.relname IN ('request_records','request_stage_contents') "
+        "AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))"
+    ).fetchone()[0]
+    if accessible:
+        raise DatabaseRoleError('knowledge_role_has_history_access')

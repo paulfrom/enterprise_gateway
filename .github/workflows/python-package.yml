@@ -13,6 +13,7 @@ jobs:
         image: postgres:17
         env:
           POSTGRES_PASSWORD: synthetic-ci-postgres
+          POSTGRES_DB: enterprise_gateway
         ports:
           - 5433:5432
         options: >-
@@ -37,10 +38,10 @@ jobs:
           .venv/bin/python - <<'PY'
           import json, os, psycopg
           from pathlib import Path
-          admin = 'host=127.0.0.1 port=5433 dbname=postgres user=postgres password=synthetic-ci-postgres'
+          admin = 'host=127.0.0.1 port=5433 dbname=enterprise_gateway user=postgres password=synthetic-ci-postgres'
           with psycopg.connect(admin) as conn:
               conn.execute("CREATE ROLE gw_ci_app LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'synthetic-ci-app'")
-          config = dict(admin_dsn=admin, app_dsn='host=127.0.0.1 port=5433 dbname=postgres user=gw_ci_app password=synthetic-ci-app', schema='gw_test_ci', application_role='gw_ci_app')
+          config = dict(admin_dsn=admin, app_dsn='host=127.0.0.1 port=5433 dbname=enterprise_gateway user=gw_ci_app password=synthetic-ci-app', schema='gw_test_gateway', application_role='gw_ci_app')
           path = Path('/tmp/gateway-ci-pg.json')
           path.write_text(json.dumps(config)); path.chmod(0o600)
           PY

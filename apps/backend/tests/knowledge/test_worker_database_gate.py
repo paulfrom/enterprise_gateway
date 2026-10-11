@@ -20,6 +20,17 @@ class WorkerDatabaseGateTests(unittest.TestCase):
     def test_restricted_application_role_and_all_forced_rls_assets_are_accepted(self):
         launcher._validate_database(PostgresKnowledgeStorage(get_test_dsn()))
 
+    def test_history_table_privilege_is_rejected_in_shared_namespace(self):
+        role = test_configuration()['application_role']
+        with psycopg.connect(get_admin_dsn()) as owner:
+            owner.execute(sql.SQL('GRANT SELECT ON request_records TO {}').format(sql.Identifier(role)))
+        try:
+            with self.assertRaisesRegex(launcher.WorkerConfigurationError, 'knowledge_role_has_history_access'):
+                launcher._validate_database(PostgresKnowledgeStorage(get_test_dsn()))
+        finally:
+            with psycopg.connect(get_admin_dsn()) as owner:
+                owner.execute(sql.SQL('REVOKE SELECT ON request_records FROM {}').format(sql.Identifier(role)))
+
     def test_administrative_login_cannot_hide_behind_restricted_role(self):
         options = "-c search_path=" + test_configuration()["schema"] + " -c role=" + test_configuration()["application_role"]
         dsn = make_conninfo(get_admin_dsn(), options=options)

@@ -21,7 +21,7 @@ import psycopg
 from infra.file_kms import FileKmsProvider
 from infra.errors import SafetyError
 from knowledge.knowledge import Role, TrustedActor
-from knowledge.database_security import DatabaseRoleError, assert_restricted_application_role
+from knowledge.database_security import DatabaseRoleError, assert_restricted_application_role, assert_no_history_access
 from knowledge.storage import PostgresKnowledgeStorage, _ASSET_TABLES
 from knowledge.worker import KnowledgeWorker, PostgresKnowledgeSink
 
@@ -56,6 +56,7 @@ def _validate_database(storage: PostgresKnowledgeStorage) -> None:
     with psycopg.connect(storage.connection_uri, connect_timeout=5) as conn:
         try:
             assert_restricted_application_role(conn)
+            assert_no_history_access(conn)
         except DatabaseRoleError as exc:
             raise WorkerConfigurationError("worker PostgreSQL role refused: " + exc.reason) from None
         for table in _ASSET_TABLES:

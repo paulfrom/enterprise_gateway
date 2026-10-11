@@ -156,6 +156,10 @@ class DatabaseDeploymentTests(unittest.TestCase):
         if not path:
             raise unittest.SkipTest("Explicit private local PG 5433 deployment test configuration required")
         cls.base = load_configuration(Path(path))
+        from psycopg.conninfo import conninfo_to_dict
+        if any(conninfo_to_dict(cls.base[key]).get('dbname') != 'enterprise_gateway'
+               for key in ('admin_dsn', 'app_dsn')):
+            raise RuntimeError('Deployment tests require the dedicated enterprise_gateway database')
 
     def config(self):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
