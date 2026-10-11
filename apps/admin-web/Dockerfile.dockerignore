@@ -1,0 +1,28 @@
+# Default deny all files in root context
+**
+
+# Exact allows for root manifests
+!package.json
+!package-lock.json
+!.node-version
+
+# Exact allows for contract
+!contracts
+!contracts/admin.openapi.json
+
+# Exact allows for deploy Nginx config
+!deploy
+!deploy/nginx
+!deploy/nginx/admin.conf
+
+# Exact allows for frontend application
+!apps
+!apps/admin-web
+!apps/admin-web/**
+
+# Exclude build artifacts, dependencies, and sensitive files inside apps/admin-web
+apps/admin-web/node_modules
+apps/admin-web/dist
+apps/admin-web/.coverage
+apps/admin-web/**/*.log
+apps/admin-web/.env*
