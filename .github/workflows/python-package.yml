@@ -54,8 +54,8 @@ jobs:
         env:
           GATEWAY_NER_DOWNLOAD_BASE: https://huggingface.co
         run: |
-          uv run --frozen --offline --group dev python scripts/ner/fetch_model.py
-          uv run --frozen --offline --group dev python scripts/ner/export_onnx.py
+          uv run --frozen --offline --no-editable --group dev --cache-dir .uv-cache python scripts/ner/fetch_model.py
+          uv run --frozen --offline --no-editable --group dev --cache-dir .uv-cache python scripts/ner/export_onnx.py
       - name: Frontend dependencies and browser
         run: |
           npm ci
