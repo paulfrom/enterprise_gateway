@@ -270,13 +270,21 @@ def _ner_timeout() -> float | None:
     return value
 
 
-def _ner_worker_options() -> dict[str, int]:
+def _ner_worker_options() -> dict[str, int | bool]:
     options = {}
     for env_name, parameter, minimum in (
         ('GATEWAY_NER_MAX_WORKERS', 'ner_max_workers', 1),
         ('GATEWAY_NER_MAX_PENDING', 'ner_max_pending', 0),
         ('GATEWAY_NER_MAX_TASKS_PER_WORKER', 'ner_max_tasks_per_worker', 1),
         ('GATEWAY_NER_INTRA_OP_THREADS', 'ner_intra_op_threads', 1),
+        ('GATEWAY_NER_WINDOW_LENGTH', 'ner_window_length', 3),
+        ('GATEWAY_NER_STRIDE', 'ner_stride', 1),
+        ('GATEWAY_NER_MAX_AGE_SECONDS', 'ner_max_age_seconds', 1),
+        ('GATEWAY_NER_MAX_RSS_MIB', 'ner_max_rss_kib', 0),
+        ('GATEWAY_NER_BATCH_WAIT_MS', 'ner_batch_wait_ms', 0),
+        ('GATEWAY_NER_MAX_BATCH_JOBS', 'ner_max_batch_jobs', 1),
+        ('GATEWAY_NER_MAX_BATCH_CHARS', 'ner_max_batch_chars', 1),
+        ('GATEWAY_NER_BATCH_TOKENS', 'ner_batch_tokens', 3),
     ):
         raw = os.environ.get(env_name)
         if raw is None or (parameter == 'ner_intra_op_threads' and raw == ''):
@@ -287,7 +295,12 @@ def _ner_worker_options() -> dict[str, int]:
             value = None
         if value is None or value < minimum:
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid NER worker options')
-        options[parameter] = value
+        options[parameter] = value * 1024 if parameter == 'ner_max_rss_kib' else value
+    boundary = os.environ.get('GATEWAY_NER_SENTENCE_BOUNDARIES')
+    if boundary is not None:
+        if boundary not in ('0', '1'):
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid NER window options')
+        options['ner_sentence_boundaries'] = boundary == '1'
     return options
 
 

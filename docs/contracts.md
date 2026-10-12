@@ -101,7 +101,7 @@
 
 ### NER 前快速风险筛选
 
-NER 工作进程的常驻、回收与版本隔离契约见 [ADR 0009](adr/0009-bounded-persistent-ner-workers.md)，业务质量指标与离线阶段性能观测边界见 [NER 评测契约](contracts/ner-evaluation.md)。
+NER 工作进程的常驻与失败契约见 [ADR 0009](adr/0009-bounded-persistent-ner-workers.md)，不可变制品、全槽预热、有界合批和调度契约见 [ADR 0010](adr/0010-immutable-ner-snapshots-and-batching.md)，业务质量指标与离线阶段性能观测边界见 [NER 评测契约](contracts/ner-evaluation.md)。
 
 服务端可配置本地启发式风险评分，按文本片段决定是否进入完整规则、词典和 NER 检测。默认启动配置启用，阈值 0.35，共享请求预算 2ms。评分未经统计校准，低于阈值表示初步估计风险较低，不是确定无敏感信息。词典和敏感格式线索分数为 1；姓名等线索为 0.75；未命中为 0.02。预算耗尽、过长词典线索或自定义识别器无法快速覆盖时进入完整检测。分块扫描保留跨块重叠，禁止通过截断或只检查开头放行尾部。
 

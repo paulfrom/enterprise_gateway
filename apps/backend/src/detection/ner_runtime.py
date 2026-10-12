@@ -7,7 +7,7 @@ import resource
 import time
 from dataclasses import dataclass
 
-from detection.ner_model import load_model_package, model_manifest_digest, verify_loaded_package
+from detection.ner_model import load_model_package, model_manifest_digest, verify_loaded_package, _load_json
 from detection.ner_windowing import EntitySpan, NerWindowMerger
 from detection.ner_snapshot import SealedNerSnapshot, load_snapshot
 from infra.errors import SafetyCode, SafetyError
@@ -36,6 +36,10 @@ class NerRuntime:
         if digest != expected_digest:
             raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
         self.digest = expected_digest
+        config_path = package_dir.path('config.json') if sealed else self.package.package_dir / 'config.json'
+        maximum = _load_json(config_path).get('max_position_embeddings')
+        if maximum is not None and (type(maximum) is not int or window_length > maximum):
+            raise SafetyError(SafetyCode.NER_MODEL_INVALID, 'window_exceeds_model_positions')
         self.merger = NerWindowMerger(self.package.tokenizer, self.package.session,
                                      self.package.id2label, window_length=window_length, stride=stride,
                                      **(options or {}))
@@ -53,8 +57,8 @@ class NerRuntime:
         if expected_digest != self.digest:
             raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
         started = time.perf_counter()
-        # Integrity remains a per-task gate. Session reuse must not make a
-        # changed model/tokenizer/config/license silently acceptable.
+        # Sealed packages check immutable descriptor identity/version; mutable
+        # control runs still hash every payload before each task.
         if verify_package:
             verify_loaded_package(self.package, expected_digest)
         metrics = {"package_verify_ms": (time.perf_counter() - started) * 1000}

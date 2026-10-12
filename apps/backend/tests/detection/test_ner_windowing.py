@@ -123,6 +123,53 @@ class FakeSession:
         return [logits]
 
 
+class FragmentBatchTests(unittest.TestCase):
+    def test_mixed_lengths_empty_fragment_and_entity_offsets_are_scattered(self):
+        texts = ('aa bb cc', '', 'dd')
+        tokenizer = mini_tokenizer()
+        short = encode(texts[2])
+        long = encode(texts[0])
+        session = FakeSession([build_labels(len(short.ids), [(0, len(short.ids) - 1, 'ORG')]),
+                               build_labels(len(long.ids), [(1, 2, 'PER')])])
+        merger = NerWindowMerger(tokenizer, session, ID2LABEL)
+        results = merger.extract_many(texts)
+        self.assertEqual(results[1], ())
+        self.assertEqual([(s.start, s.end, s.entity_type) for s in results[0]],
+                         [(long.offsets[1][0], long.offsets[2][1], 'PER')])
+        self.assertEqual([(s.start, s.end, s.entity_type) for s in results[2]], [(0, 2, 'ORG')])
+        self.assertEqual(session.calls, 2)
+
+    def test_similar_lengths_share_one_forward(self):
+        texts = ('aa bb cc', 'dd ee ff')
+        count = len(encode(texts[0]).ids)
+        session = FakeSession([[LABEL_IDS['O']] * count for _ in texts])
+        merger = NerWindowMerger(mini_tokenizer(), session, ID2LABEL)
+        self.assertEqual(merger.extract_many(texts), ((), ()))
+        self.assertEqual(session.calls, 1)
+
+    def test_token_budget_splits_batches_without_dropping_fragments(self):
+        texts = ('aa bb cc',) * 5
+        count = len(encode(texts[0]).ids)
+        session = FakeSession([[LABEL_IDS['O']] * count for _ in texts])
+        merger = NerWindowMerger(mini_tokenizer(), session, ID2LABEL,
+                                 window_length=8, stride=2, batch_tokens=8)
+        metrics = {}
+        self.assertEqual(merger.extract_many(texts, metrics=metrics), ((),) * 5)
+        self.assertEqual(session.calls, 5)
+        self.assertEqual(metrics['window_count'], 5)
+
+    def test_sentence_windows_keep_token_coverage_overlap_and_tail(self):
+        from detection.ner_windowing import plan_sentence_windows
+        text = '甲乙丙丁。戊己庚辛。壬癸子丑。寅卯辰巳。午未申酉。戌亥尾部。'
+        offsets = [(index, index + 1) for index in range(len(text))]
+        windows = plan_sentence_windows(text, offsets, 12, 8)
+        self.assertEqual(windows[0], (0, 10))
+        self.assertEqual(windows[-1][1], len(text))
+        self.assertEqual({i for begin, end in windows for i in range(begin, end)}, set(range(len(text))))
+        self.assertTrue(all(end - begin <= 12 for begin, end in windows))
+        self.assertTrue(all(left[1] - right[0] == 4 for left, right in zip(windows, windows[1:])))
+
+
 class FakeTokenizer:
     """Tokenizer stub with explicit ids/offsets (for offset poisoning)."""
 
@@ -192,9 +239,8 @@ class WindowPlanTests(unittest.TestCase):
             self.assertEqual(covered, set(range(token_count)))
 
     def test_production_defaults_make_multiple_windows(self):
-        windows = plan_windows(300, DEFAULT_WINDOW_LENGTH - 2, DEFAULT_STRIDE)
-        self.assertEqual(len(windows), 7)
-        self.assertEqual(windows[-1], (174, 300))
+        windows = plan_windows(1000, DEFAULT_WINDOW_LENGTH - 2, DEFAULT_STRIDE)
+        self.assertEqual(windows, ((0, 382), (318, 700), (618, 1000)))
 
     def test_plan_rejects_invalid_parameters(self):
         for args in [(6, 0, 1), (6, 6, 0), (-1, 6, 2), (10, 6, 7), (6, 6, True)]:
@@ -223,7 +269,7 @@ class MergerConstructorTests(unittest.TestCase):
             {"window_length": "128"},
             {"stride": 0},
             {"stride": -1},
-            {"stride": 200},
+            {"stride": DEFAULT_WINDOW_LENGTH},
             {"stride": True},
         ]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):

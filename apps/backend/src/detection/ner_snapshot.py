@@ -55,6 +55,8 @@ class SealedNerSnapshot:
         self.digest = digest
         self.manifest = manifest
         self._fds = descriptors
+        self._identities = {name: (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
+                            for name, fd in descriptors.items()}
         self._closed = False
 
     @classmethod
@@ -130,9 +132,12 @@ class SealedNerSnapshot:
             if set(self._fds) != {'manifest.json', *self.manifest.files}:
                 failed = True
             for name, fd in self._fds.items():
+                stat = os.fstat(fd)
+                if (stat.st_dev, stat.st_ino) != self._identities.get(name):
+                    failed = True
                 if fcntl.fcntl(fd, _GET_SEALS) & _SEALS != _SEALS:
                     failed = True
-                if name in self.manifest.files and os.fstat(fd).st_size != self.manifest.files[name].bytes:
+                if name in self.manifest.files and stat.st_size != self.manifest.files[name].bytes:
                     failed = True
         except (OSError, ValueError):
             failed = True
@@ -143,6 +148,10 @@ class SealedNerSnapshot:
         self.validate()
         return {'manifest.json': self.digest,
                 **{name: entry.sha256 for name, entry in self.manifest.files.items()}}
+
+    @property
+    def allocated_bytes(self):
+        return sum(os.fstat(fd).st_size for fd in self._fds.values())
 
     def send(self, conn, pid):
         self.validate()
@@ -158,6 +167,7 @@ class SealedNerSnapshot:
         try:
             for name in names:
                 descriptors[name] = recv_handle(conn)
+                os.set_inheritable(descriptors[name], False)
             if digest != expected_digest or not isinstance(manifest, ArtifactManifest):
                 _invalid('snapshot_version_mismatch')
             snapshot = cls(directory, digest, manifest, descriptors)
@@ -172,7 +182,10 @@ class SealedNerSnapshot:
         if not self._closed:
             self._closed = True
             for fd in self._fds.values():
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def load_snapshot(snapshot, *, timings=None, intra_op_threads=None):

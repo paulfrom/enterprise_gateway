@@ -44,7 +44,12 @@ def create_runtime_app(
     detection_failure_mode: str = 'error',
     quick_screen: QuickScreenConfig | None = None,
     ner_max_workers: int = 1, ner_max_pending: int = 4,
-    ner_max_tasks_per_worker: int = 256, ner_intra_op_threads: int | None = None,
+    ner_max_tasks_per_worker: int = 8192, ner_intra_op_threads: int | None = None,
+    ner_window_length: int = 384, ner_stride: int = 318,
+    ner_max_age_seconds: int = 3600, ner_max_rss_kib: int = 2097152,
+    ner_batch_wait_ms: int = 0, ner_max_batch_jobs: int = 1,
+    ner_max_batch_chars: int = 512, ner_batch_tokens: int = 4096,
+    ner_sentence_boundaries: bool = False,
 ) -> FastAPI:
     """Assemble real controls; own all HTTP/detector lifecycle resources.
 
@@ -83,7 +88,12 @@ def create_runtime_app(
         detector = DetectionOrchestrator(dictionary=dictionary, ner_package_dir=ner_package_dir,
             ner_timeout=ner_timeout, quick_screen=quick_screen, ner_max_workers=ner_max_workers,
             ner_max_pending=ner_max_pending, ner_max_tasks_per_worker=ner_max_tasks_per_worker,
-            ner_intra_op_threads=ner_intra_op_threads)
+            ner_intra_op_threads=ner_intra_op_threads,
+            window_length=ner_window_length, stride=ner_stride,
+            ner_max_age_seconds=ner_max_age_seconds, ner_max_rss_kib=ner_max_rss_kib,
+            ner_batch_wait_ms=ner_batch_wait_ms, ner_max_batch_jobs=ner_max_batch_jobs,
+            ner_max_batch_chars=ner_max_batch_chars, ner_batch_tokens=ner_batch_tokens,
+            ner_sentence_boundaries=ner_sentence_boundaries)
         guard = AuditWatermarkGuard(root, watermark_policy)
         evidence = EvidenceGate(intent_directory=paths["intents"],
                                 evidence_directory=paths["evidence"], kms=kms)
@@ -148,6 +158,7 @@ def create_runtime_app(
                 builder_thread = threading.Thread(target=build_catalog, name='admin-audit-catalog', daemon=True)
                 builder_thread.start()
             try:
+                await anyio.to_thread.run_sync(detector.warmup)
                 yield
             finally:
                 app.state.runtime_closed = True

@@ -34,6 +34,24 @@ class NerWorkerConfigurationTests(unittest.TestCase):
                 self.assertIsNone(caught.exception.__cause__)
                 self.assertIsNone(caught.exception.__context__)
 
+    def test_lifetime_window_batch_and_rss_options(self):
+        values = {'GATEWAY_NER_MAX_AGE_SECONDS': '600', 'GATEWAY_NER_MAX_RSS_MIB': '1024',
+                  'GATEWAY_NER_WINDOW_LENGTH': '384', 'GATEWAY_NER_STRIDE': '318',
+                  'GATEWAY_NER_BATCH_TOKENS': '4096', 'GATEWAY_NER_BATCH_WAIT_MS': '0',
+                  'GATEWAY_NER_MAX_BATCH_JOBS': '4', 'GATEWAY_NER_MAX_BATCH_CHARS': '512',
+                  'GATEWAY_NER_SENTENCE_BOUNDARIES': '1'}
+        with patch.dict(os.environ, values, clear=True):
+            result = start_gateway._ner_worker_options()
+        self.assertEqual(result['ner_max_rss_kib'], 1048576)
+        self.assertEqual(result['ner_sentence_boundaries'], True)
+        self.assertEqual(result['ner_batch_wait_ms'], 0)
+        for name, value in (('GATEWAY_NER_MAX_RSS_MIB', '-1'), ('GATEWAY_NER_BATCH_WAIT_MS', '-1'),
+                            ('GATEWAY_NER_SENTENCE_BOUNDARIES', 'private-value')):
+            with patch.dict(os.environ, {name: value}, clear=True):
+                with self.assertRaises(SafetyError) as caught:
+                    start_gateway._ner_worker_options()
+                self.assertNotIn(value, str(caught.exception))
+
 
 if __name__ == '__main__':
     unittest.main()

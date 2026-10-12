@@ -17,7 +17,7 @@ NER 前默认启用本地快速风险筛选，无模型推理、网络请求或�
 
 请求期间检测故障默认报错。设置 `GATEWAY_DETECTION_FAILURE_MODE=passthrough` 可在检测器故障或检测超时时透传未脱敏文本，并记录仅含错误码的 `DETECTION_FAILURE_PASSTHROUGH` 日志；默认值为 `error`。该开关只作用于检测阶段，不改变鉴权、请求总超时、持久化失败或已检测到高敏秘密时的处理。
 
-NER 默认使用有界常驻工作进程：一个执行槽、四个等待任务，每个工作进程复用 tokenizer 与 ONNX Session。首次任务按需初始化，排队和初始化消耗原任务预算；运行中超时或取消先终止并确认进程退出，再允许替代进程执行任务。每个进程默认完成 256 个任务后回收。模型包文件仍逐任务校验内容哈希，模型更新需重新装配；恢复映射保持请求内隔离。合成业务样本与单次进程/常驻进程性能对照工具见 [NER 评测契约](docs/contracts/ner-evaluation.md)，真实样本和运行报告存放在仓库外。
+NER 默认使用有界常驻工作进程：一个执行槽、四个等待任务，复用 tokenizer 与 ONNX Session。Linux 启动时完整校验并建立内核封印的不可变模型快照，全部执行槽完成实际前向预热后服务；请求复用快照摘要和运行资源。源目录变更不会改写在用模型，新模型须重新装配新池与保护包。每个进程默认最多完成 8192 个请求，并在达到 3600 秒年龄或 2048 MiB 峰值 RSS 阈值后回收，替代进程在空闲时预热；超时或取消仍先确认退出。窗口按长度分组跨片段合批，跨请求聚合为可配置能力，CPU 默认逐请求调度；所有成员仍占用有界准入容量，恢复映射保持请求内隔离。多槽时为短请求保留容量，单槽无法抢占长文本前向计算。契约见 [ADR 0010](docs/adr/0010-immutable-ner-snapshots-and-batching.md) 与 [NER 评测契约](docs/contracts/ner-evaluation.md)，真实样本和运行报告存放在仓库外。
 
 SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，此前只发送固定保活。原始及恢复后响应各有8MiB预算，工具参数恢复后每调用64KiB、全请求256KiB。该模式的首业务内容等待时间需要实际客户端联调；Claude 签名历史须通过供应商验证并携带域及版本绑定的网关 receipt。
 
@@ -144,9 +144,17 @@ DeepSeek响应恢复支持普通 `content`、`reasoning_content`、`reasoning_de
 | `GATEWAY_NER_PACKAGE_DIR` | 已核验完整本地 ONNX 模型包 |
 | `GATEWAY_NER_TIMEOUT_SECONDS` | 可选的 NER 单次检测时间预算（秒），代码默认 30，Compose 部署默认 120；大文本 CPU 推理需按硬件调整，仍受请求总超时约束 |
 | `GATEWAY_NER_MAX_WORKERS` | 常驻 NER 执行槽数，默认 `1`，必须为正整数；各 HTTP 应用进程分别拥有自己的池 |
-| `GATEWAY_NER_MAX_PENDING` | 等待任务上限，默认 `4`；`0` 允许使用空闲槽并立即拒绝需排队的任务 |
-| `GATEWAY_NER_MAX_TASKS_PER_WORKER` | 单个工作进程成功任务上限，默认 `256`，达到后确认退出，后续任务重新初始化 |
-| `GATEWAY_NER_INTRA_OP_THREADS` | 可选的每会话 ORT 算子内线程数，必须为正整数；未设置使用 ONNX 默认值，须与执行槽数联合评测 |
+| `GATEWAY_NER_MAX_PENDING` | 等待任务上限，默认 `4`；`0` 仅使用可用槽，长文本仍遵守短文本保留容量，需排队则立即拒绝 |
+| `GATEWAY_NER_MAX_TASKS_PER_WORKER` | 成功请求上限，默认 `8192`；各槽错峰回收，空闲时预热替代进程 |
+| `GATEWAY_NER_INTRA_OP_THREADS` | 每会话 ORT 算子内线程数；未设置时按可见物理核心和 CPU 配额分摊到执行槽 |
+| `GATEWAY_NER_MAX_AGE_SECONDS` | 工作进程年龄上限，默认 `3600` 秒 |
+| `GATEWAY_NER_MAX_RSS_MIB` | 工作进程峰值 RSS 回收阈值，默认 `2048`；`0` 显式关闭此项；共享快照内存另计 |
+| `GATEWAY_NER_WINDOW_LENGTH` / `GATEWAY_NER_STRIDE` | 默认 `384` / `318`，包含 CLS/SEP，内容重叠 64 token；改变须重新验收边界召回 |
+| `GATEWAY_NER_SENTENCE_BOUNDARIES` | `1` 启用合法 token 边界上的句界切分，默认 `0` |
+| `GATEWAY_NER_BATCH_TOKENS` | 单次前向的 padding token 总预算，默认 `4096`，须至少容纳一个窗口 |
+| `GATEWAY_NER_BATCH_WAIT_MS` | 短请求合批聚合等待上限，默认 `0`，关闭主动等待；启用时按目标硬件评测 |
+| `GATEWAY_NER_MAX_BATCH_JOBS` | 每批请求上限，默认 `1`，关闭跨请求合批；请求内窗口仍按长度分组合批 |
+| `GATEWAY_NER_MAX_BATCH_CHARS` | 短请求分类及合批总字符上限，默认 `512` |
 | `GATEWAY_EVIDENCE_BUCKET` | 受控原始请求证据留存桶 |
 | `PROVIDERS_CONFIG` 或 `--config` | 路由文件，默认 `config/providers.json` |
 | `GATEWAY_CLASSIFIER` 或 `--classifier` | 运维批准的同步 Python `module:callable`，接收请求 bytes 并返回政策分类；未配置保持拒绝 |

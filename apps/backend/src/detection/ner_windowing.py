@@ -47,8 +47,8 @@ import numpy as np
 
 from infra.errors import SafetyCode, SafetyError
 
-DEFAULT_WINDOW_LENGTH = 128
-DEFAULT_STRIDE = 32
+DEFAULT_WINDOW_LENGTH = 384
+DEFAULT_STRIDE = 318
 
 _INFERENCE_BATCH_SIZE = 32
 
@@ -266,6 +266,7 @@ class NerWindowMerger:
         Length buckets reduce padding. Results are scattered back to the exact
         original fragment; no text/logits/offsets survive this call.
         """
+        texts = tuple(texts)
         started = time.perf_counter() if metrics is not None else 0.0
         encoded = []
         rows = []
@@ -295,8 +296,11 @@ class NerWindowMerger:
         while cursor < len(rows):
             stop = cursor
             width = 0
+            bucket_width = rows[cursor][2] - rows[cursor][1] + 2
             while stop < len(rows) and stop - cursor < _INFERENCE_BATCH_SIZE:
                 next_width = rows[stop][2] - rows[stop][1] + 2
+                if stop > cursor and next_width > bucket_width * 1.25:
+                    break
                 width = max(width, next_width)
                 if (stop - cursor + 1) * width > self._batch_tokens:
                     break

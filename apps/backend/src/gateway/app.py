@@ -189,6 +189,8 @@ def create_app(
                     pipeline.watermark_guard.check_egress_permitted()
                     if pipeline.egress_client._client.is_closed or pipeline.detector._executor._closed:
                         raise ValueError("closed runtime")
+                    if not getattr(pipeline.detector._executor, 'ready', True):
+                        raise ValueError('NER workers not warm')
                 if getattr(app.state, 'runtime_closed', False):
                     raise ValueError("closed runtime")
             except Exception:

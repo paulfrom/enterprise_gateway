@@ -179,8 +179,15 @@ class DetectionOrchestrator:
         quick_screen: QuickScreenConfig | None = None,
         ner_max_workers: int = 1,
         ner_max_pending: int = 4,
-        ner_max_tasks_per_worker: int = 256,
+        ner_max_tasks_per_worker: int = 8192,
         ner_intra_op_threads: int | None = None,
+        ner_max_age_seconds: int = 3600,
+        ner_max_rss_kib: int = 2097152,
+        ner_batch_wait_ms: int = 0,
+        ner_max_batch_jobs: int = 1,
+        ner_max_batch_chars: int = 512,
+        ner_batch_tokens: int = 4096,
+        ner_sentence_boundaries: bool = False,
     ) -> None:
         if recognizers is None:
             active = default_recognizers()
@@ -220,7 +227,11 @@ class DetectionOrchestrator:
         elif ner_package_dir is not None and ner_worker is None:
             self._executor = NerWorkerPool(os.fspath(ner_package_dir), max_workers=ner_max_workers,
                 max_pending=ner_max_pending, max_tasks_per_worker=ner_max_tasks_per_worker,
-                window_length=window_length, stride=stride, intra_op_threads=ner_intra_op_threads)
+                window_length=window_length, stride=stride, intra_op_threads=ner_intra_op_threads,
+                max_age_seconds=ner_max_age_seconds, max_rss_kib=ner_max_rss_kib,
+                batch_wait_ms=ner_batch_wait_ms, max_batch_jobs=ner_max_batch_jobs,
+                max_batch_chars=ner_max_batch_chars, batch_tokens=ner_batch_tokens,
+                sentence_boundaries=ner_sentence_boundaries)
         else:
             self._executor = InferenceExecutor(max_workers=ner_max_workers, max_pending=ner_max_pending)
         if isinstance(self._executor, NerWorkerPool) and ner_worker is not None:
@@ -347,6 +358,11 @@ class DetectionOrchestrator:
                 artifact=artifact, created_utc=created_utc, model_sha256=model_sha256
             ),
         )
+
+    def warmup(self, *, timeout=120):
+        if isinstance(self._executor, NerWorkerPool):
+            return self._executor.warmup(timeout=timeout)
+        return ()
 
     def close(self) -> None:
         """关闭编排器自持的资源（自建执行器）；外部传入的执行器不接管。"""

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import shutil
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from detection.ner_runtime import NerBatchResult
@@ -278,7 +281,7 @@ class NerWorkerPoolTests(unittest.TestCase):
                 call.join(10)
                 self.assertIsNone(call.error)
 
-    def test_cached_session_still_rejects_payload_tampering_and_new_manifest(self):
+    def test_sealed_snapshot_survives_source_changes_and_new_pool_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             shutil.copytree(MINI, directory, dirs_exist_ok=True)
             with NerWorkerPool(directory, intra_op_threads=1) as pool:
@@ -288,17 +291,186 @@ class NerWorkerPoolTests(unittest.TestCase):
                 payload = model.read_bytes()
                 model.write_bytes(bytes([payload[0] ^ 1]) + payload[1:])
                 os.utime(model, ns=(before.st_atime_ns, before.st_mtime_ns))
+                second = pool.infer_profiled(('aa bb',), timeout=20)
+                self.assertEqual(first.results, second.results)
+                self.assertEqual(first.worker_pid, second.worker_pid)
+                with NerWorkerPool(directory, intra_op_threads=1) as new_pool:
+                    with self.assertRaises(SafetyError) as caught:
+                        new_pool.infer(('aa',), timeout=20)
+                    self.assertEqual(caught.exception.code, SafetyCode.NER_MODEL_INVALID)
+                manifest = Path(directory, 'manifest.json')
+                manifest.write_bytes(manifest.read_bytes() + b'\n')
+                third = pool.infer_profiled(('aa bb',), timeout=20)
+                self.assertEqual(first.results, third.results)
+
+    def test_mutable_baseline_retains_per_task_integrity_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copytree(MINI, directory, dirs_exist_ok=True)
+            with NerWorkerPool(directory, sealed_snapshot=False, intra_op_threads=1) as pool:
+                first = pool.infer_profiled(('aa bb',), timeout=20)
+                model = Path(directory, 'model.onnx')
+                model.write_bytes(b'x' * model.stat().st_size)
                 with self.assertRaises(SafetyError) as caught:
                     pool.infer(('aa',), timeout=20)
                 self.assertEqual(caught.exception.code, SafetyCode.NER_MODEL_INVALID)
                 self.assertTrue(exited(first.worker_pid))
-                model.write_bytes(payload)
-                pool.infer(('aa',), timeout=20)
-                manifest = Path(directory, 'manifest.json')
-                manifest.write_bytes(manifest.read_bytes() + b'\n')
+
+    def test_all_slots_are_forward_warmed_and_shutdown_releases_snapshot(self):
+        pool = NerWorkerPool(str(MINI), max_workers=2, intra_op_threads=1)
+        self.addCleanup(pool.close)
+        cold = pool.warmup(timeout=20)
+        self.assertEqual(len(cold), 2)
+        self.assertTrue(pool.ready)
+        self.assertTrue(all(item['warmup_ms'] > 0 for item in cold))
+        self.assertTrue(all(slot.completed == 0 for slot in pool._slots))
+        pids = pool.worker_pids()
+        pool.close()
+        self.assertTrue(all(exited(pid) for pid in pids))
+        self.assertTrue(pool._artifact._closed)
+
+    def test_auto_threads_share_visible_cpu_budget_and_explicit_threads_are_preserved(self):
+        with patch('detection.ner_worker_pool.cpu_thread_budget', return_value=6):
+            automatic = self.pool(max_workers=2)
+            explicit = self.pool(max_workers=2, intra_op_threads=5)
+        self.assertEqual(automatic._intra_op_threads, 3)
+        self.assertEqual(explicit._intra_op_threads, 5)
+
+    def test_snapshot_creation_consumes_bounded_slot_not_an_unbounded_pre_admission_wait(self):
+        from detection.ner_snapshot import SealedNerSnapshot
+        started, release = threading.Event(), threading.Event()
+        original = SealedNerSnapshot.create
+        def slow_snapshot(*args, **kwargs):
+            started.set()
+            release.wait(10)
+            return original(*args, **kwargs)
+        with patch.object(SealedNerSnapshot, 'create', side_effect=slow_snapshot):
+            with NerWorkerPool(str(MINI), max_pending=1, intra_op_threads=1) as pool:
+                first, second = Call(pool, ('aa',)), Call(pool, ('bb',))
+                first.start()
+                self.assertTrue(started.wait(5))
+                second.start()
+                self.assertTrue(wait_for(lambda: pool.snapshot() == (1, 1)))
+                try:
+                    with self.assertRaises(SafetyError) as caught:
+                        pool.infer(('overflow',), timeout=20)
+                    self.assertEqual(caught.exception.code, SafetyCode.INFERENCE_QUEUE_FULL)
+                finally:
+                    release.set()
+                for call in (first, second):
+                    call.join(10)
+                    self.assertIsNone(call.error)
+
+    def test_failed_descriptor_transfer_reaps_child_without_poisoning_pool(self):
+        from detection.ner_snapshot import SealedNerSnapshot
+        with NerWorkerPool(str(MINI), intra_op_threads=1) as pool:
+            with patch.object(SealedNerSnapshot, 'send', side_effect=OSError(CANARY)):
+                with self.assertRaises(RuntimeError) as caught:
+                    pool.infer(('aa',), timeout=20)
+            self.assertNotIn(CANARY, str(caught.exception))
+            self.assertIsNone(caught.exception.__context__)
+            self.assertFalse(pool._closed)
+            self.assertEqual(pool.worker_pids(), ())
+            self.assertEqual(len(pool.infer(('bb',), timeout=20)), 1)
+
+    def test_interpreter_exit_reaps_idle_workers_even_without_explicit_close(self):
+        program = '''
+from detection.ner_worker_pool import NerWorkerPool
+from test_ner_worker_pool import fake_factory, MINI
+pool = NerWorkerPool(str(MINI), runtime_factory=fake_factory)
+result = pool.infer_profiled(('ordinary',), timeout=20)
+print(result.worker_pid, flush=True)
+'''
+        environment = {**os.environ, 'PYTHONPATH': os.pathsep.join(
+            [str(Path(__file__).parent), os.environ.get('PYTHONPATH', '')])}
+        result = subprocess.run([sys.executable, '-c', program], env=environment,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(exited(int(result.stdout.strip())))
+
+    def test_window_exceeding_model_positions_is_rejected(self):
+        import json
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copytree(MINI, directory, dirs_exist_ok=True)
+            config_path = Path(directory, 'config.json')
+            config = json.loads(config_path.read_text())
+            config['max_position_embeddings'] = 64
+            config_path.write_text(json.dumps(config))
+            manifest_path = Path(directory, 'manifest.json')
+            manifest = json.loads(manifest_path.read_text())
+            manifest['files']['config.json'] = {'sha256': hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                                              'bytes': config_path.stat().st_size}
+            manifest_path.write_text(json.dumps(manifest))
+            with NerWorkerPool(directory, intra_op_threads=1) as pool:
                 with self.assertRaises(SafetyError) as caught:
                     pool.infer(('aa',), timeout=20)
                 self.assertEqual(caught.exception.code, SafetyCode.NER_MODEL_INVALID)
+
+    def test_microbatch_scatter_and_total_admission_bound(self):
+        pool = self.pool(batch_wait_ms=100, max_pending=2, max_batch_jobs=8)
+        pool.infer(('warm',), timeout=20)
+        calls = [Call(pool, (f'fragment-{index}',)) for index in range(3)]
+        for call in calls:
+            call.start()
+        for call in calls:
+            call.join(10)
+            self.assertIsNone(call.error)
+            self.assertEqual(len(call.result.results), 1)
+            self.assertEqual(call.result.metrics['batch_requests'], 3)
+        self.assertEqual(len({call.result.metrics['calls'] for call in calls}), 1)
+
+    def test_short_worker_reservation_serves_short_while_long_worker_hangs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pool = self.pool(max_workers=2, max_pending=2, max_batch_chars=10)
+            markers = [Path(directory, f'long-{index}.pid') for index in range(2)]
+            first = Call(pool, (f'wait:{markers[0]}',))
+            first.start()
+            self.assertTrue(wait_for(markers[0].exists))
+            second = Call(pool, (f'wait:{markers[1]}',))
+            second.start()
+            self.assertTrue(wait_for(lambda: pool.snapshot()[1] == 1))
+            short = pool.infer_profiled(('short',), timeout=20)
+            self.assertNotEqual(short.worker_pid, int(markers[0].read_text()))
+            self.assertFalse(markers[1].exists())
+            markers[0].with_suffix('.release').touch()
+            self.assertTrue(wait_for(markers[1].exists))
+            markers[1].with_suffix('.release').touch()
+            for call in (first, second):
+                call.join(10)
+                self.assertIsNone(call.error)
+
+    def test_microbatch_members_consume_capacity_and_cancel_reaps_whole_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pool = self.pool(batch_wait_ms=100, max_pending=2, max_batch_jobs=8)
+            previous = pool.infer_profiled(('warm',), timeout=20)
+            marker = Path(directory, 'batch.pid')
+            cancel = threading.Event()
+            calls = [Call(pool, (f'wait:{marker}',), cancel=cancel),
+                     Call(pool, ('second',)), Call(pool, ('third',))]
+            for call in calls:
+                call.start()
+            self.assertTrue(wait_for(marker.exists))
+            self.assertEqual(pool.snapshot(), (1, 0))
+            with self.assertRaises(SafetyError) as caught:
+                pool.infer(('overflow',), timeout=20)
+            self.assertEqual(caught.exception.code, SafetyCode.INFERENCE_QUEUE_FULL)
+            cancel.set()
+            for call in calls:
+                self.assert_timeout(call)
+                self.assertIsNone(call.result)
+            self.assertEqual(len({id(call.error) for call in calls}), len(calls))
+            self.assertTrue(exited(previous.worker_pid))
+
+    def test_age_and_rss_retire_workers_and_maintenance_rewarms_replacements(self):
+        pool = self.pool(max_age_seconds=1, batch_wait_ms=0)
+        pool.warmup(timeout=20)
+        first = pool.worker_pids()[0]
+        self.assertTrue(wait_for(lambda: pool.ready and first not in pool.worker_pids()))
+        self.assertTrue(exited(first))
+        # A deliberately low cap demonstrates real worker RSS-based retirement.
+        with NerWorkerPool(str(MINI), max_rss_kib=1, intra_op_threads=1) as real:
+            result = real.infer_profiled(('aa',), timeout=20)
+            self.assertTrue(exited(result.worker_pid))
 
     def test_argument_validation_and_pre_cancel_create_no_process(self):
         for kwargs in ({'max_workers': 0}, {'max_pending': -1}, {'max_tasks_per_worker': 0},

@@ -280,6 +280,8 @@ def _validate_tokenizer(tokenizer_path: Path) -> Tokenizer:
 
 def _validate_onnx(onnx_path: Path, *, intra_op_threads: int | None = None) -> ort.InferenceSession:
     options = ort.SessionOptions()
+    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    options.add_session_config_entry('session.intra_op.allow_spinning', '0')
     if intra_op_threads is not None:
         if type(intra_op_threads) is not int or intra_op_threads < 1:
             raise ValueError("intra_op_threads must be a positive int")
@@ -328,10 +330,11 @@ def model_manifest_digest(package_dir: str | Path) -> str:
 
 
 def verify_loaded_package(package: LoadedNerPackage, expected_digest: str) -> None:
-    """Keep per-task integrity checks while reusing native model resources.
+    """Verify the pinned version without trusting mutable-path metadata.
 
-    A pool is pinned to one manifest. Changed payloads are rejected even if
-    their file sizes and mtimes were preserved; a new release needs a new pool.
+    Sealed snapshots check descriptor identity and kernel seals. Mutable
+    control loads continue hashing all files, including same-size mutations.
+    A model release always requires a new pool.
     """
     if package.snapshot is not None:
         if package.snapshot.digest != expected_digest:

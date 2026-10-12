@@ -254,10 +254,20 @@ def summarize(records, elapsed):
     phases = {name: distribution([record['metrics'].get(name, 0.0) for record in records
                        if record['error'] in (None, SafetyCode.SECRET_DETECTED.value) or name in record['metrics']])
               for name in sorted(phase_names)}
+    batches = {}
+    for index, record in enumerate(records):
+        if record['pid'] is not None:
+            key = (record['pid'], record['metrics'].get('batch_id', index))
+            batches.setdefault(key, record['metrics'])
+    batching = {'batches': len(batches),
+                'requests_per_batch': distribution([m.get('batch_requests', 1) for m in batches.values()]),
+                **{name: sum(m.get(name, 0) for m in batches.values())
+                   for name in ('onnx_calls', 'window_count', 'content_tokens_processed')},
+                'artifact_snapshot_bytes': max((m.get('artifact_snapshot_bytes', 0) for m in batches.values()), default=0)}
     return {'requests': len(records), 'elapsed_seconds': elapsed,
             'throughput_requests_per_second': len(records) / elapsed if elapsed else None,
             'completed_requests_per_second': sum(record['error'] is None for record in records) / elapsed if elapsed else None,
-            'phases_ms': phases, 'ner_exact': finish_counts(ner_counts), 'full_detection_exact': finish_counts(full_counts),
+            'phases_ms': phases, 'batching': batching, 'ner_exact': finish_counts(ner_counts), 'full_detection_exact': finish_counts(full_counts),
             'protection_coverage': coverage_result,
             'secret_blocking': {'expected': expected_secret, 'correct': correct_secret, 'false_blocks': false_secret},
             'negative_requests': negative_requests, 'false_positive_requests': false_positive_requests,
@@ -267,11 +277,16 @@ def summarize(records, elapsed):
 
 
 def run_group(data, package, *, mode, screening, concurrency, workers, pending,
-              repeats, timeout, ort_threads, recycle, window_length=128, stride=32):
+              repeats, timeout, ort_threads, recycle, window_length=384, stride=318,
+              batch_tokens=4096, sentence_boundaries=False, sealed_snapshot=True,
+              batch_wait_ms=0, max_batch_jobs=1, max_batch_chars=512):
     dictionary = make_dictionary(data)
     executor = (NerWorkerPool(str(package), max_workers=workers, max_pending=pending,
                     intra_op_threads=ort_threads, max_tasks_per_worker=recycle,
-                    window_length=window_length, stride=stride)
+                    window_length=window_length, stride=stride, batch_tokens=batch_tokens,
+                    sentence_boundaries=sentence_boundaries, sealed_snapshot=sealed_snapshot,
+                    batch_wait_ms=batch_wait_ms, max_batch_jobs=max_batch_jobs,
+                    max_batch_chars=max_batch_chars)
                 if mode == 'persistent' else InferenceExecutor(max_workers=workers, max_pending=pending))
     try:
         detector = DetectionOrchestrator(dictionary=dictionary, ner_package_dir=package,
@@ -279,8 +294,13 @@ def run_group(data, package, *, mode, screening, concurrency, workers, pending,
             window_length=window_length, stride=stride,
             quick_screen=QuickScreenConfig() if screening == 'screened' else None)
         probe_started = time.monotonic()
-        probe = _infer(detector, ('',), timeout)
-        cold = {name: value for name, value in probe.metrics.items() if name.endswith('_ms')}
+        if isinstance(executor, NerWorkerPool):
+            warmed = executor.warmup(timeout=timeout)
+            cold = {name: max(item.get(name, 0) for item in warmed)
+                    for name in {key for item in warmed for key in item if key.endswith('_ms')}}
+        else:
+            probe = _infer(detector, ('',), timeout)
+            cold = {name: value for name, value in probe.metrics.items() if name.endswith('_ms')}
         cold['request_latency_ms'] = (time.monotonic() - probe_started) * 1000
         # Use fresh processes for each group, a separate cold probe, and the
         # same deterministic request order and model/thread options in both modes.
@@ -300,7 +320,10 @@ def run_group(data, package, *, mode, screening, concurrency, workers, pending,
         result['cold_probe_ms'] = cold
         result['configuration'] = {'mode': mode, 'screening': screening, 'concurrency': concurrency,
             'workers': workers, 'pending': pending, 'repeats': repeats, 'ort_threads': ort_threads,
-            'max_tasks_per_worker': recycle, 'window_length': window_length, 'stride': stride}
+            'max_tasks_per_worker': recycle, 'window_length': window_length, 'stride': stride,
+            'batch_tokens': batch_tokens, 'sentence_boundaries': sentence_boundaries,
+            'sealed_snapshot': sealed_snapshot, 'batch_wait_ms': batch_wait_ms,
+            'max_batch_jobs': max_batch_jobs, 'max_batch_chars': max_batch_chars}
         result['by_scenario'] = {scenario: summarize([record for record in records if record['sample']['scenario'] == scenario], 0)
                                  for scenario in sorted({sample['scenario'] for sample in data['samples']})}
         return result, {record['sample']['id']: record['signature'] for record in records}
@@ -375,10 +398,18 @@ def main(argv=None):
     parser.add_argument('--repeats', type=_positive, default=3)
     parser.add_argument('--timeout', type=float, default=120)
     parser.add_argument('--ort-threads', default='1', help='positive thread count or auto; identical in both modes')
-    parser.add_argument('--recycle', type=_positive, default=256)
-    parser.add_argument('--window-length', type=_positive, default=128)
-    parser.add_argument('--stride', type=_positive, default=32)
+    parser.add_argument('--recycle', type=_positive, default=8192)
+    parser.add_argument('--window-length', type=_positive, default=384)
+    parser.add_argument('--stride', type=_positive, default=318)
+    parser.add_argument('--batch-tokens', type=_positive, default=4096)
+    parser.add_argument('--sentence-boundaries', action='store_true')
+    parser.add_argument('--mutable-package', action='store_true', help='per-task hashing control baseline')
+    parser.add_argument('--batch-wait-ms', type=int, default=0)
+    parser.add_argument('--max-batch-jobs', type=_positive, default=1)
+    parser.add_argument('--max-batch-chars', type=_positive, default=512)
     parser.add_argument('--min-coverage', type=float, help='optional acceptance threshold for full entity coverage')
+    parser.add_argument('--min-ner-recall', type=float, help='optional exact-span NER recall gate')
+    parser.add_argument('--min-ner-precision', type=float, help='optional exact-span NER precision gate')
     args = parser.parse_args(argv)
     output = args.output.resolve()
     repository = ROOT.parent.parent
@@ -390,6 +421,9 @@ def main(argv=None):
         parser.error('invalid queue/deadline settings')
     if args.min_coverage is not None and not 0 <= args.min_coverage <= 1:
         parser.error('--min-coverage must be between 0 and 1')
+    for value in (args.min_ner_recall, args.min_ner_precision):
+        if value is not None and not 0 <= value <= 1:
+            parser.error('NER quality thresholds must be between 0 and 1')
     try:
         concurrencies = [_positive(value) for value in args.concurrency.split(',')]
         ort_threads = None if args.ort_threads == 'auto' else _positive(args.ort_threads)
@@ -404,6 +438,9 @@ def main(argv=None):
             concurrencies=concurrencies, workers=args.workers, pending=args.pending,
             repeats=args.repeats, timeout=args.timeout, ort_threads=ort_threads,
             recycle=args.recycle, window_length=args.window_length, stride=args.stride,
+            batch_tokens=args.batch_tokens, sentence_boundaries=args.sentence_boundaries,
+            sealed_snapshot=not args.mutable_package, batch_wait_ms=args.batch_wait_ms,
+            max_batch_jobs=args.max_batch_jobs, max_batch_chars=args.max_batch_chars,
             progress_callback=checkpoint)
     except KeyboardInterrupt:
         print('Business evaluation interrupted; inference workers have been closed.', file=sys.stderr)
@@ -420,7 +457,13 @@ def main(argv=None):
         failed |= any(group['protection_coverage']['entity_coverage'] is None
                       or group['protection_coverage']['entity_coverage'] < args.min_coverage
                       for group in report['groups'].values())
+    for metric, minimum in (('recall', args.min_ner_recall), ('precision', args.min_ner_precision)):
+        if minimum is not None:
+            failed |= any(group['ner_exact']['micro'][metric] is None
+                          or group['ner_exact']['micro'][metric] < minimum
+                          for group in report['groups'].values())
     report['acceptance'] = {'passed': not failed, 'min_entity_coverage': args.min_coverage,
+                            'min_ner_recall': args.min_ner_recall, 'min_ner_precision': args.min_ner_precision,
                             'coverage_gate_passed': args.min_coverage is not None and not failed}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
