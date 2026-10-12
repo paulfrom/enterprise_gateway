@@ -5,10 +5,10 @@ these contracts. Real entity names and relation claims remain sensitive data.
 Publication is bound to verified governance actions; consumers must apply tombstones.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
@@ -51,6 +51,7 @@ class CandidateState(StrEnum):
     PUBLISHED = "published"
     REJECTED = "rejected"
     WITHDRAWN = "withdrawn"
+    DISPUTED = "disputed"
 
 
 class Role(StrEnum):
@@ -200,6 +201,12 @@ class Candidate:
     purpose: str
     state: CandidateState = CandidateState.PROPOSED
     rejection_reason: str | None = None
+    properties: Mapping[str, Any] = field(default_factory=dict)
+    confidence: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.confidence <= 1.0):
+            raise KnowledgeError("confidence must be between 0.0 and 1.0")
 
     @property
     def independent_source_count(self) -> int:

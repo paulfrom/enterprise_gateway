@@ -44,7 +44,9 @@ from detection.dictionary import CompiledDictionary, analyze_dictionary
 from detection.quick_screen import QuickRiskScreen, QuickScreenConfig
 from infra.errors import SafetyCode, SafetyError
 from detection.inference_executor import InferenceExecutor
-from detection.ner_model import load_model_package
+from detection.ner_model import load_model_package, model_manifest_digest
+from detection.ner_runtime import NerBatchResult, NerRuntime
+from detection.ner_worker_pool import NerWorkerPool
 from detection.ner_windowing import (
     DEFAULT_STRIDE,
     DEFAULT_WINDOW_LENGTH,
@@ -90,11 +92,20 @@ def _ner_worker(
     )
 
 
-def _ner_batch_worker(package_dir: str, texts: tuple[str, ...], window_length: int, stride: int):
-    package = load_model_package(package_dir)
-    merger = NerWindowMerger(package.tokenizer, package.session, package.id2label, window_length=window_length, stride=stride)
-    provenance = (package.manifest.artifact, package.manifest.created_utc, package.manifest.files['model.onnx'].sha256)
-    return tuple((merger.extract(text), provenance) for text in texts)
+def _ner_batch_worker(package_dir: str, texts: tuple[str, ...], window_length: int, stride: int,
+                      *, profile: bool = False, intra_op_threads: int | None = None):
+    """Single-use process path retained for compatibility and baseline comparisons."""
+    entered_at = time.monotonic()
+    digest = model_manifest_digest(package_dir)
+    runtime = NerRuntime(package_dir, window_length, stride, digest, intra_op_threads)
+    result = runtime.run(texts, digest, profile, verify_package=False)
+    if not profile:
+        return result.results
+    metrics = dict(result.metrics)
+    for key, value in runtime.initialization_metrics.items():
+        metrics[key] = metrics.get(key, 0.0) + value
+    metrics['worker_entry_at'] = entered_at
+    return NerBatchResult(result.results, metrics, result.worker_pid)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,12 +171,16 @@ class DetectionOrchestrator:
         recognizers: Iterable[EntityRecognizer] | None = None,
         dictionary: CompiledDictionary | None = None,
         ner_package_dir: str | os.PathLike[str] | None = None,
-        executor: InferenceExecutor | None = None,
+        executor: InferenceExecutor | NerWorkerPool | None = None,
         ner_worker: Callable[..., Any] | None = None,
         ner_timeout: float = DEFAULT_NER_TIMEOUT,
         window_length: int = DEFAULT_WINDOW_LENGTH,
         stride: int = DEFAULT_STRIDE,
         quick_screen: QuickScreenConfig | None = None,
+        ner_max_workers: int = 1,
+        ner_max_pending: int = 4,
+        ner_max_tasks_per_worker: int = 256,
+        ner_intra_op_threads: int | None = None,
     ) -> None:
         if recognizers is None:
             active = default_recognizers()
@@ -200,7 +215,17 @@ class DetectionOrchestrator:
         self._dictionary = dictionary
         self._ner_package_dir = os.fspath(ner_package_dir) if ner_package_dir is not None else None
         self._owns_executor = executor is None
-        self._executor = executor if executor is not None else InferenceExecutor()
+        if executor is not None:
+            self._executor = executor
+        elif ner_package_dir is not None and ner_worker is None:
+            self._executor = NerWorkerPool(os.fspath(ner_package_dir), max_workers=ner_max_workers,
+                max_pending=ner_max_pending, max_tasks_per_worker=ner_max_tasks_per_worker,
+                window_length=window_length, stride=stride, intra_op_threads=ner_intra_op_threads)
+        else:
+            self._executor = InferenceExecutor(max_workers=ner_max_workers, max_pending=ner_max_pending)
+        if isinstance(self._executor, NerWorkerPool) and ner_worker is not None:
+            raise TypeError('custom ner_worker requires the single-use executor')
+        self._ner_intra_op_threads = ner_intra_op_threads
         self._ner_worker = ner_worker if ner_worker is not None else _ner_worker
         self._ner_timeout = float(ner_timeout)
         self._window_length = window_length
@@ -219,7 +244,8 @@ class DetectionOrchestrator:
     def detect(self, text: str) -> DetectionOutcome:
         return self.detect_many((text,))[0]
 
-    def detect_many(self, texts: tuple[str, ...], *, deadline_at: float | None = None, cancel=None) -> tuple[DetectionOutcome, ...]:
+    def detect_many(self, texts: tuple[str, ...], *, deadline_at: float | None = None, cancel=None,
+                    metrics: dict[str, float] | None = None) -> tuple[DetectionOutcome, ...]:
         if any(not isinstance(text,str) for text in texts):
             raise SafetyError(SafetyCode.INVALID_TEXT)
         if not self._recognizers: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'rule')
@@ -229,8 +255,23 @@ class DetectionOrchestrator:
         if timeout <= 0 or (cancel is not None and cancel.is_set()):
             raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
         try:
-            if self._ner_worker is _ner_worker:
-                ner_results = self._executor.submit(_ner_batch_worker, self._ner_package_dir, texts, self._window_length, self._stride, timeout=timeout, cancel=cancel)
+            if isinstance(self._executor, NerWorkerPool):
+                result = self._executor.infer_profiled(texts, timeout=timeout, cancel=cancel, profile=metrics is not None)
+                ner_results = result.results
+                if metrics is not None:
+                    metrics.update(result.metrics)
+            elif self._ner_worker is _ner_worker:
+                started = time.monotonic()
+                result = self._executor.submit(_ner_batch_worker, self._ner_package_dir, texts,
+                    self._window_length, self._stride, timeout=timeout, cancel=cancel,
+                    profile=metrics is not None, intra_op_threads=self._ner_intra_op_threads)
+                if metrics is None:
+                    ner_results = result
+                else:
+                    ner_results = result.results
+                    metrics.update(result.metrics)
+                    metrics['queue_and_worker_startup_ms'] = (metrics.pop('worker_entry_at') - started) * 1000
+                    metrics['total_ms'] = (time.monotonic() - started) * 1000
             else:
                 ner_results = []
                 for text in texts:
@@ -241,9 +282,9 @@ class DetectionOrchestrator:
             ner_results = None
         if ner_results is None:
             raise SafetyError(SafetyCode.DETECTION_FAILED,'ner') from None
-        return tuple(self._detect_with_ner(text, result) for text, result in zip(texts, ner_results, strict=True))
+        return tuple(self._detect_with_ner(text, result, metrics=metrics) for text, result in zip(texts, ner_results, strict=True))
 
-    def _detect_with_ner(self, text: str, ner_result) -> DetectionOutcome:
+    def _detect_with_ner(self, text: str, ner_result, *, metrics: dict[str, float] | None = None) -> DetectionOutcome:
         """执行三路必需检测并合并；任何一路失败 → 整请求 ``SafetyError``。
 
         执行顺序固定：规则 → 词典 → NER → 合并。错误优先级确定性：
@@ -259,6 +300,7 @@ class DetectionOrchestrator:
         if self._ner_package_dir is None:
             raise SafetyError(SafetyCode.DETECTION_INCOMPLETE, "ner")
         candidates: list[DetectionCandidate] = []
+        started = time.perf_counter() if metrics is not None else 0.0
         for recognizer in self._recognizers:
             source = f"rule:{recognizer.name}"
             rule_failed = False
@@ -273,6 +315,9 @@ class DetectionOrchestrator:
                 # __cause__/__context__ 链，公开消息只含静态路名。
                 raise SafetyError(SafetyCode.DETECTION_FAILED, "rule") from None
             candidates.extend(candidate_from(span, source=source) for span in spans)
+        if metrics is not None:
+            metrics['rules_ms'] = metrics.get('rules_ms', 0.0) + (time.perf_counter() - started) * 1000
+            started = time.perf_counter()
         dict_failed = False
         try:
             detection = analyze_dictionary(text, self._dictionary)
@@ -283,12 +328,17 @@ class DetectionOrchestrator:
         if dict_failed:
             raise SafetyError(SafetyCode.DETECTION_FAILED, "dictionary") from None
         candidates.extend(candidate_from(span, source="dict") for span in detection.spans)
+        if metrics is not None:
+            metrics['dictionary_ms'] = metrics.get('dictionary_ms', 0.0) + (time.perf_counter() - started) * 1000
+            started = time.perf_counter()
         try:
             ner_spans, (artifact, created_utc, model_sha256) = ner_result
         except (TypeError, ValueError):
             raise SafetyError(SafetyCode.DETECTION_FAILED, "ner") from None
         candidates.extend(candidate_from(span, source="ner") for span in ner_spans)
         resolved = resolve_spans(candidates, text_length=len(text))
+        if metrics is not None:
+            metrics['span_resolve_ms'] = metrics.get('span_resolve_ms', 0.0) + (time.perf_counter() - started) * 1000
         return DetectionOutcome(
             spans=resolved,
             dictionary_version=detection.dictionary_version,

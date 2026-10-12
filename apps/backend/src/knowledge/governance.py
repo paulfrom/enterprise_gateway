@@ -32,6 +32,13 @@ from psycopg.rows import dict_row
 
 from detection.dictionary import DictionaryEntry, compute_dictionary_hash
 from knowledge.knowledge import Evidence, KnowledgeError, TrustedActor
+from knowledge.spg import (
+    EntityAliasManager,
+    MutualExclusionEngine,
+    PredicateSchema,
+    SchemaGuard,
+    SchemaGuardViolation,
+)
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -62,12 +69,15 @@ SOURCE_EXPIRED_REASON = 'SOURCE_EXPIRED'
 SOURCE_WITHDRAWN_REASON = 'SOURCE_WITHDRAWN'
 PUBLICATION_REVOKED = 'PUBLICATION_REVOKED'
 EVIDENCE_UNAVAILABLE = 'EVIDENCE_UNAVAILABLE'
+FACT_DISPUTED = 'FACT_DISPUTED'
+SCHEMA_VIOLATION = 'SCHEMA_VIOLATION'
 
 # Availability vocabularies.
 GOVERNANCE_STATUS_UNCONFIRMED = 'unconfirmed'
 GOVERNANCE_STATUS_PUBLISHABLE = 'publishable'
 GOVERNANCE_STATUS_REJECTED = 'rejected'
 GOVERNANCE_STATUS_SUPERSEDED = 'superseded'
+GOVERNANCE_STATUS_DISPUTED = 'disputed'
 ELIGIBILITY_ELIGIBLE = 'eligible'
 ELIGIBILITY_INELIGIBLE = 'ineligible'
 ELIGIBILITY_NOT_EVALUATED = 'not_evaluated'
@@ -94,6 +104,8 @@ _BLOCKING_ORDER = (
     PUBLICATION_REVOKED,
     AUDIENCE_DENIED,
     PURPOSE_DENIED,
+    FACT_DISPUTED,
+    SCHEMA_VIOLATION,
 )
 
 
@@ -161,9 +173,11 @@ def merge_blocking_reasons(reasons: Iterable[str]) -> tuple[str, ...]:
 
 def governance_status_label(candidate_state: str, live_publication: bool,
                             tombstoned_publication: bool) -> str:
-    """Design §3.2 governance dimension: 未确认/可发布/拒绝/已替代."""
+    """Design §3.2 governance dimension: 未确认/可发布/拒绝/已替代/争议."""
     if candidate_state == 'rejected':
         return GOVERNANCE_STATUS_REJECTED
+    if candidate_state == 'disputed':
+        return GOVERNANCE_STATUS_DISPUTED
     if live_publication:
         return GOVERNANCE_STATUS_PUBLISHABLE
     if tombstoned_publication:
@@ -269,6 +283,21 @@ class KnowledgeGovernanceService:
         self._domain = domain
         self._storage = storage
         self._state_counter = itertools.count(1)
+        self._schema_guard = SchemaGuard()
+        self._mutual_exclusion_engine = MutualExclusionEngine(self._schema_guard)
+        self._alias_manager = EntityAliasManager()
+
+    @property
+    def schema_guard(self) -> SchemaGuard:
+        return self._schema_guard
+
+    @property
+    def mutual_exclusion_engine(self) -> MutualExclusionEngine:
+        return self._mutual_exclusion_engine
+
+    @property
+    def alias_manager(self) -> EntityAliasManager:
+        return self._alias_manager
 
     # ------------------------------------------------------------------
     # Shared guards and transaction helpers
@@ -714,8 +743,14 @@ class KnowledgeGovernanceService:
             raise GovernanceError(CANDIDATE_VERSION_CONFLICT,
                                   f'candidate state {candidate[1]} cannot be published')
         claim = conn.execute(
-            "SELECT modality,predicate FROM knowledge_claims WHERE claim_id=%s",
-            (candidate[2],)).fetchone()
+            "SELECT k.modality, k.predicate, k.polarity, k.subject_id, k.object_id, "
+            "       s.entity_type AS subject_type, s.name AS subject_name, "
+            "       o.entity_type AS object_type, o.name AS object_name "
+            " FROM knowledge_claims k "
+            " JOIN knowledge_entities s ON (s.tenant_id,s.domain,s.entity_id)=(k.tenant_id,k.domain,k.subject_id) "
+            " JOIN knowledge_entities o ON (o.tenant_id,o.domain,o.entity_id)=(k.tenant_id,k.domain,k.object_id) "
+            " WHERE (k.tenant_id,k.domain,k.claim_id)=(%s,%s,%s)",
+            (self._tenant_id, self._domain, candidate[2])).fetchone()
         if claim is None:
             raise GovernanceError(PUBLISH_REJECTED, 'candidate claim is missing',
                                   blocking_reasons=(EVIDENCE_UNAVAILABLE,))
@@ -723,6 +758,31 @@ class KnowledgeGovernanceService:
             raise GovernanceError(PUBLISH_REJECTED,
                                   'only asserted business facts publish',
                                   blocking_reasons=(EVIDENCE_UNAVAILABLE,))
+
+        # SPG SchemaGuard validation: Domain & Range type checking
+        ok, reason = self._schema_guard.validate_types(claim[5], claim[1], claim[7])
+        if not ok:
+            raise GovernanceError(PUBLISH_REJECTED,
+                                  f'SPG SchemaGuard blocked illegal triple: {reason}',
+                                  blocking_reasons=(SCHEMA_VIOLATION,))
+
+        # SPG Mutual exclusion: check if conflicting opposing polarity exists in same scope
+        opposing_polarity = 'negative' if claim[2] == 'positive' else 'positive'
+        conflict = conn.execute(
+            "SELECT 1 FROM knowledge_claims k "
+            " JOIN knowledge_candidates c ON (c.tenant_id,c.domain,c.claim_id)=(k.tenant_id,k.domain,k.claim_id) "
+            " WHERE (k.tenant_id,k.domain,k.subject_id,k.predicate,k.object_id)=(%s,%s,%s,%s,%s) "
+            "   AND k.polarity=%s AND c.state IN ('proposed', 'published', 'disputed')",
+            (self._tenant_id, self._domain, claim[3], claim[1], claim[4], opposing_polarity)).fetchone()
+        if conflict is not None:
+            # Mark candidate as disputed in the candidate table to isolate dispute
+            conn.execute(
+                "UPDATE knowledge_candidates SET state='disputed', rejection_reason='positive/negative mutual exclusion' "
+                " WHERE (tenant_id,domain,candidate_id)=(%s,%s,%s)",
+                (self._tenant_id, self._domain, candidate_uuid))
+            raise GovernanceError(PUBLISH_REJECTED,
+                                  'mutual exclusion conflict: opposing claim exists for subject and object',
+                                  blocking_reasons=(FACT_DISPUTED,))
         with conn.cursor(row_factory=dict_row) as cur:
             sources = cur.execute(
                 "SELECT DISTINCT s.source_id,s.version,s.withdrawn,s.retention_until,s.source_kind"

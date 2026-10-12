@@ -38,6 +38,7 @@ wiring-time configuration and fail with plain ``ValueError``.
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -103,6 +104,31 @@ def plan_windows(
     if starts[-1] != last_start:
         starts.append(last_start)
     return tuple((start, start + capacity) for start in starts)
+
+
+def plan_sentence_windows(text, offsets, capacity, stride):
+    """Cut at token boundaries near sentence/line ends, retaining overlap."""
+    if len(offsets) <= capacity:
+        return plan_windows(len(offsets), capacity, stride)
+    overlap = capacity - stride
+    windows = []
+    start = 0
+    while start < len(offsets):
+        end = min(start + capacity, len(offsets))
+        if end < len(offsets):
+            minimum = max(start + capacity // 2, start + overlap + max(1, stride // 2))
+            for breaks in ('\n\r', '。；;！!？?'):
+                candidates = [index + 1 for index in range(minimum, end)
+                              if offsets[index][1] > offsets[index][0]
+                              and text[offsets[index][1] - 1] in breaks]
+                if candidates:
+                    end = candidates[-1]
+                    break
+        windows.append((start, end))
+        if end == len(offsets):
+            break
+        start = max(start + 1, end - overlap)
+    return tuple(windows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,9 +202,14 @@ class NerWindowMerger:
         *,
         window_length: int = DEFAULT_WINDOW_LENGTH,
         stride: int = DEFAULT_STRIDE,
+        batch_tokens: int = 4096,
+        sentence_boundaries: bool = False,
     ) -> None:
         window_length = _checked_int(window_length, "window_length")
         stride = _checked_int(stride, "stride")
+        batch_tokens = _checked_int(batch_tokens, "batch_tokens")
+        if batch_tokens < window_length or type(sentence_boundaries) is not bool:
+            raise ValueError('invalid batch/window options')
         capacity = window_length - 2
         if capacity < 1:
             raise ValueError("window_length must leave room for content tokens")
@@ -217,39 +248,77 @@ class NerWindowMerger:
         self._capacity = capacity
         self._stride = stride
         self._num_labels = len(labels)
+        self._batch_tokens = batch_tokens
+        self._sentence_boundaries = sentence_boundaries
 
-    def extract(self, text: str) -> tuple[EntitySpan, ...]:
+    def extract(self, text: str, *, metrics: dict[str, float] | None = None) -> tuple[EntitySpan, ...]:
         """Recover entity spans for ``text``; block on any ambiguity.
 
         Returns the deterministic tuple of spans sorted by
         ``(start, end, entity_type)``; ``text[start:end]`` is the exact
         original mention surface.
         """
-        if not isinstance(text, str):
-            raise ValueError("text must be a string")
-        if text == "":
-            return ()
-        encoding = self._tokenizer.encode(text, add_special_tokens=False)
-        ids = list(encoding.ids)
-        offsets = self._validated_offsets(encoding.offsets, len(ids), text)
-        token_count = len(offsets)
-        windows = plan_windows(token_count, self._capacity, self._stride)
-        occurrences: list[_WindowSpan] = []
-        for start in range(0, len(windows), _INFERENCE_BATCH_SIZE):
-            occurrences.extend(
-                self._infer_batch(
-                    ids, offsets, windows[start : start + _INFERENCE_BATCH_SIZE]
-                )
-            )
-        envelopes = self._union_envelopes(occurrences)
-        spans = tuple(
-            EntitySpan(start=start, end=end, entity_type=entity_type)
-            for entity_type, start, end in envelopes
-        )
-        for span in spans:
-            if not 0 <= span.start < span.end <= len(text):
-                _fail("span_out_of_range")
-        return spans
+        return self.extract_many((text,), metrics=metrics)[0]
+
+    def extract_many(self, texts, *, metrics=None):
+        """Encode once per fragment and batch windows across fragment boundaries.
+
+        Length buckets reduce padding. Results are scattered back to the exact
+        original fragment; no text/logits/offsets survive this call.
+        """
+        started = time.perf_counter() if metrics is not None else 0.0
+        encoded = []
+        rows = []
+        token_count = 0
+        for index, text in enumerate(texts):
+            if not isinstance(text, str):
+                raise ValueError('text must be a string')
+            if text == '':
+                encoded.append(([], []))
+                continue
+            encoding = self._tokenizer.encode(text, add_special_tokens=False)
+            ids = list(encoding.ids)
+            offsets = self._validated_offsets(encoding.offsets, len(ids), text)
+            encoded.append((ids, offsets))
+            token_count += len(ids)
+            windows = (plan_sentence_windows(text, offsets, self._capacity, self._stride)
+                       if self._sentence_boundaries else plan_windows(len(ids), self._capacity, self._stride))
+            rows.extend((index, begin, end) for begin, end in windows)
+        rows.sort(key=lambda row: (row[2] - row[1], row[0], row[1]))
+        if metrics is not None:
+            metrics["tokenize_window_ms"] = metrics.get("tokenize_window_ms", 0.0) + (time.perf_counter() - started) * 1000
+            metrics["token_count"] = metrics.get("token_count", 0) + token_count
+            metrics["window_count"] = metrics.get("window_count", 0) + len(rows)
+            metrics['content_tokens_processed'] = metrics.get('content_tokens_processed', 0) + sum(end - begin for _, begin, end in rows)
+        occurrences = [[] for _ in texts]
+        cursor = 0
+        while cursor < len(rows):
+            stop = cursor
+            width = 0
+            while stop < len(rows) and stop - cursor < _INFERENCE_BATCH_SIZE:
+                next_width = rows[stop][2] - rows[stop][1] + 2
+                width = max(width, next_width)
+                if (stop - cursor + 1) * width > self._batch_tokens:
+                    break
+                stop += 1
+            selected = rows[cursor:stop]
+            batches = self._infer_rows([(encoded[index][0], encoded[index][1], begin, end)
+                                       for index, begin, end in selected], metrics=metrics)
+            for (index, _, _), sightings in zip(selected, batches, strict=True):
+                occurrences[index].extend(sightings)
+            cursor = stop
+        started = time.perf_counter() if metrics is not None else 0.0
+        results = []
+        for text, sightings in zip(texts, occurrences, strict=True):
+            spans = tuple(EntitySpan(start=start, end=end, entity_type=kind)
+                          for kind, start, end in self._union_envelopes(sightings))
+            for span in spans:
+                if not 0 <= span.start < span.end <= len(text):
+                    _fail('span_out_of_range')
+            results.append(spans)
+        if metrics is not None:
+            metrics["decode_ms"] = metrics.get("decode_ms", 0.0) + (time.perf_counter() - started) * 1000
+        return tuple(results)
 
     def _validated_offsets(
         self, raw_offsets: Any, token_count: int, text: str
@@ -295,6 +364,7 @@ class NerWindowMerger:
         ids: list[int],
         offsets: list[tuple[int, int]],
         windows: tuple[tuple[int, int], ...],
+        *, metrics: dict[str, float] | None = None,
     ) -> list[_WindowSpan]:
         """Run one batched ONNX call for a chunk of windows.
 
@@ -302,9 +372,14 @@ class NerWindowMerger:
         each window's real positions produce exactly the logits an isolated
         call would; only the decode loop consumes them, per window.
         """
+        return [span for row in self._infer_rows([(ids, offsets, begin, end)
+                for begin, end in windows], metrics=metrics) for span in row]
+
+    def _infer_rows(self, rows, *, metrics=None):
+        started = time.perf_counter() if metrics is not None else 0.0
         sequences = [
             [self._cls_id, *ids[win_start:win_end], self._sep_id]
-            for win_start, win_end in windows
+            for ids, _, win_start, win_end in rows
         ]
         width = max(len(sequence) for sequence in sequences)
         batch = np.full((len(sequences), width), self._sep_id, dtype=np.int64)
@@ -313,15 +388,24 @@ class NerWindowMerger:
             batch[row, : len(sequence)] = sequence
             mask[row, : len(sequence)] = 1
         feed = {_ONNX_INPUT_IDS: batch, _ONNX_ATTENTION_MASK: mask}
+        if metrics is not None:
+            metrics["batch_prepare_ms"] = metrics.get("batch_prepare_ms", 0.0) + (time.perf_counter() - started) * 1000
+            started = time.perf_counter()
         logits = np.asarray(self._session.run([_ONNX_LOGITS], feed)[0])
+        if metrics is not None:
+            metrics["onnx_ms"] = metrics.get("onnx_ms", 0.0) + (time.perf_counter() - started) * 1000
+            metrics["onnx_calls"] = metrics.get("onnx_calls", 0) + 1
+            started = time.perf_counter()
         if logits.shape != (len(sequences), width, self._num_labels):
             _fail("logits_shape_mismatch")
-        spans: list[_WindowSpan] = []
-        for row, (win_start, win_end) in enumerate(windows):
+        spans = []
+        for row, (_, offsets, win_start, win_end) in enumerate(rows):
             win_len = win_end - win_start
             label_ids = np.argmax(logits[row], axis=-1)[1 : 1 + win_len]
             labels = [self._id2label[int(label_id)] for label_id in label_ids]
-            spans.extend(_decode_window_spans(offsets[win_start:win_end], labels))
+            spans.append(_decode_window_spans(offsets[win_start:win_end], labels))
+        if metrics is not None:
+            metrics["decode_ms"] = metrics.get("decode_ms", 0.0) + (time.perf_counter() - started) * 1000
         return spans
 
     @staticmethod

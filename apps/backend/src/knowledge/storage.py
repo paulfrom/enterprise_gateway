@@ -667,6 +667,96 @@ class PostgresKnowledgeStorage:
                 ),
             )
 
+    def ensure_alias_table(self, conn: psycopg.Connection) -> None:
+        """Ensure entity_aliases table exists for alias chain persistence."""
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_aliases (
+                    tenant_id TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    alias_name TEXT NOT NULL,
+                    canonical_name TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    canonical_id UUID NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (tenant_id, domain, alias_name)
+                );
+                """
+            )
+
+    def save_entity_alias(
+        self,
+        conn: psycopg.Connection,
+        tenant_id: str,
+        domain: str,
+        alias_name: str,
+        canonical_name: str,
+        entity_type: str,
+        canonical_id: UUID,
+    ) -> None:
+        """Persist an entity alias to canonical mapping."""
+        self.ensure_alias_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_aliases (
+                    tenant_id, domain, alias_name, canonical_name, entity_type, canonical_id
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tenant_id, domain, alias_name)
+                DO UPDATE SET canonical_name=EXCLUDED.canonical_name,
+                              entity_type=EXCLUDED.entity_type,
+                              canonical_id=EXCLUDED.canonical_id
+                """,
+                (tenant_id, domain, alias_name, canonical_name, entity_type, canonical_id),
+            )
+
+    def get_entity_alias(
+        self, conn: psycopg.Connection, tenant_id: str, domain: str, alias_name: str
+    ) -> dict[str, Any] | None:
+        """Fetch a single entity alias mapping if present."""
+        self.ensure_alias_table(conn)
+        with conn.cursor(row_factory=dict_row) as cur:
+            return cur.execute(
+                """
+                SELECT tenant_id, domain, alias_name, canonical_name, entity_type, canonical_id, created_at
+                FROM entity_aliases
+                WHERE tenant_id=%s AND domain=%s AND alias_name=%s
+                """,
+                (tenant_id, domain, alias_name),
+            ).fetchone()
+
+    def list_entity_aliases(
+        self, conn: psycopg.Connection, tenant_id: str, domain: str
+    ) -> list[dict[str, Any]]:
+        """List all entity alias mappings in a scope."""
+        self.ensure_alias_table(conn)
+        with conn.cursor(row_factory=dict_row) as cur:
+            return cur.execute(
+                """
+                SELECT tenant_id, domain, alias_name, canonical_name, entity_type, canonical_id, created_at
+                FROM entity_aliases
+                WHERE tenant_id=%s AND domain=%s
+                ORDER BY alias_name
+                """,
+                (tenant_id, domain),
+            ).fetchall()
+
+    def delete_entity_alias(
+        self, conn: psycopg.Connection, tenant_id: str, domain: str, alias_name: str
+    ) -> bool:
+        """Delete an entity alias mapping."""
+        self.ensure_alias_table(conn)
+        with conn.cursor() as cur:
+            res = cur.execute(
+                """
+                DELETE FROM entity_aliases
+                WHERE tenant_id=%s AND domain=%s AND alias_name=%s
+                """,
+                (tenant_id, domain, alias_name),
+            )
+            return res.rowcount > 0
+
     def save_evidence(self, conn: psycopg.Connection, evidence: Evidence) -> UUID:
         """Persist an evidence span linked to a source."""
         # Ensure parent source exists

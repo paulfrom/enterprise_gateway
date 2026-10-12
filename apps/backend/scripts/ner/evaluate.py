@@ -99,8 +99,8 @@ def per_type_metrics(
     for etype in types:
         tp = fp = fn = 0
         for sample_id in gold:
-            g = {s for t, s, e in gold[sample_id] if t == etype}
-            p = {s for t, s, e in pred[sample_id] if t == etype}
+            g = {(s, e) for t, s, e in gold[sample_id] if t == etype}
+            p = {(s, e) for t, s, e in pred[sample_id] if t == etype}
             tp += len(g & p)
             fp += len(p - g)
             fn += len(g - p)

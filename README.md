@@ -17,6 +17,8 @@ NER 前默认启用本地快速风险筛选，无模型推理、网络请求或�
 
 请求期间检测故障默认报错。设置 `GATEWAY_DETECTION_FAILURE_MODE=passthrough` 可在检测器故障或检测超时时透传未脱敏文本，并记录仅含错误码的 `DETECTION_FAILURE_PASSTHROUGH` 日志；默认值为 `error`。该开关只作用于检测阶段，不改变鉴权、请求总超时、持久化失败或已检测到高敏秘密时的处理。
 
+NER 默认使用有界常驻工作进程：一个执行槽、四个等待任务，每个工作进程复用 tokenizer 与 ONNX Session。首次任务按需初始化，排队和初始化消耗原任务预算；运行中超时或取消先终止并确认进程退出，再允许替代进程执行任务。每个进程默认完成 256 个任务后回收。模型包文件仍逐任务校验内容哈希，模型更新需重新装配；恢复映射保持请求内隔离。合成业务样本与单次进程/常驻进程性能对照工具见 [NER 评测契约](docs/contracts/ner-evaluation.md)，真实样本和运行报告存放在仓库外。
+
 SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，此前只发送固定保活。原始及恢复后响应各有8MiB预算，工具参数恢复后每调用64KiB、全请求256KiB。该模式的首业务内容等待时间需要实际客户端联调；Claude 签名历史须通过供应商验证并携带域及版本绑定的网关 receipt。
 
 ---
@@ -141,6 +143,10 @@ DeepSeek响应恢复支持普通 `content`、`reasoning_content`、`reasoning_de
 | `GATEWAY_POLICY_FILE` | 符合 `ClassificationPolicy` schema 的受信政策 JSON |
 | `GATEWAY_NER_PACKAGE_DIR` | 已核验完整本地 ONNX 模型包 |
 | `GATEWAY_NER_TIMEOUT_SECONDS` | 可选的 NER 单次检测时间预算（秒），代码默认 30，Compose 部署默认 120；大文本 CPU 推理需按硬件调整，仍受请求总超时约束 |
+| `GATEWAY_NER_MAX_WORKERS` | 常驻 NER 执行槽数，默认 `1`，必须为正整数；各 HTTP 应用进程分别拥有自己的池 |
+| `GATEWAY_NER_MAX_PENDING` | 等待任务上限，默认 `4`；`0` 允许使用空闲槽并立即拒绝需排队的任务 |
+| `GATEWAY_NER_MAX_TASKS_PER_WORKER` | 单个工作进程成功任务上限，默认 `256`，达到后确认退出，后续任务重新初始化 |
+| `GATEWAY_NER_INTRA_OP_THREADS` | 可选的每会话 ORT 算子内线程数，必须为正整数；未设置使用 ONNX 默认值，须与执行槽数联合评测 |
 | `GATEWAY_EVIDENCE_BUCKET` | 受控原始请求证据留存桶 |
 | `PROVIDERS_CONFIG` 或 `--config` | 路由文件，默认 `config/providers.json` |
 | `GATEWAY_CLASSIFIER` 或 `--classifier` | 运维批准的同步 Python `module:callable`，接收请求 bytes 并返回政策分类；未配置保持拒绝 |

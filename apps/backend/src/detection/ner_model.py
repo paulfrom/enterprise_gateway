@@ -63,6 +63,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
@@ -277,10 +278,15 @@ def _validate_tokenizer(tokenizer_path: Path) -> Tokenizer:
     return tokenizer
 
 
-def _validate_onnx(onnx_path: Path) -> ort.InferenceSession:
+def _validate_onnx(onnx_path: Path, *, intra_op_threads: int | None = None) -> ort.InferenceSession:
+    options = ort.SessionOptions()
+    if intra_op_threads is not None:
+        if type(intra_op_threads) is not int or intra_op_threads < 1:
+            raise ValueError("intra_op_threads must be a positive int")
+        options.intra_op_num_threads = intra_op_threads
     load_failed = False
     try:
-        session = ort.InferenceSession(str(onnx_path), providers=ONNX_PROVIDERS)
+        session = ort.InferenceSession(str(onnx_path), sess_options=options, providers=ONNX_PROVIDERS)
     except Exception:
         load_failed = True
     if load_failed:
@@ -303,6 +309,7 @@ class LoadedNerPackage:
     id2label: dict[int, str]
     tokenizer: Tokenizer
     session: ort.InferenceSession
+    snapshot: Any = None
 
     @property
     def entity_types(self) -> frozenset[str]:
@@ -311,9 +318,40 @@ class LoadedNerPackage:
         )
 
 
-def load_model_package(package_dir: str | Path) -> LoadedNerPackage:
+def model_manifest_digest(package_dir: str | Path) -> str:
+    """Identify the complete declared artifact, including its provenance."""
+    try:
+        payload = (Path(package_dir) / "manifest.json").read_bytes()
+    except OSError:
+        raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_unreadable") from None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verify_loaded_package(package: LoadedNerPackage, expected_digest: str) -> None:
+    """Keep per-task integrity checks while reusing native model resources.
+
+    A pool is pinned to one manifest. Changed payloads are rejected even if
+    their file sizes and mtimes were preserved; a new release needs a new pool.
+    """
+    if package.snapshot is not None:
+        if package.snapshot.digest != expected_digest:
+            raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
+        package.snapshot.validate()
+        return
+    if model_manifest_digest(package.package_dir) != expected_digest:
+        raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
+    _verify_file_hashes(package.package_dir, package.manifest)
+    if model_manifest_digest(package.package_dir) != expected_digest:
+        raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
+
+
+def load_model_package(
+    package_dir: str | Path, *, timings: dict[str, float] | None = None,
+    intra_op_threads: int | None = None,
+) -> LoadedNerPackage:
     """Verify and load a NER model package; fail closed on any deviation."""
     directory = Path(package_dir)
+    started = time.perf_counter()
     if not directory.is_dir():
         raise SafetyError(SafetyCode.NER_MODEL_INVALID, "package_dir_missing")
 
@@ -334,8 +372,16 @@ def load_model_package(package_dir: str | Path) -> LoadedNerPackage:
     if license_failed:
         raise SafetyError(SafetyCode.NER_MODEL_INVALID, "license_attestation_invalid")
 
+    if timings is not None:
+        timings["package_verify_ms"] = (time.perf_counter() - started) * 1000
+    started = time.perf_counter()
     tokenizer = _validate_tokenizer(directory / "tokenizer.json")
-    session = _validate_onnx(directory / "model.onnx")
+    if timings is not None:
+        timings["tokenizer_load_ms"] = (time.perf_counter() - started) * 1000
+    started = time.perf_counter()
+    session = _validate_onnx(directory / "model.onnx", intra_op_threads=intra_op_threads)
+    if timings is not None:
+        timings["session_load_ms"] = (time.perf_counter() - started) * 1000
     return LoadedNerPackage(
         package_dir=directory,
         manifest=manifest,

@@ -222,6 +222,10 @@ class ProtectedPipeline:
         ner_dir = self.detector._ner_package_dir
         if dictionary is None or ner_dir is None:
             raise SafetyError(SafetyCode.DETECTION_INCOMPLETE)
+        fingerprint = getattr(self.detector._executor, 'artifact_fingerprint', None)
+        ner_files = (fingerprint() if fingerprint is not None else
+                     {str(p.relative_to(ner_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in sorted(Path(ner_dir).rglob('*')) if p.is_file()})
         binding = asdict(self.egress_client.binding)
         binding['allowed_addresses'] = sorted(binding['allowed_addresses'])
         validator=self.history_adapter.validator if self.history_adapter is not None else None
@@ -232,7 +236,7 @@ class ProtectedPipeline:
             'policy': canonical(self.policy.model_dump(mode='json')),
             'rules': canonical({'quick_screen': asdict(self.detector._risk_screener.config) if self.detector._risk_screener is not None else None})+modules('detection')+canonical([{'class':type(r).__module__+'.'+type(r).__qualname__,'definition':r.to_dict(),'policy':vars(r).get('_policy'),'today':vars(r).get('_today'),'strict':vars(r).get('_strict'),'flags':r.global_regex_flags} for r in self.detector._recognizers]),
             'dictionary': (root/'detection/dictionary.py').read_bytes()+canonical({'domain':dictionary.domain,'version':dictionary.version,'entries':[e.model_dump() for e in dictionary.entries]}),
-            'ner': canonical({str(p.relative_to(ner_dir)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(ner_dir).rglob('*')) if p.is_file()})+canonical({'timeout':self.detector._ner_timeout,'window':self.detector._window_length,'stride':self.detector._stride,'max_workers':self.detector._executor._max_workers,'max_pending':self.detector._executor._max_pending})+marshal.dumps(self.detector._ner_worker.__code__),
+            'ner': canonical(ner_files)+canonical({'timeout':self.detector._ner_timeout,'window':self.detector._window_length,'stride':self.detector._stride,'max_workers':self.detector._executor._max_workers,'max_pending':self.detector._executor._max_pending,'worker_mode':type(self.detector._executor).__name__,'max_tasks_per_worker':getattr(self.detector._executor,'_max_tasks_per_worker',None),'intra_op_threads':getattr(self.detector._executor,'_intra_op_threads',getattr(self.detector,'_ner_intra_op_threads',None)), 'runtime_options':getattr(self.detector._executor,'_runtime_options',None),'max_age_seconds':getattr(self.detector._executor,'_max_age_seconds',None),'max_rss_kib':getattr(self.detector._executor,'_max_rss_kib',None),'batch_wait_ms':getattr(self.detector._executor,'_batch_wait_ms',None),'max_batch_jobs':getattr(self.detector._executor,'_max_batch_jobs',None),'max_batch_chars':getattr(self.detector._executor,'_max_batch_chars',None)})+marshal.dumps(self.detector._ner_worker.__code__),
             'mapping': modules('masking'),
             'protocol': modules('protocol','gateway')+canonical({'exemptions':self.exemption_registry.model_dump(mode='json') if self.exemption_registry is not None else None,'history_trust':history_trust}),
             'audit': modules('audit','infra','knowledge','request_history')+canonical({'bucket':self.evidence_bucket,'intent':str(self.evidence_gate._intent_directory),'evidence':str(self.evidence_gate._evidence_directory),'watermark':asdict(self.watermark_guard._policy),'spool':str(self.spool_writer._directory) if self.spool_writer else None}),
