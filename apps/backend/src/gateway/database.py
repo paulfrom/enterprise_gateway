@@ -8,7 +8,8 @@ from psycopg.conninfo import make_conninfo
 from knowledge.database_security import assert_no_privilege_path, assert_restricted_application_role
 from knowledge.storage import (
     SCHEMA_SQL as KNOWLEDGE_SQL, RLS_SETUP_SQL as KNOWLEDGE_RLS,
-    _ASSET_TABLES, _ADMIN_TABLES, SCHEMA_FINGERPRINT_V2, compute_schema_fingerprint,
+    _ASSET_TABLES, _ADMIN_TABLES, SCHEMA_FINGERPRINT_V2, SCHEMA_FINGERPRINT_V3,
+    ALIAS_SCHEMA_SQL, ALIAS_RLS_SQL, KnowledgeSchemaError, compute_schema_fingerprint,
 )
 from request_history.database import (
     SCHEMA_SQL as HISTORY_SQL, RLS_SETUP_SQL as HISTORY_RLS,
@@ -65,7 +66,7 @@ def prepare_database(config: dict[str, str]) -> dict[str, str]:
                               'read_authorized_knowledge_candidate(UUID)'):
                 owner.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.' + signature + ' TO {}').format(
                     sql.Identifier(schema), sql.Identifier(role)))
-        if compute_schema_fingerprint(owner, admin_role=roles[2]) != SCHEMA_FINGERPRINT_V2:
+        if compute_schema_fingerprint(owner, admin_role=roles[2]) != SCHEMA_FINGERPRINT_V3:
             raise ValueError('knowledge_schema_incompatible')
         history_rows = owner.execute(
             "SELECT relname,relrowsecurity,relforcerowsecurity,relkind FROM pg_class "
@@ -90,3 +91,32 @@ def prepare_database(config: dict[str, str]) -> dict[str, str]:
     with psycopg.connect(bound['history_dsn']) as app:
         assert_history_connection(app, expected_schema=schema, expected_role=roles[1])
     return bound
+
+
+def migrate_knowledge_aliases(config: dict[str, str]) -> dict:
+    """Explicit, additive v2-to-v3 migration; refuse any unrecognized schema drift."""
+    schema = config['schema']
+    validate_namespace(schema)
+    admin_role = config['admin_role']
+    with psycopg.connect(make_conninfo(config['admin_dsn'], options='', connect_timeout=10)) as owner:
+        controlled = owner.execute('SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
+        if not controlled or not controlled[0]:
+            raise ValueError('controlled_ddl_owner_required')
+        owner.execute("SET LOCAL lock_timeout = '10s'")
+        owner.execute('SELECT pg_advisory_xact_lock(hashtext(%s), 3103)', (schema,))
+        if owner.execute('SELECT to_regnamespace(%s)', (schema,)).fetchone()[0] is None:
+            raise KnowledgeSchemaError('migration namespace is missing')
+        owner.execute(sql.SQL('SET LOCAL search_path TO {}').format(sql.Identifier(schema)))
+        actual = compute_schema_fingerprint(owner, admin_role=admin_role)
+        if actual == SCHEMA_FINGERPRINT_V3:
+            return {'schema_version': 3, 'changed': False}
+        if actual != SCHEMA_FINGERPRINT_V2:
+            raise KnowledgeSchemaError('migration requires the exact supported v2 schema')
+        owner.execute(ALIAS_SCHEMA_SQL)
+        owner.execute(ALIAS_RLS_SQL.replace('__ADMIN_ROLE__', sql.Literal(admin_role).as_string(owner)))
+        owner.execute(sql.SQL('GRANT SELECT,INSERT,UPDATE,DELETE ON {} TO {}, {}').format(
+            sql.Identifier(schema, 'entity_aliases'), sql.Identifier(config['application_role']),
+            sql.Identifier(admin_role)))
+        if compute_schema_fingerprint(owner, admin_role=admin_role) != SCHEMA_FINGERPRINT_V3:
+            raise KnowledgeSchemaError('migration produced an unexpected schema fingerprint')
+    return {'schema_version': 3, 'changed': True}

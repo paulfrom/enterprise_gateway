@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import re
@@ -27,6 +28,7 @@ import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from knowledge.graph_query import compile_governed_cypher
 from knowledge.knowledge import KnowledgeError, Predicate, Polarity, Modality
 
 logger = logging.getLogger(__name__)
@@ -169,8 +171,15 @@ class GraphQueryResult:
 class AgeGraphManager:
     """Controls AGE graph lifecycle, initialization, permissions, and raw Cypher execution."""
 
-    def __init__(self, dsn: str, graph_name: str = DEFAULT_GRAPH_NAME):
+    def __init__(self, dsn: str, graph_name: str | None = None):
         self.dsn = dsn
+        if graph_name is None:
+            with psycopg.connect(dsn) as conn:
+                database, namespace = conn.execute('SELECT current_database(), current_schema()').fetchone()
+            if not namespace:
+                raise KnowledgeError('Graph projection requires a bound SQL namespace')
+            digest = hashlib.sha256(json.dumps([database, namespace]).encode()).hexdigest()[:24]
+            graph_name = DEFAULT_GRAPH_NAME + '_' + digest
         self.graph_name = graph_name
 
     def _prepare_session(self, conn: psycopg.Connection) -> None:
@@ -192,6 +201,11 @@ class AgeGraphManager:
                 ).fetchone()
                 if not exists:
                     cur.execute(sql.SQL("SELECT create_graph(%s)"), (self.graph_name,))
+                for label, function in (('Entity', 'create_vlabel'), ('Claim', 'create_elabel')):
+                    relation = sql.Identifier(self.graph_name, label).as_string(conn)
+                    if cur.execute('SELECT to_regclass(%s)', (relation,)).fetchone()[0] is None:
+                        cur.execute(sql.SQL('SELECT {}(%s,%s)').format(sql.Identifier(function)),
+                                    (self.graph_name, label))
                 if application_role:
                     cur.execute(sql.SQL("GRANT USAGE ON SCHEMA ag_catalog TO {}").format(sql.Identifier(application_role)))
                     cur.execute(sql.SQL("GRANT ALL ON ALL TABLES IN SCHEMA ag_catalog TO {}").format(sql.Identifier(application_role)))
@@ -221,13 +235,21 @@ class AgeGraphManager:
         column_count: int = 1,
     ) -> list[tuple[Any, ...]]:
         """Execute a cypher query on the graph within an existing connection."""
+        if type(column_count) is not int or not 1 <= column_count <= 16:
+            raise KnowledgeError('Invalid Cypher column count')
         self._prepare_session(conn)
         col_defs = ", ".join(f"c{i} agtype" for i in range(column_count))
+        # AGE requires a dollar-quoted query constant. Choose a delimiter absent
+        # from the query so user text cannot escape into the enclosing SQL.
+        tag = 'gateway_cypher'
+        while f'${tag}$' in cypher_query:
+            tag += '_'
+        cypher_literal = sql.SQL(f'${tag}$' + cypher_query + f'${tag}$')
+        query = sql.SQL('SELECT * FROM cypher({}, {}' + (', %s::agtype' if params is not None else '')
+                        + ') AS ({})').format(sql.Literal(self.graph_name), cypher_literal, sql.SQL(col_defs))
         if params is not None:
-            query = f"SELECT * FROM cypher('{self.graph_name}', $${cypher_query}$$, %s) as ({col_defs})"
             res = conn.execute(query, (json.dumps(params),)).fetchall()
         else:
-            query = f"SELECT * FROM cypher('{self.graph_name}', $${cypher_query}$$) as ({col_defs})"
             res = conn.execute(query).fetchall()
         return [[parse_agtype(col) for col in row] for row in res]
 
@@ -239,9 +261,18 @@ class OutboxGraphSyncer:
         self.dsn = dsn
         self.graph = graph_manager
 
-    def sync_outbox_events(self, limit: int = 100) -> int:
+    def sync_outbox_events(self, limit: int = 100, *, tenant_id: str | None = None,
+                           domain: str | None = None) -> int:
         """Fetch pending outbox events, apply projection to AGE graph, and mark as processed."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise KnowledgeError('Invalid graph outbox batch size')
+        if (tenant_id is None) != (domain is None) or (tenant_id is not None and (not tenant_id or not domain)):
+            raise KnowledgeError('Graph outbox requires a complete scope')
         with psycopg.connect(self.dsn) as conn:
+            if tenant_id is not None:
+                conn.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
+                conn.execute("SELECT set_config('app.domain',%s,true)", (domain,))
+                conn.execute("SELECT set_config('app.admin_context','true',true)")
             self.graph._prepare_session(conn)
             with conn.cursor(row_factory=dict_row) as cur:
                 events = cur.execute(
@@ -250,11 +281,13 @@ class OutboxGraphSyncer:
                            tenant_id, domain, payload, status, created_at
                     FROM knowledge_outbox
                     WHERE status = 'pending'
+                        AND event_type IN ('KNOWLEDGE_PUBLISHED','KNOWLEDGE_REVOKED','KNOWLEDGE_WITHDRAWN')
+                        AND (%s::text IS NULL OR (tenant_id,domain)=(%s,%s))
                     ORDER BY created_at ASC
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                     """,
-                    (limit,),
+                      (tenant_id, tenant_id, domain, limit),
                 ).fetchall()
 
             if not events:
@@ -309,8 +342,11 @@ class OutboxGraphSyncer:
                 JOIN knowledge_entities sub ON sub.entity_id = c.subject_id
                 JOIN knowledge_entities obj ON obj.entity_id = c.object_id
                 WHERE p.publication_id = %s
+                    AND (p.tenant_id,p.domain)=(%s,%s)
+                    AND p.valid_until > clock_timestamp()
+                    AND NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id=p.publication_id)
                 """,
-                (publication_id,),
+                (publication_id, tenant_id, domain),
             ).fetchone()
 
         if not pub_row:
@@ -329,6 +365,7 @@ class OutboxGraphSyncer:
             r.polarity = $polarity,
             r.modality = $modality,
             r.valid_until = $valid_until,
+              r.valid_until_epoch = $valid_until_epoch,
             r.tenant_id = $tenant_id,
             r.domain = $domain,
             r.is_active = true
@@ -347,6 +384,7 @@ class OutboxGraphSyncer:
             "polarity": pub_row["polarity"],
             "modality": pub_row["modality"],
             "valid_until": valid_until_str,
+            "valid_until_epoch": pub_row['valid_until'].timestamp(),
             "tenant_id": tenant_id,
             "domain": domain,
         }
@@ -362,23 +400,35 @@ class OutboxGraphSyncer:
     ) -> None:
         """Deactivate claim edge in AGE graph."""
         stmt = """
-        MATCH ()-[r:Claim {publication_id: $pub_id}]->()
+        MATCH ()-[r:Claim {publication_id: $pub_id, tenant_id: $tenant_id, domain: $domain}]->()
         SET r.is_active = false
         RETURN count(r)
         """
-        params = {"pub_id": str(publication_id)}
+        params = {"pub_id": str(publication_id), "tenant_id": tenant_id, "domain": domain}
         self.graph.execute_cypher(conn, stmt, params, column_count=1)
 
-    def rebuild_all_projections(self, *, batch_size: int = 500) -> dict[str, int]:
-        """Idempotently reconstruct the entire AGE graph from PostgreSQL Single Source of Truth."""
-        self.graph.drop_graph()
+    def rebuild_all_projections(self, *, batch_size: int = 500, tenant_id: str | None = None,
+                                domain: str | None = None) -> dict[str, int]:
+        """Rebuild the authorized scope, or the whole namespace for an explicit owner job."""
+        if (tenant_id is None) != (domain is None) or (tenant_id is not None and (not tenant_id or not domain)):
+            raise KnowledgeError('Graph rebuild requires a complete scope')
+        if tenant_id is None:
+            self.graph.drop_graph()
         self.graph.ensure_graph()
 
         nodes_count = 0
         edges_count = 0
 
         with psycopg.connect(self.dsn) as conn:
+            if tenant_id is not None:
+                conn.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
+                conn.execute("SELECT set_config('app.domain',%s,true)", (domain,))
+                conn.execute("SELECT set_config('app.admin_context','true',true)")
             self.graph._prepare_session(conn)
+            if tenant_id is not None:
+                self.graph.execute_cypher(conn,
+                    'MATCH (n:Entity) WHERE n.tenant_id=$tenant AND n.domain=$domain DETACH DELETE n RETURN count(n)',
+                    {'tenant': tenant_id, 'domain': domain})
             with conn.cursor(row_factory=dict_row) as cur:
                 # 1. Rebuild active published claims
                 cur.execute(
@@ -393,8 +443,10 @@ class OutboxGraphSyncer:
                     JOIN knowledge_entities obj ON obj.entity_id = c.object_id
                     WHERE NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.publication_id = p.publication_id)
                       AND p.valid_until > clock_timestamp()
+                      AND (%s::text IS NULL OR (p.tenant_id,p.domain)=(%s,%s))
                     ORDER BY p.published_at ASC
-                    """
+                    """,
+                    (tenant_id, tenant_id, domain),
                 )
                 rows = cur.fetchall()
 
@@ -411,6 +463,7 @@ class OutboxGraphSyncer:
                     r.polarity = $polarity,
                     r.modality = $modality,
                     r.valid_until = $valid_until,
+                      r.valid_until_epoch = $valid_until_epoch,
                     r.tenant_id = $tenant_id,
                     r.domain = $domain,
                     r.is_active = true
@@ -429,6 +482,7 @@ class OutboxGraphSyncer:
                     "polarity": row["polarity"],
                     "modality": row["modality"],
                     "valid_until": valid_until_str,
+                    "valid_until_epoch": row['valid_until'].timestamp(),
                     "tenant_id": row["tenant_id"],
                     "domain": row["domain"],
                 }
@@ -436,7 +490,12 @@ class OutboxGraphSyncer:
                 edges_count += 1
 
             # Count total nodes
-            res = self.graph.execute_cypher(conn, "MATCH (n:Entity) RETURN count(n)", column_count=1)
+            if tenant_id is None:
+                res = self.graph.execute_cypher(conn, "MATCH (n:Entity) RETURN count(n)", column_count=1)
+            else:
+                res = self.graph.execute_cypher(conn,
+                    'MATCH (n:Entity {tenant_id: $tenant, domain: $domain}) RETURN count(n)',
+                    {'tenant': tenant_id, 'domain': domain})
             if res and res[0]:
                 nodes_count = int(res[0][0])
 
@@ -448,20 +507,13 @@ class OutboxGraphSyncer:
 class GovernedGraphQueryService:
     """Multi-tenant, parameterized, read-only openCypher query service over Apache AGE."""
 
-    _FORBIDDEN_WRITE_KEYWORDS = re.compile(
-        r"\b(CREATE|MERGE|SET|DELETE|REMOVE|DROP|DETACH|CALL|LOAD)\b",
-        re.IGNORECASE,
-    )
-
     def __init__(self, dsn: str, graph_manager: AgeGraphManager):
         self.dsn = dsn
         self.graph = graph_manager
 
     def validate_readonly_cypher(self, cypher: str) -> None:
-        """Validate that the query contains no mutating or administrative keywords."""
-        match = self._FORBIDDEN_WRITE_KEYWORDS.search(cypher)
-        if match:
-            raise KnowledgeError(f"Cypher mutation or admin statement forbidden: '{match.group(1)}'")
+        """Accept only syntax that can be fully scoped before execution."""
+        compile_governed_cypher(cypher)
 
     def query(
         self,
@@ -476,18 +528,21 @@ class GovernedGraphQueryService:
         if not tenant_id or not domain:
             raise KnowledgeError("Query requires authenticated tenant_id and domain scope")
 
-        self.validate_readonly_cypher(cypher)
-
-        cols = column_count if column_count is not None else infer_cypher_column_count(cypher)
+        scoped_query, cols = compile_governed_cypher(cypher)
+        if column_count is not None and (type(column_count) is not int or column_count != cols):
+            raise KnowledgeError('Cypher column count does not match RETURN')
 
         bound_params = dict(params or {})
         bound_params["_tenant_id"] = tenant_id
         bound_params["_domain"] = domain
+        bound_params['_now_epoch'] = time.time()
 
         started = time.monotonic()
         with psycopg.connect(self.dsn) as conn:
+            conn.execute('SET TRANSACTION READ ONLY')
+            conn.execute("SET LOCAL statement_timeout = '5s'")
             self.graph._prepare_session(conn)
-            raw_rows = self.graph.execute_cypher(conn, cypher, bound_params, column_count=cols)
+            raw_rows = self.graph.execute_cypher(conn, scoped_query, bound_params, column_count=cols)
         elapsed_ms = (time.monotonic() - started) * 1000.0
 
         nodes_map: dict[str, GraphNode] = {}
@@ -498,7 +553,7 @@ class GovernedGraphQueryService:
             record_dict = {}
             for col_idx, item in enumerate(row):
                 record_dict[f"c{col_idx}"] = item
-                self._extract_graph_elements(item, nodes_map, edges_map, tenant_id)
+                self._extract_graph_elements(item, nodes_map, edges_map, tenant_id, domain)
             records.append(record_dict)
 
         return GraphQueryResult(
@@ -514,6 +569,7 @@ class GovernedGraphQueryService:
         nodes: dict[str, GraphNode],
         edges: dict[str, GraphEdge],
         expected_tenant: str,
+        expected_domain: str,
     ) -> None:
         """Inspect vertex/edge items and populate structured GraphNode/GraphEdge."""
         if not isinstance(item, dict):
@@ -521,7 +577,10 @@ class GovernedGraphQueryService:
 
         label = item.get("label")
         props = item.get("properties", {})
-        if label == "Entity" or "id" in props and "name" in props and "type" in props:
+        if label in ('Entity', 'Claim') and (
+                props.get('tenant_id') != expected_tenant or props.get('domain') != expected_domain):
+            raise KnowledgeError('Graph result scope mismatch')
+        if label == "Entity":
             # Vertex
             node_id = str(props.get("id"))
             if node_id not in nodes:
@@ -533,8 +592,12 @@ class GovernedGraphQueryService:
                     domain=str(props.get("domain", "")),
                     properties={k: v for k, v in props.items() if k not in ("id", "name", "type", "tenant_id", "domain")},
                 )
-        elif label == "Claim" or "claim_id" in props and "predicate" in props:
+        elif label == "Claim":
             # Edge
+            if (props.get('is_active') is not True
+                    or not isinstance(props.get('valid_until_epoch'), (int, float))
+                    or props['valid_until_epoch'] <= time.time()):
+                raise KnowledgeError('Graph result is no longer active')
             claim_id = str(props.get("claim_id"))
             if claim_id not in edges:
                 edges[claim_id] = GraphEdge(

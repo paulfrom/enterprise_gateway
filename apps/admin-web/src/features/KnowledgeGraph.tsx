@@ -58,7 +58,7 @@ export function KnowledgeGraph() {
   const rebuildMutation = useMutation({
     mutationFn: () => api.graphRebuild(),
     onSuccess: (data) => {
-      message.success(`AGE 图投影全量重建完成：已同步 ${data.nodes_rebuilt} 个顶点，${data.edges_rebuilt} 条边`);
+        message.success(`当前范围图投影重建完成：已同步 ${data.nodes_rebuilt} 个顶点，${data.edges_rebuilt} 条边`);
       queryMutation.mutate(cypherQuery);
     },
     onError: (err) => {
@@ -179,12 +179,12 @@ export function KnowledgeGraph() {
             onClick={() => rebuildMutation.mutate()}
             danger
           >
-            重建图投影 (Rebuild Projection)
+              重建图投影（当前范围）
           </Button>
         }
       >
         <Typography.Paragraph type="secondary">
-          基于 PostgreSQL + Apache AGE (openCypher) 引擎提供只读投影拓扑分析与多跳图探索。受控查询已在后端强制注入多租户隔离约束与只读守卫。
+            支持 Entity 节点与最多四跳 Claim 关系的 MATCH 查询、属性等值过滤、RETURN 和 LIMIT。后端强制租户与业务域隔离，只展示有效关系；其他语法会被拒绝。
         </Typography.Paragraph>
 
         <Form layout="vertical">

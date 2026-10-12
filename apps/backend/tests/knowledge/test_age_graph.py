@@ -91,6 +91,6 @@ class TestAgeGraph(unittest.TestCase):
         self.assertGreaterEqual(stats["nodes_rebuilt"], 0)
         self.assertGreaterEqual(stats["edges_rebuilt"], 0)
 
-        # Test sync_outbox_events with no events returns 0
-        synced_count = self.syncer.sync_outbox_events(limit=10)
+        # Other test scopes may have pending events; this scope is empty.
+        synced_count = self.syncer.sync_outbox_events(limit=10, tenant_id='tenant-1', domain=self.test_graph_name)
         self.assertEqual(synced_count, 0)

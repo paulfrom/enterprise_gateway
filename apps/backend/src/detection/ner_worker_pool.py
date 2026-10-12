@@ -15,6 +15,7 @@ from multiprocessing.util import Finalize
 import os
 import threading
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -25,6 +26,25 @@ from detection.ner_runtime import NerBatchResult, create_ner_runtime
 from detection.ner_snapshot import SealedNerSnapshot
 from detection.ner_windowing import DEFAULT_STRIDE, DEFAULT_WINDOW_LENGTH
 from infra.errors import SafetyCode, SafetyError
+
+_LIVE_POOLS = weakref.WeakSet()
+_POOL_REGISTRY_LOCK = threading.Lock()
+
+
+def _close_live_pools():
+    with _POOL_REGISTRY_LOCK:
+        pools = tuple(_LIVE_POOLS)
+    for pool in pools:
+        try:
+            pool.close()
+        except RuntimeError:
+            # Continue releasing other pools even if one cleanup fails.
+            pass
+
+
+# Run before multiprocessing joins children: an idle persistent worker waits
+# for another request indefinitely unless its owning pool is closed first.
+Finalize(None, _close_live_pools, exitpriority=50)
 
 
 def cpu_thread_budget():
@@ -204,9 +224,8 @@ class NerWorkerPool:
                          for index, slot in enumerate(self._slots)]
         for thread in self._threads:
             thread.start()
-        # Run before multiprocessing's join of non-daemon children. This also
-        # closes resources for embedded callers which omit explicit shutdown.
-        self._exit_finalizer = Finalize(None, self.close, exitpriority=10)
+        with _POOL_REGISTRY_LOCK:
+            _LIVE_POOLS.add(self)
 
     @property
     def max_workers(self) -> int:
@@ -667,7 +686,8 @@ class NerWorkerPool:
         with self._artifact_lock:
             if self._artifact is not None:
                 self._artifact.close()
-        self._exit_finalizer.cancel()
+        with _POOL_REGISTRY_LOCK:
+            _LIVE_POOLS.discard(self)
 
     def __enter__(self):
         return self

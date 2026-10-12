@@ -6,6 +6,9 @@ import os
 import subprocess
 import sys
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -86,6 +89,35 @@ class Call(threading.Thread):
 
 
 class NerWorkerPoolTests(unittest.TestCase):
+    def test_interpreter_exit_reaps_idle_workers_after_success_or_failure(self):
+        script = """import sys
+from detection.ner_worker_pool import NerWorkerPool
+if __name__ == '__main__':
+    pool = NerWorkerPool(sys.argv[1], intra_op_threads=1)
+    result = pool.infer_profiled(('aa',), timeout=20)
+    print(result.worker_pid, flush=True)
+    if sys.argv[2] == 'failure':
+        raise RuntimeError('synthetic CLI failure')
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            entry = Path(directory, 'idle_pool.py')
+            entry.write_text(script)
+            for outcome in ('success', 'failure'):
+                with self.subTest(outcome=outcome):
+                    try:
+                        result = subprocess.run([sys.executable, str(entry), str(MINI.resolve()), outcome],
+                                                capture_output=True, text=True, timeout=30)
+                    except subprocess.TimeoutExpired as exc:
+                        output = exc.stdout.decode() if isinstance(exc.stdout, bytes) else exc.stdout
+                        if output and output.strip().isdigit():
+                            try:
+                                os.kill(int(output.strip()), signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                        raise
+                    self.assertEqual(result.returncode, 0 if outcome == 'success' else 1, result.stderr)
+                    self.assertTrue(exited(int(result.stdout.strip())))
+
     def pool(self, directory=MINI, **kwargs):
         pool = NerWorkerPool(str(directory), runtime_factory=fake_factory, **kwargs)
         self.addCleanup(pool.close)

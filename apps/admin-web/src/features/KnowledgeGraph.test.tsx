@@ -64,7 +64,7 @@ describe('KnowledgeGraph component', () => {
 
     expect(screen.getByText('Apache AGE 知识图谱拓扑与 Cypher 分析')).toBeInTheDocument();
     expect(screen.getByText('执行受控图查询')).toBeInTheDocument();
-    expect(screen.getByText('重建图投影 (Rebuild Projection)')).toBeInTheDocument();
+    expect(screen.getByText('重建图投影（当前范围）')).toBeInTheDocument();
 
     const queryBtn = screen.getByRole('button', { name: /执行受控图查询/ });
     fireEvent.click(queryBtn);
