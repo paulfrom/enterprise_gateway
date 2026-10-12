@@ -23,6 +23,12 @@ export type AuditPage = components['schemas']['AuditPage'];
 export type AuditDetail = components['schemas']['AuditDetail'];
 export type CatalogEntry = components['schemas']['CatalogEntry'];
 
+export type GraphQueryRequest = components['schemas']['GraphQueryRequest'];
+export type GraphQueryResponse = components['schemas']['GraphQueryResponse'];
+export type GraphRebuildResponse = components['schemas']['GraphRebuildResponse'];
+export type GraphNodeDTO = components['schemas']['GraphNodeDTO'];
+export type GraphEdgeDTO = components['schemas']['GraphEdgeDTO'];
+
 export type SourceFilters = NonNullable<paths['/api/admin/sources']['get']['parameters']['query']>;
 export type CandidateFilters = NonNullable<paths['/api/admin/candidates']['get']['parameters']['query']>;
 export type PublicationFilters = NonNullable<paths['/api/admin/publications']['get']['parameters']['query']>;
@@ -168,6 +174,18 @@ export const api = {
     request<AuditDetail>('/api/admin/audit/records/' + encodeURIComponent(id), { signal }),
   auditEvents: (filters: AuditEventsFilters, signal?: AbortSignal) =>
     request<ObjectPage>('/api/admin/audit/events' + buildParams(filters as Record<string, unknown>), { signal }),
+
+  graphQuery: (body: GraphQueryRequest, signal?: AbortSignal) =>
+    request<GraphQueryResponse>('/api/admin/graph/query', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    }),
+  graphRebuild: (signal?: AbortSignal) =>
+    request<GraphRebuildResponse>('/api/admin/graph/rebuild', {
+      method: 'POST',
+      signal,
+    }),
 };
 
 export function errorText(error: unknown): string {

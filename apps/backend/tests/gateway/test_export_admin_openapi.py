@@ -32,6 +32,8 @@ EXPECTED_ADMIN_ROUTES = {
     "/api/admin/candidates/{candidate_id}/reject",
     "/api/admin/candidates/{candidate_id}/revise",
     "/api/admin/publications/{publication_id}/revoke",
+    "/api/admin/graph/query",
+    "/api/admin/graph/rebuild",
     "/api/admin/audit/records",
     "/api/admin/audit/records/{record_id}",
     "/api/admin/audit/events",

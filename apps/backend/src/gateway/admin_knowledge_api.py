@@ -1,4 +1,8 @@
-from gateway.admin_contract import (ObjectPage, ObjectDetail, GovernanceResult, WithdrawResult, PublishResult, RejectResult, ReviseResult, Revocation, ERROR_RESPONSES)
+from gateway.admin_contract import (
+    ObjectPage, ObjectDetail, GovernanceResult, WithdrawResult, PublishResult,
+    RejectResult, ReviseResult, Revocation, ERROR_RESPONSES,
+    GraphQueryRequest, GraphQueryResponse, GraphRebuildResponse, GraphNodeDTO, GraphEdgeDTO,
+)
 """Authenticated knowledge governance; bounded work on a separate admin domain."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -275,3 +279,55 @@ def install_knowledge_admin_routes(app, auth_service, governance):
     @app.post('/api/admin/publications/{publication_id}/revoke', response_model=Revocation, responses=ERROR_RESPONSES)
     def revoke(request: Request, publication_id: str, body: Basis, context=Depends(write)):
         return respond(context, request, lambda: action('revoke_publication', publication_id, body, context, lambda result: {'revoked': True}))
+
+    @app.post('/api/admin/graph/query', response_model=GraphQueryResponse, responses=ERROR_RESPONSES)
+    def graph_query(request: Request, body: GraphQueryRequest, context=Depends(require)):
+        def execute():
+            from knowledge.age_graph import AgeGraphManager, GovernedGraphQueryService
+            admin_dsn = governance._storage.admin_dsn
+            mgr = AgeGraphManager(admin_dsn)
+            service = GovernedGraphQueryService(admin_dsn, mgr)
+            result = service.query(
+                tenant_id=governance._tenant_id,
+                domain=governance._domain,
+                cypher=body.cypher,
+                params=body.params,
+                column_count=len(body.params.get('_columns')) if '_columns' in body.params else None,
+            )
+            return {
+                'nodes': [
+                    GraphNodeDTO(
+                        id=n.id, name=n.name, type=n.type,
+                        tenant_id=n.tenant_id, domain=n.domain,
+                        properties=dict(n.properties)
+                    ).model_dump()
+                    for n in result.nodes
+                ],
+                'edges': [
+                    GraphEdgeDTO(
+                        claim_id=e.claim_id, source_id=e.source_id, target_id=e.target_id,
+                        predicate=e.predicate, polarity=e.polarity, modality=e.modality,
+                        publication_id=e.publication_id, valid_until=e.valid_until,
+                        is_active=e.is_active, properties=dict(e.properties)
+                    ).model_dump()
+                    for e in result.edges
+                ],
+                'raw_records': list(result.raw_records),
+                'execution_time_ms': result.execution_time_ms,
+            }
+        return respond(context, request, execute)
+
+    @app.post('/api/admin/graph/rebuild', response_model=GraphRebuildResponse, responses=ERROR_RESPONSES)
+    def graph_rebuild(request: Request, context=Depends(write)):
+        def execute():
+            from knowledge.age_graph import AgeGraphManager, OutboxGraphSyncer
+            admin_dsn = governance._storage.admin_dsn
+            mgr = AgeGraphManager(admin_dsn)
+            syncer = OutboxGraphSyncer(admin_dsn, mgr)
+            stats = syncer.rebuild_all_projections()
+            return {
+                'nodes_rebuilt': stats['nodes_rebuilt'],
+                'edges_rebuilt': stats['edges_rebuilt'],
+                'status': 'completed',
+            }
+        return respond(context, request, execute)
