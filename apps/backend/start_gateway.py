@@ -270,6 +270,27 @@ def _ner_timeout() -> float | None:
     return value
 
 
+def _ner_worker_options() -> dict[str, int]:
+    options = {}
+    for env_name, parameter, minimum in (
+        ('GATEWAY_NER_MAX_WORKERS', 'ner_max_workers', 1),
+        ('GATEWAY_NER_MAX_PENDING', 'ner_max_pending', 0),
+        ('GATEWAY_NER_MAX_TASKS_PER_WORKER', 'ner_max_tasks_per_worker', 1),
+        ('GATEWAY_NER_INTRA_OP_THREADS', 'ner_intra_op_threads', 1),
+    ):
+        raw = os.environ.get(env_name)
+        if raw is None or (parameter == 'ner_intra_op_threads' and raw == ''):
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+        if value is None or value < minimum:
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid NER worker options')
+        options[parameter] = value
+    return options
+
+
 def build_app(*, providers_config_path: Path | None = None,
               classifier: Callable[[bytes], str] | None = None):
     """One assembly path; policies/dictionary are controlled files, not demos."""
@@ -321,6 +342,7 @@ def build_app(*, providers_config_path: Path | None = None,
         budget_ms=float(os.environ.get('GATEWAY_QUICK_SCREEN_BUDGET_MS', '2')))
     ner_timeout = _ner_timeout()
     override = {} if ner_timeout is None else {"ner_timeout": ner_timeout}
+    override.update(_ner_worker_options())
     return create_runtime_app(provider_config_path=providers, domain=domain, tenant_id=tenant,
         correlation_key=correlation_key, hmac_key=hmac_key, kms=kms,
         dictionary=dictionary, ner_package_dir=Path(_required("GATEWAY_NER_PACKAGE_DIR")),

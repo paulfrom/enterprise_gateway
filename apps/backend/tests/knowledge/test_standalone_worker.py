@@ -98,7 +98,8 @@ class StandaloneWorkerPostgresTests(unittest.TestCase):
             source_context=source)
 
     def child(self):
-        return subprocess.run([sys.executable, "start_knowledge_worker.py", "--once"],
+        script = str(Path(launcher.__file__).resolve())
+        return subprocess.run([sys.executable, script, "--once"],
                               env=self.env, capture_output=True, text=True, timeout=30)
 
     def scoped(self, conn):

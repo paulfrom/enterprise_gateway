@@ -185,7 +185,7 @@ class TestPostgresKnowledgeStorage(unittest.TestCase):
 
 
 class AdminGovernanceTestCase(unittest.TestCase):
-    """Shared fixtures for the v2 single-admin governance schema."""
+    """Shared fixtures for the v3 single-admin governance schema."""
 
     @classmethod
     def setUpClass(cls):
@@ -300,8 +300,8 @@ class AdminGovernanceTestCase(unittest.TestCase):
         return admin_action_id, governance_version_id
 
 
-class TestKnowledgeSchemaV2(AdminGovernanceTestCase):
-    def test_v2_schema_objects(self):
+class TestKnowledgeSchemaV3(AdminGovernanceTestCase):
+    def test_v3_schema_objects(self):
         with self.admin_scope() as conn:
             names = {r[0] for r in conn.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema()")}
@@ -617,13 +617,13 @@ class TestAdminPublishTransactional(AdminGovernanceTestCase):
 
 class TestSchemaFingerprint(AdminGovernanceTestCase):
     def test_fingerprint_constant_matches_computed(self):
-        from knowledge.storage import SCHEMA_FINGERPRINT_V2, compute_schema_fingerprint
+        from knowledge.storage import SCHEMA_FINGERPRINT_V3, compute_schema_fingerprint
         with psycopg.connect(self.config['admin_app_dsn']) as conn:
             self.assertEqual(compute_schema_fingerprint(conn, admin_role=self.config['admin_role']),
-                             SCHEMA_FINGERPRINT_V2)
+                             SCHEMA_FINGERPRINT_V3)
 
     def test_fingerprint_stable_across_random_deployments(self):
-        from knowledge.storage import SCHEMA_FINGERPRINT_V2, compute_schema_fingerprint
+        from knowledge.storage import SCHEMA_FINGERPRINT_V3, compute_schema_fingerprint
         fingerprints = []
         for _ in range(2):
             token = uuid4().hex[:12]
@@ -640,7 +640,7 @@ class TestSchemaFingerprint(AdminGovernanceTestCase):
                 with psycopg.connect(self.config['admin_dsn'], autocommit=True) as conn:
                     conn.execute(sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(schema)))
         self.assertEqual(fingerprints[0], fingerprints[1])
-        self.assertEqual(SCHEMA_FINGERPRINT_V2, fingerprints[0])
+        self.assertEqual(SCHEMA_FINGERPRINT_V3, fingerprints[0])
 
     def test_fingerprint_rejects_tampered_schema(self):
         from knowledge.storage import KnowledgeSchemaError
@@ -654,6 +654,107 @@ class TestSchemaFingerprint(AdminGovernanceTestCase):
             finally:
                 conn.execute('DROP TABLE knowledge_extra_drift')
                 conn.commit()
+
+
+class TestVersionedEntityAliases(AdminGovernanceTestCase):
+    def save_alias(self, storage, conn, *, tenant=None, domain=None, canonical='Canonical'):
+        storage.save_entity_alias(conn, tenant or self.tenant, domain or self.domain,
+                                  'Alias', canonical, 'ORG', uuid4())
+
+    def test_alias_crud_preserves_fingerprint_and_subsequent_admin_transactions(self):
+        from knowledge.storage import compute_schema_fingerprint, SCHEMA_FINGERPRINT_V3
+        storage = self.admin_storage()
+        with storage.admin_transaction(tenant_id=self.tenant, domain=self.domain) as conn:
+            self.save_alias(storage, conn)
+            self.assertEqual(compute_schema_fingerprint(conn, admin_role=self.config['admin_role']),
+                             SCHEMA_FINGERPRINT_V3)
+        with storage.admin_transaction(tenant_id=self.tenant, domain=self.domain) as conn:
+            self.assertEqual(storage.get_entity_alias(conn, self.tenant, self.domain, 'Alias')['canonical_name'],
+                             'Canonical')
+            self.save_alias(storage, conn, canonical='Updated')
+            self.assertEqual(len(storage.list_entity_aliases(conn, self.tenant, self.domain)), 1)
+        with storage.admin_transaction(tenant_id=self.tenant, domain=self.domain) as conn:
+            self.assertEqual(storage.get_entity_alias(conn, self.tenant, self.domain, 'Alias')['canonical_name'],
+                             'Updated')
+            storage.delete_entity_alias(conn, self.tenant, self.domain, 'Alias')
+            self.assertIsNone(storage.get_entity_alias(conn, self.tenant, self.domain, 'Alias'))
+
+    def test_aliases_enforce_tenant_and_domain_rls(self):
+        storage = self.admin_storage()
+        with self.admin_scope() as conn:
+            self.save_alias(storage, conn)
+        with self.admin_scope(domain=self.domain + '-other') as conn:
+            self.save_alias(storage, conn, domain=self.domain + '-other', canonical='FOREIGN_DOMAIN_CANARY')
+        with self.admin_scope() as conn:
+            conn.execute("SELECT set_config('app.tenant','other-tenant',true)")
+            self.save_alias(storage, conn, tenant='other-tenant', canonical='FOREIGN_TENANT_CANARY')
+        with self.admin_scope() as conn:
+            rows = conn.execute('SELECT canonical_name FROM entity_aliases').fetchall()
+            self.assertEqual(rows, [('Canonical',)])
+            self.assertEqual(conn.execute("SELECT relrowsecurity,relforcerowsecurity FROM pg_class "
+                                          "WHERE oid='entity_aliases'::regclass").fetchone(), (True, True))
+
+    def test_application_cannot_read_or_write_aliases_with_forged_admin_flag(self):
+        storage = self.admin_storage()
+        with self.admin_scope() as conn:
+            self.save_alias(storage, conn)
+        with self.app_scope(admin_context=True) as conn:
+            self.assertEqual(storage.list_entity_aliases(conn, self.tenant, self.domain), [])
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege), self.app_scope(admin_context=True) as conn:
+            self.save_alias(storage, conn)
+
+    def test_admin_role_requires_bound_context(self):
+        storage = self.admin_storage()
+        with self.admin_scope() as conn:
+            self.save_alias(storage, conn)
+        with self.admin_scope(admin_context=False) as conn:
+            self.assertEqual(storage.list_entity_aliases(conn, self.tenant, self.domain), [])
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege), self.admin_scope(admin_context=False) as conn:
+            self.save_alias(storage, conn)
+
+
+class TestAliasSchemaMigration(AdminGovernanceTestCase):
+    def setUp(self):
+        super().setUp()
+        self.schema = 'gw_test_alias_migration_' + uuid4().hex[:12]
+        self.dsn = make_conninfo(self.config['admin_dsn'], options='-c search_path=' + self.schema)
+        with psycopg.connect(self.config['admin_dsn']) as conn:
+            conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self.schema)))
+        self.addCleanup(self.drop_schema)
+        PostgresKnowledgeStorage(self.dsn).init_database(application_role=self.config['application_role'],
+                                                       admin_role=self.config['admin_role'])
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute('DROP TABLE entity_aliases')
+        self.migration_config = dict(self.config, schema=self.schema)
+
+    def drop_schema(self):
+        with psycopg.connect(self.config['admin_dsn'], autocommit=True) as conn:
+            conn.execute(sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(self.schema)))
+
+    def test_migration_preserves_rows_and_is_idempotent(self):
+        from gateway.database import migrate_knowledge_aliases
+        from knowledge.storage import SCHEMA_FINGERPRINT_V3, compute_schema_fingerprint
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute("INSERT INTO knowledge_entities(entity_id,tenant_id,domain,entity_type,name,acl,purpose) "
+                         "VALUES(%s,'t','d','ORG','Existing',ARRAY['reader'],'knowledge')", (uuid4(),))
+        self.assertEqual(migrate_knowledge_aliases(self.migration_config), {'schema_version': 3, 'changed': True})
+        self.assertEqual(migrate_knowledge_aliases(self.migration_config), {'schema_version': 3, 'changed': False})
+        with psycopg.connect(self.dsn) as conn:
+            self.assertEqual(conn.execute('SELECT name FROM knowledge_entities').fetchall(), [('Existing',)])
+            self.assertEqual(compute_schema_fingerprint(conn, admin_role=self.config['admin_role']), SCHEMA_FINGERPRINT_V3)
+            for role in (self.config['application_role'], self.config['admin_role']):
+                self.assertTrue(conn.execute("SELECT has_table_privilege(%s,'entity_aliases','SELECT,INSERT,UPDATE,DELETE')",
+                                             (role,)).fetchone()[0])
+
+    def test_migration_rejects_drift_without_creating_alias_table(self):
+        from gateway.database import migrate_knowledge_aliases
+        from knowledge.storage import KnowledgeSchemaError
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute('ALTER TABLE knowledge_entities ADD COLUMN unexpected INTEGER')
+        with self.assertRaises(KnowledgeSchemaError):
+            migrate_knowledge_aliases(self.migration_config)
+        with psycopg.connect(self.dsn) as conn:
+            self.assertIsNone(conn.execute("SELECT to_regclass('entity_aliases')").fetchone()[0])
 
 
 class TestAdminRls(AdminGovernanceTestCase):

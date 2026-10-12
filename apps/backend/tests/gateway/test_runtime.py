@@ -108,11 +108,14 @@ class RuntimeAssemblyTests(unittest.TestCase):
                 response = self.post(client, prompt)
                 self.assertEqual(200, response.status_code, response.text)
                 self.assertEqual(prompt, response.json()["choices"][0]["message"]["content"])
+                first_worker_pids = detector._executor.worker_pids()
+                self.assertEqual(len(first_worker_pids), 1)
                 response = client.post("/v1/messages", headers={"x-api-key": "synthetic-key"},
                     json={"model": "claude-fixture", "max_tokens": 128,
                           "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]})
                 self.assertEqual(200, response.status_code, response.text)
                 self.assertEqual(prompt, response.json()["content"][0]["text"])
+                self.assertEqual(detector._executor.worker_pids(), first_worker_pids)
                 self.assertEqual(2, len(self.calls))
                 for pipeline in app.state.runtime_pipelines:
                     pipeline.version_handle.manifest.require_complete()
@@ -135,6 +138,7 @@ class RuntimeAssemblyTests(unittest.TestCase):
             for close in close_clients:
                 close.assert_called_once()
             self.assertTrue(app.state.runtime_closed)
+            self.assertEqual(detector._executor.worker_pids(), ())
 
     def test_unknown_fields_rejected_and_admitted_controls_preserve_route_and_credentials(self):
         app = self.app()

@@ -43,6 +43,8 @@ def create_runtime_app(
     knowledge_governance=None, audit_reader=None, audit_builder=None,
     detection_failure_mode: str = 'error',
     quick_screen: QuickScreenConfig | None = None,
+    ner_max_workers: int = 1, ner_max_pending: int = 4,
+    ner_max_tasks_per_worker: int = 256, ner_intra_op_threads: int | None = None,
 ) -> FastAPI:
     """Assemble real controls; own all HTTP/detector lifecycle resources.
 
@@ -79,7 +81,9 @@ def create_runtime_app(
     pipelines = []
     try:
         detector = DetectionOrchestrator(dictionary=dictionary, ner_package_dir=ner_package_dir,
-                                         ner_timeout=ner_timeout, quick_screen=quick_screen)
+            ner_timeout=ner_timeout, quick_screen=quick_screen, ner_max_workers=ner_max_workers,
+            ner_max_pending=ner_max_pending, ner_max_tasks_per_worker=ner_max_tasks_per_worker,
+            ner_intra_op_threads=ner_intra_op_threads)
         guard = AuditWatermarkGuard(root, watermark_policy)
         evidence = EvidenceGate(intent_directory=paths["intents"],
                                 evidence_directory=paths["evidence"], kms=kms)

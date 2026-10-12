@@ -33,3 +33,12 @@
 - 联调实际客户端、供应商协议及签名信任材料，确认严格字段准入与缓冲 SSE 的超时行为。
 - 核验生产网络出口、数据库 TLS、IAM/KMS、资源权限、业务留存政策及备份恢复/删除。
 - 使用现有 Linux、Compose、镜像和浏览器检查验证部署资源；合成测试结果不替代实际环境验证。
+
+## 5. 知识图谱体系演进（OpenSPG / DeepKE / Apache AGE）
+
+详见架构设计规范 [docs/knowledge-graph-design.md](knowledge-graph-design.md)。
+
+- **上游标准化摄取**：已完成接口契约与抽象基类（`knowledge.ingestion.BaseKnowledgeImporter`）；下一步分步对接权威主数据、非结构化文档与受信任工具连接器。
+- **关系抽取与证据校准（DeepKE）**：将 `extractor.py` 升级为解耦的多阶管线（NER -> RE -> AE），融合端侧离线轻量模型与语法规则双轨校验，加强否定（`Polarity.NEGATIVE`）与假设（`Modality.HYPOTHETICAL`）判定，模型生成内容严禁自证。
+- **语义属性图与关系治理（OpenSPG）**：引入概念谓词强类型约束（Predicate Schema Guard），实现业务事实一致性与正负互斥检测（Disputed Claim），完善基于 UUID5 的实体对齐与别名链。
+- **Apache AGE 图查询投影**：在已有 PostgreSQL 5433 上装配 `apache-age` 扩展，基于事务 Outbox 异步同步至只读图空间，支持受控 openCypher 多跳图查询，并在网关层强制注入租户过滤与审计留痕。
