@@ -184,7 +184,7 @@ flowchart TD
 3. **零 RLS 污染**：避免将复杂的图多跳查询直接穿透到底层多租户行级安全（RLS）表，防止权限漂移。
 
 ### 6.2 AGE 图投影数据模型
-在 PostgreSQL 内部通过 AGE 创建图空间（Graph Name：`kg_projection`）：
+在 PostgreSQL 内部通过 AGE 创建图空间，默认名字为 `kg_projection_<namespace-hash>`：数据库及关系表 namespace 决定稳定后缀，同一数据库的不同事实源 namespace 独立投影与重建。
 * **顶点标签（Vertex Label: `Entity`）**：
   * `id`: 实体稳定 UUID（字符串）；
   * `tenant_id`: 租户隔离标识；
@@ -234,10 +234,11 @@ flowchart TD
 
 ### 6.4 受控图查询服务（Governed openCypher Interface）
 外部应用或管理端**绝不直接裸连数据库执行任意 Cypher**，必须通过受控的图查询服务接口（`GovernedGraphQueryService`）：
-* **强制参数化租户隔离**：查询必须携带调用者的 `tenant_id` 与 `domain`；
-* **Cypher AST 语法守卫与改写**：
-  * 服务端解析 Cypher 语法树，自动向 `MATCH` 模式追加过滤条件：
-    `WHERE n.tenant_id = $tenant_id AND r.is_active = true AND r.valid_until > $now`；
+* **强制参数化租户隔离**：租户与业务域绑定由认证装配提供，不能由请求参数覆盖；
+* **受控语法解析与改写**：
+  * 仅接受带 `Entity` / `Claim` 标签、最多四跳的固定长度 `MATCH` 模式、简单属性比较、`RETURN` / `count` 与有界 `LIMIT`；完整语法边界见[管理端契约](contracts/admin-console.md#受控图查询)。
+  * 服务端为每个节点和边追加 `tenant_id` 与 `domain` 条件，为每条边追加 `is_active = true` 和 `valid_until_epoch > $_now_epoch` 条件；聚合与返回列在过滤后求值。
+  * 数据库事务只读；拒绝未支持的语法，禁止用 `UNION`、子查询或任意函数绕开边界。
   * 阻断任意可能破坏图完整性或读取跨租户数据的危险查询。
 * **审计日志留痕**：每次图遍历的调用方标识、查询语法摘要、耗时及命中节点计数均记入安全审计流。
 

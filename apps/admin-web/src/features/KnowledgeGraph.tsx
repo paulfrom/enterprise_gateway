@@ -58,7 +58,7 @@ export function KnowledgeGraph() {
   const rebuildMutation = useMutation({
     mutationFn: () => api.graphRebuild(),
     onSuccess: (data) => {
-      message.success(`AGE 图投影全量重建完成：已同步 ${data.nodes_rebuilt} 个顶点，${data.edges_rebuilt} 条边`);
+        message.success(`当前范围图投影重建完成：已同步 ${data.nodes_rebuilt} 个顶点，${data.edges_rebuilt} 条边`);
       queryMutation.mutate(cypherQuery);
     },
     onError: (err) => {
@@ -179,7 +179,7 @@ export function KnowledgeGraph() {
             onClick={() => rebuildMutation.mutate()}
             danger
           >
-            重建图投影 (Rebuild Projection)
+              重建图投影（当前范围）
           </Button>
         }
       >

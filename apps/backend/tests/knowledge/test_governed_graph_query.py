@@ -6,6 +6,8 @@ import unittest
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
 from knowledge.age_graph import AgeGraphManager, GovernedGraphQueryService
 from knowledge.knowledge import KnowledgeError
@@ -100,3 +102,34 @@ class GovernedGraphIsolationTests(unittest.TestCase):
             literal = '$$; $gateway_cypher$; $gateway_cypher_$; SELECT current_user; --'
             rows = self.graph.execute_cypher(conn, f"RETURN '{literal}'")
         self.assertEqual(rows, [[literal]])
+
+    def test_default_projection_names_separate_authoritative_sql_namespaces(self):
+        schemas = ['test_graph_namespace_' + uuid4().hex[:12] for _ in range(2)]
+        managers = []
+        try:
+            with psycopg.connect(self.dsn) as conn:
+                for schema in schemas:
+                    conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
+            for schema, name in zip(schemas, ('Namespace A', 'Namespace B')):
+                dsn = make_conninfo(self.dsn, options='-c search_path=' + schema)
+                manager = AgeGraphManager(dsn)
+                managers.append(manager)
+                manager.ensure_graph()
+                with psycopg.connect(dsn) as conn:
+                    manager.execute_cypher(conn,
+                        "CREATE (n:Entity {id: 'same-id', name: $name, tenant_id: 'same-tenant', domain: 'same-domain'}) RETURN n",
+                        {'name': name})
+                result = GovernedGraphQueryService(dsn, manager).query(
+                    tenant_id='same-tenant', domain='same-domain', cypher='MATCH (n:Entity) RETURN n.name')
+                self.assertEqual(result.raw_records, ({'c0': name},))
+            self.assertNotEqual(managers[0].graph_name, managers[1].graph_name)
+            managers[0].drop_graph()
+            result = GovernedGraphQueryService(managers[1].dsn, managers[1]).query(
+                tenant_id='same-tenant', domain='same-domain', cypher='MATCH (n:Entity) RETURN n.name')
+            self.assertEqual(result.raw_records, ({'c0': 'Namespace B'},))
+        finally:
+            for manager in managers:
+                manager.drop_graph()
+            with psycopg.connect(self.dsn) as conn:
+                for schema in schemas:
+                    conn.execute(sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(schema)))
