@@ -36,7 +36,7 @@
 
 ## 5. 知识图谱体系演进（OpenSPG / DeepKE / Apache AGE）
 
-详见架构设计规范 [docs/knowledge-graph-design.md](file:///home/paul/project/enterprise_gateway/docs/knowledge-graph-design.md)。
+详见架构设计规范 [docs/knowledge-graph-design.md](knowledge-graph-design.md)。
 
 - **上游标准化摄取**：已完成接口契约与抽象基类（`knowledge.ingestion.BaseKnowledgeImporter`）；下一步分步对接权威主数据、非结构化文档与受信任工具连接器。
 - **关系抽取与证据校准（DeepKE）**：将 `extractor.py` 升级为解耦的多阶管线（NER -> RE -> AE），融合端侧离线轻量模型与语法规则双轨校验，加强否定（`Polarity.NEGATIVE`）与假设（`Modality.HYPOTHETICAL`）判定，模型生成内容严禁自证。

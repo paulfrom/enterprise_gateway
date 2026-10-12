@@ -15,7 +15,7 @@
 
 * **PostgreSQL 为单一治理事实源（Source of Truth）**：所有实体、主张（Claim）、证据、候选、发布、操作审计及 Outbox 事务日志权威持久化于 PostgreSQL 关系表中。
 * **Apache AGE 为内置只读图投影（Graph Query Projection）**：引入 PostgreSQL 原生图扩展 **Apache AGE**，以 openCypher 提供多跳图分析能力；图后端作为可重建的查询投影，坚决不承担核心事务与写入权限控制。
-* **零模型自证与证据强绑定（Evidence-Governed）**：遵循 [ADR 0002](file:///home/paul/project/enterprise_gateway/docs/adr/0002-evidence-governed-knowledge.md)，流经网关的数据必须记录精确字符坐标（Span）、SHA-256 摘要、语气模态（Modality）与正负极性（Polarity）。模型生成内容与文本共现绝不自证业务事实。
+* **零模型自证与证据强绑定（Evidence-Governed）**：遵循 [ADR 0002](adr/0002-evidence-governed-knowledge.md)，流经网关的数据必须记录精确字符坐标（Span）、SHA-256 摘要、语气模态（Modality）与正负极性（Polarity）。模型生成内容与文本共现绝不自证业务事实。
 * **借鉴 OpenSPG 与 DeepKE 的深度治理**：
   * 参考 **OpenSPG**（语义属性图，Semantic Property Graph）：建立概念谓词约束（Schema Constraints）、实体唯一性对齐（Entity Resolution）与逻辑互斥规则校验；
   * 参考 **DeepKE**：建立解耦的多阶信息抽取管线（NER -> RE -> AE），融合规则与本地轻量级模型，量化置信度与细粒度证据锚定。
@@ -81,7 +81,7 @@ flowchart TD
 ## 3. 上游标准化摄取设计（Framework & TODO）
 
 ### 3.1 核心数据结构与契约
-上游摄取框架代码位于 [`apps/backend/src/knowledge/ingestion.py`](file:///home/paul/project/enterprise_gateway/apps/backend/src/knowledge/ingestion.py)，核心对象定义如下：
+上游摄取框架代码位于 [`apps/backend/src/knowledge/ingestion.py`](../apps/backend/src/knowledge/ingestion.py)，核心对象定义如下：
 
 * **`IngestionSourceMeta`**：声明批次来源元数据，包括 `tenant_id`、`domain`、`source_kind`（`MASTER_DATA` / `DOCUMENT` / `TRUSTED_TOOL`）、`version`、`acl`、`observed_at` 和 `retention_until`。
 * **`RawEntityItem`**：上游标准化实体输入，包含名称 `name`、实体类别 `entity_type`、外部主键 `external_id`、别名列表 `aliases`、属性字典 `properties` 及置信度 `confidence`。
@@ -103,7 +103,7 @@ flowchart TD
 
 ## 4. 基于 DeepKE 的网关流经知识抽取与校准增强
 
-针对网关在实时转发与异步 Spool 中截获的非结构化交互文本，参考 **DeepKE** 的多阶抽取架构，解耦并升级原先单一的 [`extractor.py`](file:///home/paul/project/enterprise_gateway/apps/backend/src/knowledge/extractor.py)：
+针对网关在实时转发与异步 Spool 中截获的非结构化交互文本，参考 **DeepKE** 的多阶抽取架构，解耦并升级原先单一的 [`extractor.py`](../apps/backend/src/knowledge/extractor.py)：
 
 ### 4.1 多阶抽取管线（Multi-Stage Pipeline）
 1. **Stage 1: 命名实体识别与实体链接（NER & Entity Linking）**
@@ -289,28 +289,28 @@ flowchart TD
 
 知识图谱建设按以下 5 个递进阶段推进：
 
-### 阶段 1：上游标准化摄取框架与契约基石（本次完成）
-- [x] 定义上游摄取规范模型：`IngestionSourceMeta`, `RawEntityItem`, `RawRelationItem`, `IngestionBatch`；
-- [x] 实现抽象基类 `BaseKnowledgeImporter`、专用导入器存根及 TODO 注解；
-- [x] 提供单元测试与契约自洽性校验；
-- [x] 完成本技术设计规范文档。
+### 8.1 阶段 1：上游标准化摄取框架与契约基石
+* 定义上游摄取规范模型：`IngestionSourceMeta`, `RawEntityItem`, `RawRelationItem`, `IngestionBatch`；
+* 实现抽象基类 `BaseKnowledgeImporter`、专用导入器存根及 TODO 注解；
+* 提供单元测试与契约自洽性校验；
+* 确立技术设计规范文档。
 
-### 阶段 2：基于 DeepKE 的流经关系抽取与校准增强
-- [ ] 扩展 `extractor.py` 为多阶段抽取管线：解耦实体对齐、关系抽取与属性抽取；
-- [ ] 增加否定词（Polarity）与假设疑问词（Modality）细粒度检测算法；
-- [ ] 接入本地离线轻量 ONNX 分类模型作为双轨校验，增加置信度阈值门禁。
+### 8.2 阶段 2：基于 DeepKE 的流经关系抽取与校准增强
+* 扩展 `extractor.py` 为多阶段抽取管线：解耦实体对齐、关系抽取与属性抽取；
+* 增加否定词（Polarity）与假设疑问词（Modality）细粒度检测算法；
+* 接入本地离线轻量 ONNX 分类模型作为双轨校验，增加置信度阈值门禁。
 
-### 阶段 3：基于 OpenSPG 的语义属性图约束与规则引擎
-- [ ] 定义 `PredicateSchema` 强类型约束机制（Domain / Range 校验）；
-- [ ] 实现业务逻辑互斥事实校验器（正负关系互斥、时间窗口冲突、争议事实挂起）；
-- [ ] 实体别名链管理与 UUID5 确定性对齐持久化。
+### 8.3 阶段 3：基于 OpenSPG 的语义属性图约束与规则引擎
+* 定义 `PredicateSchema` 强类型约束机制（Domain / Range 校验）；
+* 实现业务逻辑互斥事实校验器（正负关系互斥、时间窗口冲突、争议事实挂起）；
+* 实体别名链管理与 UUID5 确定性对齐持久化。
 
-### 阶段 4：PostgreSQL + Apache AGE 图扩展装配与 Outbox 投影
-- [ ] 在本机开发环境及 Compose PostgreSQL 5433 环境装载 `apache-age` 扩展；
-- [ ] 编写 Outbox 图同步器 Worker，将 `PUBLISHED` / `WITHDRAWN` 事实单向投影至 AGE；
-- [ ] 实现全量从关系表重建 AGE 图空间的自动化运维作业。
+### 8.4 阶段 4：PostgreSQL + Apache AGE 图扩展装配与 Outbox 投影
+* 在本地开发环境及 Compose PostgreSQL 5433 环境装载 `apache-age` 扩展；
+* 编写 Outbox 图同步器 Worker，将 `PUBLISHED` / `WITHDRAWN` 事实单向投影至 AGE；
+* 实现全量从关系表重建 AGE 图空间的自动化运维作业。
 
-### 阶段 5：受控 Cypher 查询 API 与管理端图谱可视化
-- [ ] 实现 `/api/admin/graph/query` 及 AST 租户条件强制注入；
-- [ ] 在 React 管理端集成图拓扑可视化组件（展示实体关系图谱、证据详情卡片及谱系回溯）；
-- [ ] 完成端到端 E2E 浏览器与集成测试验证。
+### 8.5 阶段 5：受控 Cypher 查询 API 与管理端图谱可视化
+* 实现 `/api/admin/graph/query` 及 AST 租户条件强制注入；
+* 在 React 管理端集成图拓扑可视化组件（展示实体关系图谱、证据详情卡片及谱系回溯）；
+* 完成端到端 E2E 浏览器与集成测试验证。
