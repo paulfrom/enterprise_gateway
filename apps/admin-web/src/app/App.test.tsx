@@ -63,6 +63,7 @@ describe('App session admission and routes', () => {
     expect(screen.getByText('候选审核')).toBeInTheDocument();
     expect(screen.getByText('资产发布')).toBeInTheDocument();
     expect(screen.getByText('采集观察')).toBeInTheDocument();
+    expect(screen.getByText('图谱分析')).toBeInTheDocument();
     expect(screen.getByText('安全审计')).toBeInTheDocument();
   }, 15000);
 });

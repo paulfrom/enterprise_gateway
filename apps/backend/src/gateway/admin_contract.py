@@ -84,6 +84,43 @@ class AuditDetail(BaseModel):
     item: CatalogEntry
     plaintext: str
 
+class GraphQueryRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    cypher: str
+    params: dict[str, Any] = {}
+    purpose: str | None = None
+
+class GraphNodeDTO(BaseModel):
+    id: str
+    name: str
+    type: str
+    tenant_id: str
+    domain: str
+    properties: dict[str, Any] = {}
+
+class GraphEdgeDTO(BaseModel):
+    claim_id: str
+    source_id: str
+    target_id: str
+    predicate: str
+    polarity: str
+    modality: str
+    publication_id: str
+    valid_until: str
+    is_active: bool
+    properties: dict[str, Any] = {}
+
+class GraphQueryResponse(BaseModel):
+    nodes: list[GraphNodeDTO]
+    edges: list[GraphEdgeDTO]
+    raw_records: list[dict[str, Any]]
+    execution_time_ms: float
+
+class GraphRebuildResponse(BaseModel):
+    nodes_rebuilt: int
+    edges_rebuilt: int
+    status: str = 'completed'
+
 ERROR_RESPONSES = {status: {'model': AdminError} for status in (401,403,404,409,422,429,503)}
 LOGIN_BODY = {'requestBody': {'required': True, 'content': {'application/json': {'schema': LoginRequest.model_json_schema()}}}}
 HISTORY_QUERY = {'parameters': [

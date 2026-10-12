@@ -10,6 +10,7 @@ import {
   EyeOutlined,
   AuditOutlined,
   LogoutOutlined,
+  BranchesOutlined,
 } from '@ant-design/icons';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -29,6 +30,7 @@ import {
   KnowledgeCandidates,
   KnowledgePublications,
   KnowledgeObservations,
+  KnowledgeGraph,
   SecurityAudit,
 } from '../features';
 
@@ -139,6 +141,7 @@ function Console() {
     { key: '/admin/candidates', icon: <CheckCircleOutlined />, label: '候选审核' },
     { key: '/admin/publications', icon: <SendOutlined />, label: '资产发布' },
     { key: '/admin/observations', icon: <EyeOutlined />, label: '采集观察' },
+    { key: '/admin/graph', icon: <BranchesOutlined />, label: '图谱分析' },
     { key: '/admin/audit', icon: <AuditOutlined />, label: '安全审计' },
   ];
 
@@ -232,6 +235,7 @@ function Console() {
             <Route path="/admin/candidates" element={protectedPage(<KnowledgeCandidates />)} />
             <Route path="/admin/publications" element={protectedPage(<KnowledgePublications />)} />
             <Route path="/admin/observations" element={protectedPage(<KnowledgeObservations />)} />
+            <Route path="/admin/graph" element={protectedPage(<KnowledgeGraph />)} />
             <Route path="/admin/audit" element={protectedPage(<SecurityAudit />)} />
             <Route path="*" element={<Navigate to={session ? '/admin' : '/login'} replace />} />
           </Routes>

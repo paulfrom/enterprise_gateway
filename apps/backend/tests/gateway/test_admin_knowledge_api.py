@@ -982,6 +982,36 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
         self.assertEqual(response.json(),
                          {"error": {"code": "KNOWLEDGE_GOVERNANCE_VERSION_CONFLICT"}})
 
+    def test_graph_query_and_rebuild_endpoints(self):
+        headers = self._auth()
+        # 1. Test rebuild endpoint
+        rebuild_resp = self.client.post("/api/admin/graph/rebuild", headers=headers, json={})
+        self.assertEqual(rebuild_resp.status_code, 200, rebuild_resp.text)
+        rebuild_data = rebuild_resp.json()
+        self.assertIn("nodes_rebuilt", rebuild_data)
+        self.assertIn("edges_rebuilt", rebuild_data)
+        self.assertEqual(rebuild_data["status"], "completed")
+
+        # 2. Test query endpoint with valid read-only cypher
+        query_resp = self.client.post(
+            "/api/admin/graph/query",
+            headers=headers,
+            json={"cypher": "MATCH (n:Entity) RETURN n LIMIT 10", "params": {}},
+        )
+        self.assertEqual(query_resp.status_code, 200, query_resp.text)
+        query_data = query_resp.json()
+        self.assertIn("nodes", query_data)
+        self.assertIn("edges", query_data)
+        self.assertIn("execution_time_ms", query_data)
+
+        # 3. Test query endpoint rejects mutating Cypher
+        bad_query_resp = self.client.post(
+            "/api/admin/graph/query",
+            headers=headers,
+            json={"cypher": "CREATE (n:Entity {id: 'bad'}) RETURN n", "params": {}},
+        )
+        self.assertEqual(bad_query_resp.status_code, 422, bad_query_resp.text)
+
 
 
 class AdminCapabilityAssemblyTests(unittest.TestCase):

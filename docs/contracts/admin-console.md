@@ -127,3 +127,18 @@ DDL v3 将 `entity_aliases` 纳入固定结构与指纹，强制租户、业务�
 管理 PG、目录构建与解密队列独立于模型检测/NER；知识能力故障不关闭审计能力，新增管理能力故障不改变模型准入。既有必需加密留证、密钥、水位和 Spool 门禁仍执行。独立目录配额限制新增使用量，不承诺共享磁盘、共享 KMS 或整机完全故障时仍可外发。
 
 知识管理与历史共用部署 schema，知识管理角色不得获得历史表权限；启动与取连接时同时检查跨用途授权。知识 v3 指纹仅排除两张已知历史表及其元数据，未知知识结构漂移仍拒绝。完整布局见 [ADR 0008](../adr/0008-unified-database-namespace.md)。
+
+
+## 受控图查询
+
+默认图空间绑定数据库和事实源 SQL namespace，采用稳定哈希后缀；不同 namespace 的数据与重建互不影响，测试 namespace 不复用部署图空间。
+
+部署 owner 在 `apps/backend` 执行 `PYTHONPATH=src .venv/bin/python scripts/prepare_age_graph.py --config /private/database-deployment.json`，预建图、Entity/Claim 标签并向专用受限管理员角色授权。管理 API 重建仅删除和重放固定租户/业务域的投影，保留其他范围；其数据库连接设置对应管理员 RLS 上下文。
+
+`POST /api/admin/graph/query` 仅接受能完整解析和改写的 openCypher 子集：带明确变量和 `Entity` 标签的节点模式，以及最多四跳、每条边均带 `Claim` 标签的固定长度关系模式；支持属性字面量/参数匹配、由 `AND` 连接的简单属性比较、`RETURN` 节点/边/属性或 `count`、可选 `DISTINCT`/列别名及整数 `LIMIT`。默认最多 100 行，显式上限为 1000 行、16 列，数据库事务只读且查询超时为 5 秒。未支持的语法、匿名变量、无标签节点、可变长度路径、`UNION`、`WITH`、子查询、注释、多语句和写操作均在执行前拒绝。
+
+服务端为每个节点和边加入可信租户及业务域条件，为每条边加入 `is_active=true` 和 `valid_until_epoch` 有效期条件。请求参数不能覆盖这些内部绑定；过滤发生在聚合和投影之前，同时约束结构化结果、属性值与 `raw_records`。SQL 包装使用安全图名字面量与不出现在查询文本中的 dollar delimiter，拒绝查询文本逃逸到 SQL。
+
+图查询前按可信租户/业务域消费最多 1000 条相关 Outbox 事件，先排空已有投影工作再读取；同步失败或达到批次上限时拒绝返回图数据，不静默读取旧投影。同步与重建统一写入时间戳形式的 `valid_until_epoch`；已有旧图需执行图投影重建。
+
+示例：`MATCH (n:Entity) RETURN n LIMIT 100`，以及 `MATCH (s:Entity)-[r:Claim]->(o:Entity) WHERE s.name = $name RETURN s, r, o LIMIT 50`。AGE 扩展必须由部署管理员预先安装；CI 使用带扩展的 PostgreSQL 17 镜像，真实数据库测试不得跳过扩展缺失。

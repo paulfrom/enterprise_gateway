@@ -336,6 +336,196 @@
         "title": "GovernanceResult",
         "type": "object"
       },
+      "GraphEdgeDTO": {
+        "properties": {
+          "claim_id": {
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "modality": {
+            "title": "Modality",
+            "type": "string"
+          },
+          "polarity": {
+            "title": "Polarity",
+            "type": "string"
+          },
+          "predicate": {
+            "title": "Predicate",
+            "type": "string"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Properties",
+            "type": "object"
+          },
+          "publication_id": {
+            "title": "Publication Id",
+            "type": "string"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "valid_until": {
+            "title": "Valid Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "source_id",
+          "target_id",
+          "predicate",
+          "polarity",
+          "modality",
+          "publication_id",
+          "valid_until",
+          "is_active"
+        ],
+        "title": "GraphEdgeDTO",
+        "type": "object"
+      },
+      "GraphNodeDTO": {
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Properties",
+            "type": "object"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "tenant_id",
+          "domain"
+        ],
+        "title": "GraphNodeDTO",
+        "type": "object"
+      },
+      "GraphQueryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "cypher": {
+            "title": "Cypher",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose"
+          }
+        },
+        "required": [
+          "cypher"
+        ],
+        "title": "GraphQueryRequest",
+        "type": "object"
+      },
+      "GraphQueryResponse": {
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphEdgeDTO"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "execution_time_ms": {
+            "title": "Execution Time Ms",
+            "type": "number"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphNodeDTO"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "raw_records": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Raw Records",
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes",
+          "edges",
+          "raw_records",
+          "execution_time_ms"
+        ],
+        "title": "GraphQueryResponse",
+        "type": "object"
+      },
+      "GraphRebuildResponse": {
+        "properties": {
+          "edges_rebuilt": {
+            "title": "Edges Rebuilt",
+            "type": "integer"
+          },
+          "nodes_rebuilt": {
+            "title": "Nodes Rebuilt",
+            "type": "integer"
+          },
+          "status": {
+            "default": "completed",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "nodes_rebuilt",
+          "edges_rebuilt"
+        ],
+        "title": "GraphRebuildResponse",
+        "type": "object"
+      },
       "HistoryDetail": {
         "properties": {
           "created_at": {
@@ -1773,6 +1963,192 @@
           }
         },
         "summary": "Revise"
+      }
+    },
+    "/api/admin/graph/query": {
+      "post": {
+        "operationId": "graph_query_api_admin_graph_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphQueryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Graph Query"
+      }
+    },
+    "/api/admin/graph/rebuild": {
+      "post": {
+        "operationId": "graph_rebuild_api_admin_graph_rebuild_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminError"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Graph Rebuild"
       }
     },
     "/api/admin/login": {

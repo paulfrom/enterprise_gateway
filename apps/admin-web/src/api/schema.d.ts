@@ -140,6 +140,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/graph/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Graph Query */
+        post: operations["graph_query_api_admin_graph_query_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/graph/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Graph Rebuild */
+        post: operations["graph_rebuild_api_admin_graph_rebuild_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/login": {
         parameters: {
             query?: never;
@@ -511,6 +545,93 @@ export interface components {
         GovernanceResult: {
             /** Governance Version Id */
             governance_version_id: string;
+        };
+        /** GraphEdgeDTO */
+        GraphEdgeDTO: {
+            /** Claim Id */
+            claim_id: string;
+            /** Is Active */
+            is_active: boolean;
+            /** Modality */
+            modality: string;
+            /** Polarity */
+            polarity: string;
+            /** Predicate */
+            predicate: string;
+            /**
+             * Properties
+             * @default {}
+             */
+            properties: {
+                [key: string]: unknown;
+            };
+            /** Publication Id */
+            publication_id: string;
+            /** Source Id */
+            source_id: string;
+            /** Target Id */
+            target_id: string;
+            /** Valid Until */
+            valid_until: string;
+        };
+        /** GraphNodeDTO */
+        GraphNodeDTO: {
+            /** Domain */
+            domain: string;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Properties
+             * @default {}
+             */
+            properties: {
+                [key: string]: unknown;
+            };
+            /** Tenant Id */
+            tenant_id: string;
+            /** Type */
+            type: string;
+        };
+        /** GraphQueryRequest */
+        GraphQueryRequest: {
+            /** Cypher */
+            cypher: string;
+            /**
+             * Params
+             * @default {}
+             */
+            params: {
+                [key: string]: unknown;
+            };
+            /** Purpose */
+            purpose?: string | null;
+        };
+        /** GraphQueryResponse */
+        GraphQueryResponse: {
+            /** Edges */
+            edges: components["schemas"]["GraphEdgeDTO"][];
+            /** Execution Time Ms */
+            execution_time_ms: number;
+            /** Nodes */
+            nodes: components["schemas"]["GraphNodeDTO"][];
+            /** Raw Records */
+            raw_records: {
+                [key: string]: unknown;
+            }[];
+        };
+        /** GraphRebuildResponse */
+        GraphRebuildResponse: {
+            /** Edges Rebuilt */
+            edges_rebuilt: number;
+            /** Nodes Rebuilt */
+            nodes_rebuilt: number;
+            /**
+             * Status
+             * @default completed
+             */
+            status: string;
         };
         /** HistoryDetail */
         HistoryDetail: {
@@ -1318,6 +1439,176 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReviseResult"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+        };
+    };
+    graph_query_api_admin_graph_query_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GraphQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphQueryResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminError"];
+                };
+            };
+        };
+    };
+    graph_rebuild_api_admin_graph_rebuild_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphRebuildResponse"];
                 };
             };
             /** @description Unauthorized */
