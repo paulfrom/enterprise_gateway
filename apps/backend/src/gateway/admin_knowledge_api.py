@@ -283,9 +283,15 @@ def install_knowledge_admin_routes(app, auth_service, governance):
     @app.post('/api/admin/graph/query', response_model=GraphQueryResponse, responses=ERROR_RESPONSES)
     def graph_query(request: Request, body: GraphQueryRequest, context=Depends(require)):
         def execute():
-            from knowledge.age_graph import AgeGraphManager, GovernedGraphQueryService
+            from knowledge.age_graph import AgeGraphManager, OutboxGraphSyncer, GovernedGraphQueryService
             admin_dsn = governance._storage.admin_dsn
             mgr = AgeGraphManager(admin_dsn)
+            mgr.ensure_graph()
+            syncer = OutboxGraphSyncer(admin_dsn, mgr)
+            try:
+                syncer.sync_outbox_events(limit=50)
+            except Exception:
+                pass
             service = GovernedGraphQueryService(admin_dsn, mgr)
             result = service.query(
                 tenant_id=governance._tenant_id,
