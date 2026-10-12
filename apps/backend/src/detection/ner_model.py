@@ -337,7 +337,7 @@ def verify_loaded_package(package: LoadedNerPackage, expected_digest: str) -> No
         if package.snapshot.digest != expected_digest:
             raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
         package.snapshot.validate()
-        return
+        # Sealed inference data does not replace the source-package admission gate.
     if model_manifest_digest(package.package_dir) != expected_digest:
         raise SafetyError(SafetyCode.NER_MODEL_INVALID, "manifest_version_changed")
     _verify_file_hashes(package.package_dir, package.manifest)

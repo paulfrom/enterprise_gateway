@@ -3,7 +3,7 @@
 Provides relational persistence for knowledge sources, entities, claims,
 evidence, transactional outbox events, and consumer receipts.
 Enforces foreign key integrity, cross-domain isolation, and PostgreSQL Row-Level
-Security (RLS). Schema v2 binds every governance mutation to a recorded
+Security (RLS). Schema v3 binds every governance mutation to a recorded
 single-admin action and pins the deployed structure with a normalized fingerprint.
 """
 
@@ -38,19 +38,20 @@ from knowledge.knowledge import (
     TrustedActor,
 )
 
-SCHEMA_VERSION = 2
-# Locked to the measured metadata fingerprint of SCHEMA_SQL v2 (see
+SCHEMA_VERSION = 3
+# Locked to the measured metadata fingerprint of SCHEMA_SQL v3 (see
 # tests.knowledge.test_storage.TestSchemaFingerprint); any structural drift
 # must update this constant in the same change.
 SCHEMA_FINGERPRINT_V2 = '808ff8d8afb5cbf8a5d9b019f57a38721d5bb5f302b630f8b34985e1e24d8ed0'
+SCHEMA_FINGERPRINT_V3 = '6cd0447b058ec08ec6690f9a09fe765023019f82c2be537df112c0b542ec7423'
 
 
 class KnowledgeSchemaError(RuntimeError):
-    """The deployed knowledge schema does not match the supported v2 contract."""
+    """The deployed knowledge schema does not match the supported v3 contract."""
 
     code = 'KNOWLEDGE_SCHEMA_INCOMPATIBLE'
 
-    def __init__(self, detail: str = 'knowledge schema metadata does not match the supported v2 contract'):
+    def __init__(self, detail: str = 'knowledge schema metadata does not match the supported v3 contract'):
         super().__init__(f'{self.code}: {detail}')
 
 
@@ -58,7 +59,7 @@ def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> 
     """Normalized sha256 over the schema's table/column/constraint/index/trigger/function/policy metadata.
 
     OIDs, the schema name and deployment-specific role-name literals are stripped
-    so independently deployed v2 namespaces fingerprint identically.
+    so independently deployed namespaces fingerprint identically.
     """
     schema = conn.execute('SELECT current_schema()').fetchone()[0]
 
@@ -111,7 +112,15 @@ def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> 
         json.dumps(canonical, sort_keys=True, default=str).encode('utf-8')).hexdigest()
 
 
-SCHEMA_SQL = """
+ALIAS_SCHEMA_SQL = """
+CREATE TABLE entity_aliases (
+ tenant_id TEXT NOT NULL, domain TEXT NOT NULL, alias_name TEXT NOT NULL,
+ canonical_name TEXT NOT NULL, entity_type TEXT NOT NULL, canonical_id UUID NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(tenant_id,domain,alias_name));
+"""
+
+SCHEMA_SQL = ALIAS_SCHEMA_SQL + """
 CREATE TABLE knowledge_sources (
  tenant_id TEXT NOT NULL, domain TEXT NOT NULL, source_id TEXT NOT NULL, version TEXT NOT NULL,
  source_kind TEXT NOT NULL, acl TEXT[] NOT NULL CHECK(cardinality(acl)>0), purpose TEXT NOT NULL,
@@ -507,7 +516,8 @@ _ASSET_TABLES = ('knowledge_sources','knowledge_entities','knowledge_evidence','
  'knowledge_candidates','candidate_evidence_links','knowledge_publications',
  'knowledge_tombstones','knowledge_outbox','consumer_receipts','knowledge_observations',
  'knowledge_consumer_assets')
-_ADMIN_TABLES = ('knowledge_admin_actions','knowledge_governance_versions','knowledge_publication_sources')
+_ADMIN_TABLES = ('knowledge_admin_actions','knowledge_governance_versions','knowledge_publication_sources',
+                 'entity_aliases')
 _SCOPE_POLICY = """tenant_id = nullif(current_setting('app.tenant',true),'')
  AND domain = nullif(current_setting('app.domain',true),'')
  AND acl && COALESCE(nullif(current_setting('app.subjects',true),'')::text[], ARRAY[]::text[])
@@ -516,6 +526,9 @@ _ADMIN_POLICY = ("current_user = __ADMIN_ROLE__ "
  "AND nullif(current_setting('app.admin_context',true),'') = 'true' "
  "AND tenant_id = nullif(current_setting('app.tenant',true),'') "
  "AND domain = nullif(current_setting('app.domain',true),'')")
+ALIAS_RLS_SQL = (
+ 'ALTER TABLE entity_aliases ENABLE ROW LEVEL SECURITY; ALTER TABLE entity_aliases FORCE ROW LEVEL SECURITY; '
+ f'CREATE POLICY admin_access ON entity_aliases USING ({_ADMIN_POLICY}) WITH CHECK ({_ADMIN_POLICY});')
 RLS_SETUP_SQL = '\n'.join(
  [f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; '
   f'CREATE POLICY governed_access ON {table} USING ({_SCOPE_POLICY}) WITH CHECK ({_SCOPE_POLICY}); '
@@ -539,7 +552,7 @@ class PostgresKnowledgeStorage:
 
     def init_database(self, *, enable_rls: bool = True, application_role: str | None = None,
                       admin_role: str | None = None) -> str:
-        """Create the v2 schema objects and optionally set up Row Level Security.
+        """Create the v3 schema objects and optionally set up Row Level Security.
 
         Returns the measured schema fingerprint of the freshly deployed namespace.
         Grants for the schema-bound application and dedicated admin roles are
@@ -566,18 +579,18 @@ class PostgresKnowledgeStorage:
                 return compute_schema_fingerprint(conn, admin_role=admin_role or '')
 
     def verify_schema(self, conn: psycopg.Connection) -> None:
-        """Refuse to run against a schema whose metadata fingerprint drifted from v2."""
+        """Refuse to run against a schema whose metadata fingerprint drifted from v3."""
         actual = compute_schema_fingerprint(conn, admin_role=self.admin_role or '')
-        if actual != SCHEMA_FINGERPRINT_V2:
+        if actual != SCHEMA_FINGERPRINT_V3:
             raise KnowledgeSchemaError(
-                f'schema fingerprint mismatch: expected {SCHEMA_FINGERPRINT_V2}, measured {actual}')
+                f'schema fingerprint mismatch: expected {SCHEMA_FINGERPRINT_V3}, measured {actual}')
 
     @contextmanager
     def admin_transaction(self, *, tenant_id: str, domain: str) -> Iterator[psycopg.Connection]:
         """One governed admin transaction on the dedicated admin connection.
 
         The connection adopts the dedicated admin role and binds the transaction
-        local app.tenant/app.domain/app.admin_context='true' GUCs; the v2 schema
+        local app.tenant/app.domain/app.admin_context='true' GUCs; the v3 schema
         fingerprint is verified before the transaction body runs.
         """
         if not self.admin_dsn:
@@ -667,24 +680,6 @@ class PostgresKnowledgeStorage:
                 ),
             )
 
-    def ensure_alias_table(self, conn: psycopg.Connection) -> None:
-        """Ensure entity_aliases table exists for alias chain persistence."""
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS entity_aliases (
-                    tenant_id TEXT NOT NULL,
-                    domain TEXT NOT NULL,
-                    alias_name TEXT NOT NULL,
-                    canonical_name TEXT NOT NULL,
-                    entity_type TEXT NOT NULL,
-                    canonical_id UUID NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (tenant_id, domain, alias_name)
-                );
-                """
-            )
-
     def save_entity_alias(
         self,
         conn: psycopg.Connection,
@@ -696,7 +691,6 @@ class PostgresKnowledgeStorage:
         canonical_id: UUID,
     ) -> None:
         """Persist an entity alias to canonical mapping."""
-        self.ensure_alias_table(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -715,7 +709,6 @@ class PostgresKnowledgeStorage:
         self, conn: psycopg.Connection, tenant_id: str, domain: str, alias_name: str
     ) -> dict[str, Any] | None:
         """Fetch a single entity alias mapping if present."""
-        self.ensure_alias_table(conn)
         with conn.cursor(row_factory=dict_row) as cur:
             return cur.execute(
                 """
@@ -730,7 +723,6 @@ class PostgresKnowledgeStorage:
         self, conn: psycopg.Connection, tenant_id: str, domain: str
     ) -> list[dict[str, Any]]:
         """List all entity alias mappings in a scope."""
-        self.ensure_alias_table(conn)
         with conn.cursor(row_factory=dict_row) as cur:
             return cur.execute(
                 """
@@ -746,7 +738,6 @@ class PostgresKnowledgeStorage:
         self, conn: psycopg.Connection, tenant_id: str, domain: str, alias_name: str
     ) -> bool:
         """Delete an entity alias mapping."""
-        self.ensure_alias_table(conn)
         with conn.cursor() as cur:
             res = cur.execute(
                 """

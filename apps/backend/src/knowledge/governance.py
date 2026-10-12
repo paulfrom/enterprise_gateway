@@ -350,6 +350,11 @@ class KnowledgeGovernanceService:
         try:
             with self._admin_tx() as conn:
                 with conn.transaction():
+                    if object_type == 'candidate' and FACT_DISPUTED in blocking_reasons:
+                        conn.execute(
+                            "UPDATE knowledge_candidates SET state='disputed', rejection_reason='positive/negative mutual exclusion' "
+                            " WHERE (tenant_id,domain,candidate_id)=(%s,%s,%s)",
+                            (self._tenant_id, self._domain, UUID(str(object_id))))
                     self._insert_action(conn, uuid4(), context=context,
                                         action_type=action_type, object_type=object_type,
                                         object_id=object_id, object_version=object_version,
