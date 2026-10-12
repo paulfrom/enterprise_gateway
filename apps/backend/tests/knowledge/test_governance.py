@@ -279,6 +279,26 @@ class TestAvailabilityDecisionFunctions(unittest.TestCase):
 class TestSingleAdminGovernance(GovernancePgTestCase):
     """Admin-direct governance on real PG: the two-person flow is gone."""
 
+    def test_opposing_fact_persists_dispute_after_publish_transaction_rolls_back(self):
+        from knowledge.governance import FACT_DISPUTED
+        with self.admin_conn() as conn:
+            self.seed_source(conn, 'negative-source')
+            negative = self.seed_candidate(conn, 'negative-source')
+            conn.execute("UPDATE knowledge_claims SET polarity='negative' WHERE claim_id="
+                         "(SELECT claim_id FROM knowledge_candidates WHERE candidate_id=%s)", (negative,))
+            self.seed_source(conn, 'positive-source')
+            candidate = self.seed_candidate(conn, 'positive-source')
+        self.confirm('positive-source', audiences=('legal',))
+        with self.assertRaises(GovernanceError) as caught:
+            self.publish(candidate, audiences=('legal',))
+        self.assertIn(FACT_DISPUTED, caught.exception.blocking_reasons)
+        with self.admin_conn() as conn:
+            self.assertEqual(conn.execute('SELECT state FROM knowledge_candidates WHERE candidate_id=%s',
+                                          (candidate,)).fetchone()[0], 'disputed')
+            self.assertEqual(conn.execute('SELECT count(*) FROM knowledge_publications WHERE candidate_id=%s',
+                                          (candidate,)).fetchone()[0], 0)
+        self.assertEqual(len(self.admin_actions(action_type='publish', result='failed', object_id=candidate)), 1)
+
     def test_admin_direct_publish_success_without_second_actor(self):
         with self.admin_conn() as conn:
             self.seed_source(conn, 'src-a')

@@ -67,7 +67,9 @@ API（全部经统一管理员依赖）：
 - 初始化仅创建新的 schema；结构不符时拒绝对应能力，不修改已有对象。
 - admin 查询受限/拒绝/撤回/到期元数据不使用消费者 active publication 过滤；正文读取遵守实际保留与密钥状态。
 
-DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`knowledge_publication_sources`。候选具有 `candidate_version` 和 `derived_from`，发布绑定精确候选版本、用途、消费受众、有效期限、管理员动作和幂等键；消费者资产、回执与 Outbox 保存实际版本、谱系和投递状态。结构准入使用 `SCHEMA_VERSION=2` 和 `SCHEMA_FINGERPRINT_V2`：对数据库元数据规范化后计算，保留列、约束、函数体、触发器和策略语义，剔除部署 schema/角色名字面量及 OID。
+DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`knowledge_publication_sources`。候选具有 `candidate_version` 和 `derived_from`，发布绑定精确候选版本、用途、消费受众、有效期限、管理员动作和幂等键；消费者资产、回执与 Outbox 保存实际版本、谱系和投递状态。结构准入使用 `SCHEMA_VERSION=3` 和 `SCHEMA_FINGERPRINT_V3`：对数据库元数据规范化后计算，保留列、约束、函数体、触发器和策略语义，剔除部署 schema/角色名字面量及 OID。
+
+DDL v3 将 `entity_aliases` 纳入固定结构与指纹，强制租户、业务域及专用管理员 RLS；别名读写不执行 DDL。普通应用角色即使设置管理员 GUC 也不能读写别名。已有完整 v2 namespace 通过显式、仅新增的迁移升级；运行时和初始化器仍不自动改动已有结构。停止旧版本服务后，在 `apps/backend` 执行 `PYTHONPATH=src .venv/bin/python scripts/migrate_knowledge_aliases.py --config /private/database-deployment.json`，配置需包含 owner `admin_dsn`、`schema`、`application_role` 与 `admin_role`。迁移保留既有数据，对 v3 重复执行无变更，未知结构漂移拒绝并回滚。
 
 `GATEWAY_ADMIN_KNOWLEDGE_PG_DSN` 与 `_FILE` 恰选一个；它是管理应用的专用受限登录连接，与初始化 DDL 的 owner 连接区分。管理事务设置 `app.tenant`、`app.domain`、`app.admin_context='true'`，管理 RLS 同时校验 `current_user` 的专用身份与部署范围。普通 worker/consumer 不能靠设置 GUC 或自报受众进入管理分支。启动及管理连接池每次取出连接时检查全部 schema 表/序列、函数和 namespace 的属主及可达成员路径，包括 NOINHERIT 下可切换的路径；结构指纹不替代权限检查。
 
@@ -124,4 +126,4 @@ DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`kno
 
 管理 PG、目录构建与解密队列独立于模型检测/NER；知识能力故障不关闭审计能力，新增管理能力故障不改变模型准入。既有必需加密留证、密钥、水位和 Spool 门禁仍执行。独立目录配额限制新增使用量，不承诺共享磁盘、共享 KMS 或整机完全故障时仍可外发。
 
-知识管理与历史共用部署 schema，知识管理角色不得获得历史表权限；启动与取连接时同时检查跨用途授权。知识 v2 指纹仅排除两张已知历史表及其元数据，未知知识结构漂移仍拒绝。完整布局见 [ADR 0008](../adr/0008-unified-database-namespace.md)。
+知识管理与历史共用部署 schema，知识管理角色不得获得历史表权限；启动与取连接时同时检查跨用途授权。知识 v3 指纹仅排除两张已知历史表及其元数据，未知知识结构漂移仍拒绝。完整布局见 [ADR 0008](../adr/0008-unified-database-namespace.md)。
