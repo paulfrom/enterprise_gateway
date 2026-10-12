@@ -184,7 +184,7 @@ export function KnowledgeGraph() {
         }
       >
         <Typography.Paragraph type="secondary">
-          基于 PostgreSQL + Apache AGE (openCypher) 引擎提供只读投影拓扑分析与多跳图探索。受控查询已在后端强制注入多租户隔离约束与只读守卫。
+            支持 Entity 节点与最多四跳 Claim 关系的 MATCH 查询、属性等值过滤、RETURN 和 LIMIT。后端强制租户与业务域隔离，只展示有效关系；其他语法会被拒绝。
         </Typography.Paragraph>
 
         <Form layout="vertical">

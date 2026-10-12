@@ -288,17 +288,19 @@ def install_knowledge_admin_routes(app, auth_service, governance):
             mgr = AgeGraphManager(admin_dsn)
             mgr.ensure_graph()
             syncer = OutboxGraphSyncer(admin_dsn, mgr)
-            try:
-                syncer.sync_outbox_events(limit=50)
-            except Exception:
-                pass
+            for _ in range(10):
+                synced = syncer.sync_outbox_events(limit=100, tenant_id=governance._tenant_id,
+                                                  domain=governance._domain)
+                if synced < 100:
+                    break
+            else:
+                raise KnowledgeError('Graph projection backlog must be synchronized before querying')
             service = GovernedGraphQueryService(admin_dsn, mgr)
             result = service.query(
                 tenant_id=governance._tenant_id,
                 domain=governance._domain,
                 cypher=body.cypher,
                 params=body.params,
-                column_count=len(body.params.get('_columns')) if '_columns' in body.params else None,
             )
             return {
                 'nodes': [

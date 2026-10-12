@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 50
     services:
       postgres:
-        image: postgres:17
+        image: apache/age:release_PG17_1.7.0
         env:
           POSTGRES_PASSWORD: synthetic-ci-postgres
           POSTGRES_DB: enterprise_gateway
