@@ -6,48 +6,49 @@ import unittest
 from uuid import uuid4
 
 import psycopg
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
 
 from knowledge.age_graph import AgeGraphManager, GovernedGraphQueryService
 from knowledge.knowledge import KnowledgeError
-from tests.pg_support import get_admin_dsn
+from tests.pg_support import get_admin_dsn, prepare_test_database, test_configuration
 
 
 class GovernedGraphIsolationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        prepare_test_database()
         cls.dsn = get_admin_dsn()
-        cls.graph = AgeGraphManager(cls.dsn, graph_name='test_scoped_' + uuid4().hex[:12])
-        cls.graph.ensure_graph()
-        cls.addClassCleanup(cls.graph.drop_graph)
+        cls.domain = 'graph-scope-' + uuid4().hex
+        cls.other_domain = 'graph-other-' + uuid4().hex
+        cls.graph = AgeGraphManager(cls.dsn, graph_name=test_configuration().get('graph_name'))
+        cls.graph.verify_graph()
         cls.service = GovernedGraphQueryService(cls.dsn, cls.graph)
         with psycopg.connect(cls.dsn) as conn:
             for entity_id, name, tenant, domain in (
-                ('a', 'Alpha', 'tenant-1', 'corp'), ('b', 'Beta', 'tenant-1', 'corp'),
-                ('foreign', 'FOREIGN_TENANT_CANARY', 'tenant-2', 'corp'),
-                ('other-domain', 'FOREIGN_DOMAIN_CANARY', 'tenant-1', 'other'),
+                ('a', 'Alpha', 'tenant-1', cls.domain), ('b', 'Beta', 'tenant-1', cls.domain),
+                ('foreign', 'FOREIGN_TENANT_CANARY', 'tenant-2', cls.domain),
+                ('other-domain', 'FOREIGN_DOMAIN_CANARY', 'tenant-1', cls.other_domain),
             ):
                 cls.graph.execute_cypher(conn,
                     'CREATE (n:Entity {id: $id, name: $name, type: \'ORG\', tenant_id: $tenant, domain: $domain}) RETURN n',
                     {'id': entity_id, 'name': name, 'tenant': tenant, 'domain': domain})
             for claim, target, tenant, domain, active, expiry in (
-                ('live', 'b', 'tenant-1', 'corp', True, time.time() + 3600),
-                ('inactive', 'b', 'tenant-1', 'corp', False, time.time() + 3600),
-                ('expired', 'b', 'tenant-1', 'corp', True, time.time() - 3600),
-                ('foreign-edge', 'b', 'tenant-2', 'corp', True, time.time() + 3600),
-                ('other-domain-edge', 'b', 'tenant-1', 'other', True, time.time() + 3600),
-                ('foreign-endpoint', 'foreign', 'tenant-1', 'corp', True, time.time() + 3600),
+                ('live', 'b', 'tenant-1', cls.domain, True, time.time() + 3600),
+                ('inactive', 'b', 'tenant-1', cls.domain, False, time.time() + 3600),
+                ('expired', 'b', 'tenant-1', cls.domain, True, time.time() - 3600),
+                ('foreign-edge', 'b', 'tenant-2', cls.domain, True, time.time() + 3600),
+                ('other-domain-edge', 'b', 'tenant-1', cls.other_domain, True, time.time() + 3600),
+                ('foreign-endpoint', 'foreign', 'tenant-1', cls.domain, True, time.time() + 3600),
             ):
                 cls.graph.execute_cypher(conn,
-                    "MATCH (s:Entity {id: 'a'}), (o:Entity {id: $target}) "
+                    "MATCH (s:Entity {id: 'a',tenant_id:'tenant-1',domain:$base_domain}), (o:Entity {id: $target}) "
+                    "WHERE o.domain=$base_domain "
                     'CREATE (s)-[r:Claim {claim_id: $claim, publication_id: $claim, predicate: \'supplies\', '
                     'tenant_id: $tenant, domain: $domain, is_active: $active, valid_until_epoch: $expiry}]->(o) RETURN r',
-                    {'target': target, 'claim': claim, 'tenant': tenant, 'domain': domain,
+                    {'base_domain': cls.domain, 'target': target, 'claim': claim, 'tenant': tenant, 'domain': domain,
                      'active': active, 'expiry': expiry})
 
     def query(self, cypher, **kwargs):
-        return self.service.query(tenant_id='tenant-1', domain='corp', cypher=cypher, **kwargs)
+        return self.service.query(tenant_id='tenant-1', domain=self.domain, cypher=cypher, **kwargs)
 
     def test_vertices_scalar_records_and_aggregates_are_scoped(self):
         result = self.query('MATCH (n:Entity) RETURN n')
@@ -67,7 +68,7 @@ class GovernedGraphIsolationTests(unittest.TestCase):
         self.assertEqual(result.raw_records, ({'c0': 1},))
 
     def test_scoping_cannot_be_overridden_by_params_or_property_filters(self):
-        result = self.query('MATCH (n:Entity) RETURN n', params={'_tenant_id': 'tenant-2', '_domain': 'other'})
+        result = self.query('MATCH (n:Entity) RETURN n', params={'_tenant_id': 'tenant-2', '_domain': self.other_domain})
         self.assertEqual({node.name for node in result.nodes}, {'Alpha', 'Beta'})
         result = self.query('MATCH (n:Entity) WHERE n.tenant_id = $tenant RETURN n', params={'tenant': 'tenant-2'})
         self.assertEqual(result.raw_records, ())
@@ -102,34 +103,3 @@ class GovernedGraphIsolationTests(unittest.TestCase):
             literal = '$$; $gateway_cypher$; $gateway_cypher_$; SELECT current_user; --'
             rows = self.graph.execute_cypher(conn, f"RETURN '{literal}'")
         self.assertEqual(rows, [[literal]])
-
-    def test_default_projection_names_separate_authoritative_sql_namespaces(self):
-        schemas = ['test_graph_namespace_' + uuid4().hex[:12] for _ in range(2)]
-        managers = []
-        try:
-            with psycopg.connect(self.dsn) as conn:
-                for schema in schemas:
-                    conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
-            for schema, name in zip(schemas, ('Namespace A', 'Namespace B')):
-                dsn = make_conninfo(self.dsn, options='-c search_path=' + schema)
-                manager = AgeGraphManager(dsn)
-                managers.append(manager)
-                manager.ensure_graph()
-                with psycopg.connect(dsn) as conn:
-                    manager.execute_cypher(conn,
-                        "CREATE (n:Entity {id: 'same-id', name: $name, tenant_id: 'same-tenant', domain: 'same-domain'}) RETURN n",
-                        {'name': name})
-                result = GovernedGraphQueryService(dsn, manager).query(
-                    tenant_id='same-tenant', domain='same-domain', cypher='MATCH (n:Entity) RETURN n.name')
-                self.assertEqual(result.raw_records, ({'c0': name},))
-            self.assertNotEqual(managers[0].graph_name, managers[1].graph_name)
-            managers[0].drop_graph()
-            result = GovernedGraphQueryService(managers[1].dsn, managers[1]).query(
-                tenant_id='same-tenant', domain='same-domain', cypher='MATCH (n:Entity) RETURN n.name')
-            self.assertEqual(result.raw_records, ({'c0': 'Namespace B'},))
-        finally:
-            for manager in managers:
-                manager.drop_graph()
-            with psycopg.connect(self.dsn) as conn:
-                for schema in schemas:
-                    conn.execute(sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(schema)))

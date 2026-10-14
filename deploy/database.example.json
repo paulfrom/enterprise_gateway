@@ -1,0 +1,9 @@
+{
+  "schema": "public",
+  "application_role": "gw_knowledge_app",
+  "app_dsn": "host=127.0.0.1 port=5433 dbname=enterprise_gateway user=gw_knowledge_app password=replace-with-existing-secret",
+  "history_role": "gw_history_app",
+  "history_dsn": "host=127.0.0.1 port=5433 dbname=enterprise_gateway user=gw_history_app password=replace-with-existing-secret",
+  "admin_role": "gw_knowledge_admin",
+  "admin_app_dsn": "host=127.0.0.1 port=5433 dbname=enterprise_gateway user=gw_knowledge_admin password=replace-with-existing-secret"
+}

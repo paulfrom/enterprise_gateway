@@ -44,7 +44,6 @@ from infra.envelope_crypto import StaticTestKmsProvider, parse_record, decrypt_r
 from infra.errors import SafetyCode, SafetyError
 from audit.evidence_gate import EvidenceGate
 from protocol.identity import TrustedIdentity
-from detection.inference_executor import InferenceExecutor
 from knowledge.knowledge_events import ObservationEvent
 from masking.mapping import MappingContext
 from gateway.pipeline import ProtectedPipeline, UpstreamFailure
@@ -81,7 +80,7 @@ class UpstreamSpyTransport(httpx.BaseTransport):
 
 
 class IntegrationRoundtripTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self, *, ner_package_dir=MINI_PACKAGE) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.base_path = Path(self.temp_dir.name)
         self.intent_dir = self.base_path / "intents"
@@ -123,14 +122,13 @@ class IntegrationRoundtripTests(unittest.TestCase):
         }
         self.compiled_dict = compile_dictionary(payload)
 
-        # Detector
-        self.executor = InferenceExecutor(max_workers=1)
+        # Use the production persistent worker and its sealed model snapshot.
         self.detector = DetectionOrchestrator(
             recognizers=default_recognizers(),
             dictionary=self.compiled_dict,
-            ner_package_dir=MINI_PACKAGE,
-            executor=self.executor,
+            ner_package_dir=ner_package_dir,
         )
+        self.executor = self.detector._executor
 
         # Admission Limiter
         self.admission_limiter = AdmissionLimiter(
@@ -178,7 +176,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        self.executor.close()
+        self.detector.close()
         self.temp_dir.cleanup()
 
     def _create_pipeline(self, protocol: str, spy_transport: httpx.BaseTransport, **options) -> ProtectedPipeline:
@@ -230,7 +228,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             # Security assertion: plaintext MUST NOT appear in upstream request!
             self.assertNotIn("阿尔法科技", sent_content)
             self.assertNotIn("张三", sent_content)
-            self.assertIn("<<ENT_v1_", sent_content)
+            self.assertRegex(sent_content, r"<[A-Z]+_\d{3,}>")
 
             # Return upstream response containing the exact tokens
             resp_body = {
@@ -322,22 +320,34 @@ class IntegrationRoundtripTests(unittest.TestCase):
                 'usage': {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12}})
 
         spy = UpstreamSpyTransport(upstream_handler)
-        pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
-        for turn in range(3):
-            with self.subTest(turn=turn), MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
-                result = pipeline.process_request(raw_body=json.dumps(body),
-                    headers={'Authorization': 'Bearer synthetic-key'}, identity=self.identity,
-                    category='STANDARD', context=ctx)
-                self.assertIn('阿尔法科技', result.response.choices[0].message.content)
-                self.assertIn('张三', result.response.choices[0].message.content)
-                self.assertEqual(result.response.usage.total_tokens, 12)
-            body['messages'].extend([
-                {'role': 'assistant', 'content': result.response.choices[0].message.content,
-                 'tool_calls': [{'id': f'synthetic-call-{turn}', 'type': 'function',
-                                 'function': {'name': 'lookup', 'arguments': '{}'}}]},
-                {'role': 'tool', 'tool_call_id': f'synthetic-call-{turn}',
-                 'content': '阿尔法科技的张三'},
-                {'role': 'user', 'content': '继续查询阿尔法科技'}])
+        self.detector.warmup()
+        worker_pids = self.executor.worker_pids()
+        self.assertEqual(len(worker_pids), 1)
+        model_path = (MINI_PACKAGE / 'model.onnx').resolve()
+        read_bytes = Path.read_bytes
+
+        def read_without_reloading_model(path):
+            self.assertNotEqual(path.resolve(), model_path, 'resident model must not be reread')
+            return read_bytes(path)
+
+        with patch.object(Path, 'read_bytes', read_without_reloading_model):
+            pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
+            for turn in range(3):
+                with self.subTest(turn=turn), MappingContext(self.domain, 'v1', TEST_HMAC_KEY) as ctx:
+                    result = pipeline.process_request(raw_body=json.dumps(body),
+                        headers={'Authorization': 'Bearer synthetic-key'}, identity=self.identity,
+                        category='STANDARD', context=ctx)
+                    self.assertIn('阿尔法科技', result.response.choices[0].message.content)
+                    self.assertIn('张三', result.response.choices[0].message.content)
+                    self.assertEqual(result.response.usage.total_tokens, 12)
+                body['messages'].extend([
+                    {'role': 'assistant', 'content': result.response.choices[0].message.content,
+                     'tool_calls': [{'id': f'synthetic-call-{turn}', 'type': 'function',
+                                     'function': {'name': 'lookup', 'arguments': '{}'}}]},
+                    {'role': 'tool', 'tool_call_id': f'synthetic-call-{turn}',
+                     'content': '阿尔法科技的张三'},
+                    {'role': 'user', 'content': '继续查询阿尔法科技'}])
+                self.assertEqual(self.executor.worker_pids(), worker_pids)
         self.assertEqual(len(spy.calls), 3)
 
     def test_detection_fault_defaults_to_error_and_explicitly_allows_passthrough(self):
@@ -438,7 +448,7 @@ class IntegrationRoundtripTests(unittest.TestCase):
             sent_text = payload["messages"][0]["content"]
 
             self.assertNotIn("阿尔法科技", sent_text)
-            self.assertIn("<<ENT_v1_", sent_text)
+            self.assertRegex(sent_text, r"<[A-Z]+_\d{3,}>")
 
             resp_body = {
                 "id": "msg_claude_rt01",

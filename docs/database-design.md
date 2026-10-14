@@ -4,7 +4,7 @@
 
 ## 当前结构与判断
 
-知识模块有 15 张表，请求历史有 2 张表。知识采用 source/version、entity、claim、evidence、candidate、publication 和关联表；治理、Outbox、消费回执和消费者资产单独建表。历史以 request 和 request/stage 拆分，正文使用带绑定信息的信封密文。
+知识模块有16张表（含v3的实体别名表），请求历史有2张表，脱敏词典有4张表；共22张表部署到公共基础设施提供的已有数据库与schema。知识采用 source/version、entity、claim、evidence、candidate、publication 和关联表；治理、Outbox、消费回执和消费者资产单独建表。历史以 request 和 request/stage 拆分，正文使用带绑定信息的信封密文。
 
 这具备关系型建模基础，但不能宣布整个模型符合严格第三范式或 BCNF。“表分得多”和“使用 UUID”都不能证明范式；必须逐表列出候选键、函数依赖和更新语义。建议保留这些逻辑实体，在同一 schema 内组织。
 
@@ -70,7 +70,7 @@ PostgreSQL 逻辑复制不会自动复制 DDL 和 sequence 状态，异构图投
 
 ## 实施顺序
 
-1. 统一 namespace 和权限契约，固定测试数据库入口。
+1. 复用公共PostgreSQL中的同一已有数据库和schema；提供完整手工表DDL，服务和测试仅检查现有对象，不创建数据库/schema/角色或修改基础设施权限。
 2. 建立版本化迁移机制与完整性审计，补作用域 FK、候选不可变版本、值域及生命周期约束；禁止靠重建 schema 替代业务升级。
 3. 增加作用域内容 blob 与 manifest，兼容读取旧信封，以小批次回填、逐字节校验和可回滚写入切换完成去重。
 4. 定义图导出 v1、增量水位和适配器，用治理/撤回/重放测试验证查询投影。

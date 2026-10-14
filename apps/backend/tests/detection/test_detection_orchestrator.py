@@ -1,12 +1,10 @@
 """Privacy detection orchestrator tests: multi-engine dispatch, span merging, and fail-closed gate.
 
 真实组件优先：规则路用真实识别器、词典路用 ``compile_dictionary`` 真实
-编译产物、NER 路正例用 D-08 mini-valid-package 经真实 executor spawn 的
-工作进程（进程内 ``load_model_package`` + 切窗推理）；NER 反例（超时/
-挂起、worker 异常、偏移不可恢复）用模块级可 pickle 的受控 worker 或
-真实篡改包（重算 manifest 哈希后加载成功、推理时 logits 形状不符 →
-``NER_OFFSET_UNRECOVERABLE``）。注入 worker 只经构造函数显式传入，模拟
-慢/挂起推理验证时间预算路径，不改变检测语义。
+编译产物、NER 路正例用 D-08 mini-valid-package 经真实常驻 worker pool
+推理；NER 反例用模块级受控 worker 或真实篡改包。编排单测同步执行受控
+worker；真实进程隔离、超时回收和常驻行为由执行器与 worker-pool 专项测试
+覆盖。
 
 全部为合成夹具：词典条目、文本、NER 包均合成，无真实人名/机构/密钥。
 canary 断言：受控错误公开消息不得含业务正文。
@@ -62,6 +60,23 @@ COMPILED: CompiledDictionary | None = None
 EXECUTOR: InferenceExecutor | None = None
 
 
+class _InlineExecutor:
+    """Keep orchestration tests focused on detection semantics, not process startup."""
+
+    def submit(self, worker, *args, timeout, cancel=None, **kwargs):
+        if cancel is not None and cancel.is_set():
+            raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+        try:
+            return worker(*args, **kwargs)
+        except SafetyError:
+            raise
+        except Exception:
+            raise RuntimeError("NER worker failed") from None
+
+
+INLINE_EXECUTOR = _InlineExecutor()
+
+
 def setUpModule() -> None:
     global COMPILED, EXECUTOR
     payload = {
@@ -85,7 +100,7 @@ def tearDownModule() -> None:
 
 
 def _orchestrator(**overrides: object) -> DetectionOrchestrator:
-    params = {"executor": EXECUTOR}
+    params = {"executor": INLINE_EXECUTOR}
     params.update(overrides)
     return DetectionOrchestrator(**params)  # type: ignore[arg-type]
 
@@ -191,11 +206,12 @@ class PositivePathTests(unittest.TestCase):
 
     def test_all_real_three_paths_success_and_metadata(self) -> None:
         text = "星云科技联系人手机号13800138000"
-        orchestrator = _orchestrator(
+        orchestrator = DetectionOrchestrator(
+            recognizers=default_recognizers(),
             dictionary=COMPILED,
             ner_package_dir=MINI_PACKAGE,
-            ner_worker=_ner_worker,
         )
+        self.addCleanup(orchestrator.close)
         outcome = orchestrator.detect(text)
         # 元数据可追溯：词典版本、启用识别器清单、NER 包标识/哈希。
         self.assertEqual(outcome.dictionary_version, DICTIONARY_VERSION)
@@ -368,6 +384,7 @@ class BlockingPathTests(unittest.TestCase):
             dictionary=COMPILED,
             ner_package_dir="unused-by-injected-worker",
             ner_worker=_worker_hang,
+            executor=EXECUTOR,
             ner_timeout=5.0,
         )
         started = time.monotonic()

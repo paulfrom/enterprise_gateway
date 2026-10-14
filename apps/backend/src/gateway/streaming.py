@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from infra.errors import SafetyCode, SafetyError
 from infra.strict_json import JsonRejectKind, parse_strict_json
-from masking.mapping import MappingContext
+from masking.mapping import MappingContext, has_reserved_token
 from masking.restorer import DeepSeekUsage
 from masking.stream_restorer import BranchStreamingRestorer
 from protocol.history_state import ReasoningBlock, ReasoningStateValidator
@@ -59,7 +59,7 @@ def _string(value: Any) -> None:
 
 
 def _structural(value: Any) -> None:
-    if isinstance(value, str) and ("<<ENT" in value or value.endswith(("<<E", "<<EN"))):
+    if isinstance(value, str) and has_reserved_token(value):
         _reject("token in structural stream field")
     if isinstance(value, dict):
         for key, item in value.items():

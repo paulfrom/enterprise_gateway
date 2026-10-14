@@ -1,4 +1,4 @@
-"""Safety regressions for single-admin governance on the v2 model (real PG).
+"""Safety regressions for current single-admin governance (real PG).
 
 Cross-scope consumers, rejected candidates, revocation and expiry must keep
 blocking export and dictionary compilation; the extractor contract tests stay

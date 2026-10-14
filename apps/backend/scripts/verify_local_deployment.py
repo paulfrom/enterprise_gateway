@@ -55,7 +55,7 @@ def digest(path):
 def source_manifest():
     files = sorted((ROOT / "src").rglob("*.py")) + [
         ROOT / "scripts" / "verify_local_deployment.py", ROOT / "scripts" / "check_gateway_health.py",
-        ROOT / "scripts" / "prepare_knowledge_database.py",
+        ROOT / "scripts" / "check_gateway_database.py",
         ROOT / "tests" / "deployment" / "fixture_runtime.py", ROOT / "tests" / "deployment" / "test_fixture_runtime.py",
         ROOT / "start_gateway.py", ROOT / "start_knowledge_worker.py", ROOT / "pyproject.toml", ROOT / "uv.lock"]
     return [{"path": str(p), "sha256": digest(p)} for p in files]
@@ -198,8 +198,9 @@ def execute(verify, pg_config, runtime):
         GATEWAY_NER_PACKAGE_DIR=str(ROOT / "models" / "bert4ner-base-chinese-onnx"),
         GATEWAY_KNOWLEDGE_WORKER_SUBJECT=subject, SSL_CERT_FILE=str(cert),
         GATEWAY_SSL_CERTFILE=str(cert), GATEWAY_SSL_KEYFILE=str(key))
-    secret_values = {"GATEWAY_KMS_MASTER_KEY": master.hex(), "GATEWAY_HMAC_KEY": secrets.token_hex(32),
+    secret_values = {"GATEWAY_KMS_MASTER_KEY": master.hex(),
                      "GATEWAY_SOURCE_CORRELATION_KEY": secrets.token_hex(32),
+                     "GATEWAY_DICTIONARY_PG_DSN": pg_config["admin_app_dsn"],
                      "GATEWAY_KNOWLEDGE_PG_DSN": pg_config["app_dsn"]}
     for name, value in secret_values.items():
         path = runtime / (name.lower() + ".key")

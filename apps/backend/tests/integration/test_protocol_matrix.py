@@ -15,6 +15,8 @@ from protocol.protocols import DEEPSEEK_CHAT_PROTOCOL, CLAUDE_MESSAGES_PROTOCOL
 from protocol.history_state import HistoricalStateAdapter, ReasoningStateValidator, ProviderStateVerifier
 from tests.protocol.provider_fixtures import verify_hmac_sha256
 
+NER_PACKAGE = Path(__file__).resolve().parents[2] / "models" / "bert4ner-base-chinese-onnx"
+
 def hanging_ner(*args):
     time.sleep(30)
 
@@ -87,8 +89,7 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.fixture = fixture_module.IntegrationRoundtripTests()
-        self.fixture.setUp()
-        self.fixture.detector._ner_package_dir=str(Path(__file__).resolve().parents[2]/"models"/"bert4ner-base-chinese-onnx")
+        self.fixture.setUp(ner_package_dir=NER_PACKAGE)
     def tearDown(self):
         self.fixture.tearDown()
     def request(self,protocol,stream=False,tools=False):
@@ -252,7 +253,12 @@ class ProtocolHttpMatrix(unittest.IsolatedAsyncioTestCase):
 
     async def test_deadline_reclaims_inference_and_http_loop_remains_responsive(self):
         spy=UpstreamSpyTransport(lambda _:self.fail('deadline must prevent egress'))
-        self.fixture.detector._ner_worker=hanging_ner
+        # The injected hanging task specifically exercises single-use reclamation.
+        self.fixture.detector.close()
+        self.fixture.detector=fixture_module.DetectionOrchestrator(
+            dictionary=self.fixture.compiled_dict, ner_package_dir=NER_PACKAGE,
+            ner_worker=hanging_ner)
+        self.fixture.executor=self.fixture.detector._executor
         p=self.fixture._create_pipeline(DEEPSEEK_CHAT_PROTOCOL,spy,request_timeout=1.0)
         app=create_app(router=ProviderRouter({model: p for model in p.allowed_models}), authenticator=ByokAuthenticator(domain=self.fixture.identity.domain, tenant_id=self.fixture.identity.tenant_id, correlation_key=TEST_HMAC_KEY), classifier=lambda raw: "STANDARD", hmac_key=TEST_HMAC_KEY)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://gateway') as client:

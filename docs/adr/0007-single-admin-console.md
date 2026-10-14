@@ -7,4 +7,4 @@ admin 在本服务管理范围内拥有全部管理动作权限：查看全部�
 
 管理员授权与业务权限严格分离：管理员会话不替代模型 BYOK，不传给供应商，不参与来源 HMAC 或计费；管理登录不自动把 unassigned 改为 admin 所有，也不把 unverified 改为 verified，知识所有权、原始来源 ACL、处理 ACL 与下游消费授权分别保留。来源治理授权与事实验证形成新版本记录，原始 ACL 与原始证据不原位改写。
 
-管理数据库访问使用专用受限 PG 应用连接（非 owner、无 BYPASSRLS），管理 RLS 分支同时绑定专用管理数据库身份、服务端 AdminContext 和本部署租户/域，worker/consumer 身份不能 SET ROLE 到管理身份。DDL 使用单管理员治理记录及结构指纹。初始化只创建新 schema，结构不符时拒绝相应能力。
+管理数据库访问使用专用受限 PG 应用连接（非 owner、无 BYPASSRLS），管理 RLS 分支同时绑定专用管理数据库身份、服务端 AdminContext 和本部署租户/域，worker/consumer 身份不能 SET ROLE 到管理身份。DDL 使用单管理员治理记录及结构指纹。在既有公共数据库/schema中手工部署表SQL，运行时只读检查，结构不符时拒绝相应能力；不创建新schema。

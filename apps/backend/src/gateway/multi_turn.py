@@ -50,7 +50,7 @@ class MultiTurnConversationSession:
             "messages": next_history,
         })
 
-        with MappingContext(self.pipeline.domain, "v1", turn_hmac_key) as ctx:
+        with MappingContext(self.pipeline.domain) as ctx:
             result = self.pipeline.process_request(
                 raw_body=raw_req,
                   headers=headers,

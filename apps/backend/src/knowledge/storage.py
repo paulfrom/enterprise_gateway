@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import re
 from typing import Any, Iterator
 from uuid import UUID, uuid4
 
@@ -56,7 +57,7 @@ class KnowledgeSchemaError(RuntimeError):
 
 
 def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> str:
-    """Normalized sha256 over the schema's table/column/constraint/index/trigger/function/policy metadata.
+    """Normalized sha256 over project table/constraint/index/trigger/function/policy metadata.
 
     OIDs, the schema name and deployment-specific role-name literals are stripped
     so independently deployed namespaces fingerprint identically.
@@ -67,38 +68,49 @@ def compute_schema_fingerprint(conn: psycopg.Connection, *, admin_role: str) -> 
         if isinstance(value, str):
             if admin_role:
                 value = value.replace(admin_role, '<ADMIN_ROLE>')
-            return value.replace(schema, '<SCHEMA>')
+            # A bare name is not a schema reference. In particular pg_policies
+            # reports the PUBLIC pseudo-role as the lowercase name 'public'.
+            if value == schema:
+                return value
+            # An existing shared schema may be public: do not rewrite the
+            # 'public' substring inside names such as knowledge_publications.
+            return re.sub(r'(?<![a-zA-Z0-9_])' + re.escape(schema) + r'(?![a-zA-Z0-9_])', '<SCHEMA>', value)
         if isinstance(value, (list, tuple)):
             return [norm(item) for item in value]
         return value
 
+    project_tables = list((*_ASSET_TABLES, *_ADMIN_TABLES))
     tables = conn.execute(
         "SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c "
         "JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname=current_schema() AND c.relkind='r' AND c.relname NOT IN ('request_records','request_stage_contents') ORDER BY c.relname").fetchall()
+        "WHERE n.nspname=current_schema() AND c.relkind='r' "
+        "AND (c.relname=ANY(%s) OR left(c.relname,10)='knowledge_') ORDER BY c.relname", (project_tables,)).fetchall()
     columns = conn.execute(
         "SELECT table_name,column_name,ordinal_position,data_type,is_nullable,column_default "
-        "FROM information_schema.columns WHERE table_schema=current_schema() AND table_name NOT IN ('request_records','request_stage_contents') "
-        "ORDER BY table_name,ordinal_position").fetchall()
+        "FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=ANY(%s) "
+        "ORDER BY table_name,ordinal_position", (project_tables,)).fetchall()
     constraints = conn.execute(
         "SELECT conrelid::regclass::text,conname,contype,condeferrable,condeferred,"
         "pg_get_constraintdef(c.oid) FROM pg_constraint c "
-        "WHERE c.connamespace=current_schema()::regnamespace AND conrelid NOT IN (SELECT oid FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname IN ('request_records','request_stage_contents')) ORDER BY conname").fetchall()
+        "WHERE c.connamespace=current_schema()::regnamespace AND conrelid IN "
+        "(SELECT oid FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname=ANY(%s)) "
+        "ORDER BY conname", (project_tables,)).fetchall()
     indexes = conn.execute(
-        "SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() AND tablename NOT IN ('request_records','request_stage_contents') "
-        "ORDER BY indexname").fetchall()
+        "SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() AND tablename=ANY(%s) "
+        "ORDER BY indexname", (project_tables,)).fetchall()
     triggers = conn.execute(
         "SELECT tgrelid::regclass::text,tgname,pg_get_triggerdef(t.oid) FROM pg_trigger t "
         "WHERE NOT t.tgisinternal AND t.tgrelid IN (SELECT c.oid FROM pg_class c "
-        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname NOT IN ('request_records','request_stage_contents')) "
-        "ORDER BY tgname").fetchall()
+        "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname=ANY(%s)) "
+        "ORDER BY tgname", (project_tables,)).fetchall()
     functions = conn.execute(
         "SELECT p.proname,pg_get_function_identity_arguments(p.oid),p.prosecdef,p.proconfig,p.prosrc "
         "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
-        "WHERE n.nspname=current_schema() ORDER BY p.proname").fetchall()
+        "WHERE n.nspname=current_schema() AND p.proname=ANY(%s) ORDER BY p.proname",
+        (['enforce_publication_admission', 'invalidate_knowledge_source', 'read_authorized_knowledge_candidate'],)).fetchall()
     policies = conn.execute(
         "SELECT tablename,policyname,cmd,roles,qual,with_check FROM pg_policies "
-        "WHERE schemaname=current_schema() AND tablename NOT IN ('request_records','request_stage_contents') ORDER BY policyname,tablename").fetchall()
+        "WHERE schemaname=current_schema() AND tablename=ANY(%s) ORDER BY policyname,tablename", (project_tables,)).fetchall()
     canonical = {
         'tables': norm(tables),
         'columns': norm(columns),
@@ -543,40 +555,15 @@ class PostgresKnowledgeStorage:
     """Relational knowledge repository implementing,,."""
 
     def __init__(self, connection_uri: str, *, tenant_id: str | None = None, domain: str | None = None,
-                 admin_dsn: str | None = None, admin_role: str | None = None) -> None:
+                 admin_dsn: str | None = None, admin_role: str | None = None,
+                 graph_name: str | None = None) -> None:
         self.connection_uri = connection_uri
         self.tenant_id = tenant_id
         self.domain = domain
         self.admin_dsn = admin_dsn
         self.admin_role = admin_role
+        self.graph_name = graph_name
 
-    def init_database(self, *, enable_rls: bool = True, application_role: str | None = None,
-                      admin_role: str | None = None) -> str:
-        """Create the v3 schema objects and optionally set up Row Level Security.
-
-        Returns the measured schema fingerprint of the freshly deployed namespace.
-        Grants for the schema-bound application and dedicated admin roles are
-        applied when the corresponding role names are supplied.
-        """
-        admin_role = admin_role or self.admin_role
-        with psycopg.connect(self.connection_uri, autocommit=True) as conn:
-            with conn.cursor() as cur:
-                owner=cur.execute('SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
-                if not owner or not owner[0]:
-                    raise KnowledgeError('fixed governed functions require a controlled RLS-bypassing owner; application roles must not bypass')
-                schema=cur.execute('SELECT current_schema()').fetchone()[0]
-                admin_literal = sql.Literal(admin_role).as_string(conn) if admin_role else "''"
-                cur.execute(SCHEMA_SQL.replace('__GOVERNANCE_SCHEMA__',sql.Identifier(schema).as_string(conn))
-                                        .replace('__ADMIN_ROLE__',admin_literal))
-                if enable_rls:
-                    cur.execute(RLS_SETUP_SQL.replace('__ADMIN_ROLE__',admin_literal))
-                if application_role:
-                    cur.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
-                    cur.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}').format(sql.SQL(',').join(sql.Identifier(schema, table) for table in (*_ASSET_TABLES, *_ADMIN_TABLES)),sql.Identifier(application_role)))
-                    cur.execute(sql.SQL('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
-                    for function in ("invalidate_knowledge_source(TEXT,TEXT,TEXT,TIMESTAMPTZ)", "read_authorized_knowledge_candidate(UUID)"):
-                        cur.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.' + function + ' TO {}').format(sql.Identifier(schema),sql.Identifier(application_role)))
-                return compute_schema_fingerprint(conn, admin_role=admin_role or '')
 
     def verify_schema(self, conn: psycopg.Connection) -> None:
         """Refuse to run against a schema whose metadata fingerprint drifted from v3."""
@@ -589,7 +576,7 @@ class PostgresKnowledgeStorage:
     def admin_transaction(self, *, tenant_id: str, domain: str) -> Iterator[psycopg.Connection]:
         """One governed admin transaction on the dedicated admin connection.
 
-        The connection adopts the dedicated admin role and binds the transaction
+        The connection uses the existing dedicated admin login and binds the transaction
         local app.tenant/app.domain/app.admin_context='true' GUCs; the v3 schema
         fingerprint is verified before the transaction body runs.
         """
@@ -597,8 +584,6 @@ class PostgresKnowledgeStorage:
             raise KnowledgeError('admin transactions require a configured admin_dsn')
         conn = psycopg.connect(self.admin_dsn)
         try:
-            if self.admin_role:
-                conn.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.admin_role)))
             conn.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
             conn.execute("SELECT set_config('app.domain',%s,true)", (domain,))
             conn.execute("SELECT set_config('app.admin_context','true',true)")

@@ -1,11 +1,9 @@
-"""Transactional new-namespace DDL and schema-bound application safety checks."""
+"""Manual table DDL and read-only application connection checks."""
 from __future__ import annotations
 
 import re
 
 import psycopg
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
 
 from knowledge.database_security import assert_restricted_application_role
 from request_history.models import ERROR_CODES, HistoryUnavailable
@@ -80,7 +78,7 @@ CREATE POLICY stage_update ON request_stage_contents FOR UPDATE USING (
 
 def validate_namespace(schema: str) -> None:
     if (not isinstance(schema, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema)
-            or schema.startswith("pg_") or schema in {"public", "information_schema"}):
+            or schema.startswith("pg_") or schema == "information_schema"):
         raise HistoryUnavailable()
 
 
@@ -115,65 +113,6 @@ def assert_history_connection(conn: psycopg.Connection, *, expected_schema: str 
         "FROM pg_class WHERE relnamespace=%s::regnamespace AND relkind IN ('r','p','v','m','f')",
         (schema,),
     ).fetchall()
-    if (not {row[0] for row in actual} <= set(TABLES) | knowledge_tables
-            or any(name in knowledge_tables and accessible for name, accessible in actual)):
+    if any(name in knowledge_tables and accessible for name, accessible in actual):
         raise HistoryUnavailable()
     return schema, role
-
-
-def prepare_database(config: dict[str, str]) -> tuple[dict[str, str], dict]:
-    """Provision one new schema; no existing-layout upgrade and no role creation."""
-    try:
-        schema, role = config['schema'], config['application_role']
-        validate_namespace(schema)
-        if not isinstance(role, str) or not role:
-            raise HistoryUnavailable()
-        admin_dsn = make_conninfo(config['admin_dsn'], options='', connect_timeout=10)
-        app_dsn = make_conninfo(config['app_dsn'], options='', connect_timeout=10)
-        with psycopg.connect(admin_dsn) as admin, psycopg.connect(app_dsn) as app:
-            assert_restricted_application_role(app, role)
-            identity = "SELECT current_database(),inet_server_addr()::text,inet_server_port()"
-            if admin.execute(identity).fetchone() != app.execute(identity).fetchone():
-                raise HistoryUnavailable()
-            owner = admin.execute('SELECT current_user').fetchone()[0]
-            if admin.execute("SELECT pg_has_role(%s,%s,'MEMBER')", (role, owner)).fetchone()[0]:
-                raise HistoryUnavailable()
-            if admin.execute("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=%s)", (schema,)).fetchone()[0]:
-                raise HistoryUnavailable()
-            admin.execute(sql.SQL('CREATE SCHEMA {} AUTHORIZATION CURRENT_USER').format(sql.Identifier(schema)))
-            admin.execute(sql.SQL('SET LOCAL search_path TO {}').format(sql.Identifier(schema)))
-            admin.execute(SCHEMA_SQL)
-            admin.execute(RLS_SETUP_SQL)
-            admin.execute(sql.SQL('REVOKE ALL ON SCHEMA {} FROM PUBLIC').format(sql.Identifier(schema)))
-            admin.execute(sql.SQL('REVOKE ALL ON ALL TABLES IN SCHEMA {} FROM PUBLIC').format(sql.Identifier(schema)))
-            admin.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(schema), sql.Identifier(role)))
-            admin.execute(sql.SQL('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA {} TO {}').format(sql.Identifier(schema), sql.Identifier(role)))
-            # Validate the new objects within the same DDL transaction. A failed
-            # gate must roll back creation instead of leaving a committed layout.
-            rows = admin.execute(
-                "SELECT relname,relrowsecurity,relforcerowsecurity,pg_has_role(%s,relowner,'MEMBER'),relkind "
-                "FROM pg_class WHERE relnamespace=%s::regnamespace AND relname=ANY(%s)",
-                (role,schema,list(TABLES)),
-            ).fetchall()
-            namespace = admin.execute(
-                "SELECT pg_has_role(%s,nspowner,'MEMBER'),has_schema_privilege(%s,oid,'CREATE') "
-                "FROM pg_namespace WHERE nspname=%s", (role,role,schema),
-            ).fetchone()
-            policies = admin.execute(
-                'SELECT tablename,policyname FROM pg_policies WHERE schemaname=%s',(schema,),
-            ).fetchall()
-            if (len(rows)!=len(TABLES) or {row[0] for row in rows}!=set(TABLES)
-                    or any(not row[1] or not row[2] or row[3] or row[4]!='r' for row in rows)
-                    or not namespace or any(namespace) or set(policies)!=EXPECTED_POLICIES):
-                raise HistoryUnavailable()
-            version = admin.info.server_version
-            ssl = admin.execute('SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()').fetchone()
-        bound = dict(config, admin_dsn=make_conninfo(admin_dsn, options='-c search_path='+schema),
-                     app_dsn=make_conninfo(app_dsn, options='-c search_path='+schema))
-        with psycopg.connect(bound['app_dsn']) as app:
-            assert_history_connection(app, expected_schema=schema, expected_role=role)
-        return bound, {'initialized': True, 'forced_rls': True, 'asset_count': len(TABLES),
-                       'application_restricted': True, 'server_version': version, 'tls': bool(ssl and ssl[0])}
-    except Exception:
-        pass
-    raise HistoryUnavailable()

@@ -15,7 +15,7 @@ COPY src/ ./src/
 COPY config/ ./config/
 COPY --link models/bert4ner-base-chinese-onnx/ ./models/bert4ner-base-chinese-onnx/
 COPY start_gateway.py start_knowledge_worker.py ./
-COPY scripts/check_gateway_health.py scripts/check_local_resources.py scripts/prepare_admin_state.py scripts/prepare_gateway_database.py scripts/prepare_knowledge_database.py scripts/prepare_request_database.py scripts/purge_request_history.py ./scripts/
+COPY scripts/check_gateway_health.py scripts/check_local_resources.py scripts/prepare_admin_state.py scripts/check_gateway_database.py scripts/export_gateway_sql.py scripts/check_age_graph.py scripts/purge_request_history.py ./scripts/
 
 # 3. 创建运行时状态目录并切换非 root 用户 (UID 65532)
 RUN mkdir -p /app/state/admin && chown -R 65532:65532 /app/state

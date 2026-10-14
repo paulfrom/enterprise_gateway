@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 from starlette.testclient import TestClient
@@ -54,7 +54,7 @@ class RuntimeAssemblyTests(unittest.TestCase):
         policy_file.write_text(self.policy.model_dump_json(), encoding="utf-8")
         self.operator_env = {"GATEWAY_PROCESSING_DOMAIN": self.domain, "GATEWAY_PROCESSING_TENANT": "processing-tenant",
             "GATEWAY_STATE_DIR": str(self.root/"state"), "GATEWAY_EVIDENCE_BUCKET": "synthetic-evidence",
-            "GATEWAY_HMAC_KEY": (b"h"*32).hex(), "GATEWAY_SOURCE_CORRELATION_KEY": (b"c"*32).hex(),
+            "GATEWAY_DICTIONARY_PG_DSN": "synthetic-launcher-connection", "GATEWAY_SOURCE_CORRELATION_KEY": (b"c"*32).hex(),
             "GATEWAY_KMS_MASTER_KEY": (b"m"*32).hex(), "GATEWAY_DICTIONARY_FILE": str(dictionary_file),
             "GATEWAY_POLICY_FILE": str(policy_file), "GATEWAY_NER_PACKAGE_DIR": str(NER_PACKAGE)}
 
@@ -161,6 +161,18 @@ class RuntimeAssemblyTests(unittest.TestCase):
             self.assertEqual(request.headers['authorization'], 'Bearer synthetic-key')
             self.assertEqual(json.loads(request.content)["thinking"], {"type": "enabled"})
 
+    def test_explicit_roles_are_visible_upstream_and_restore_exactly(self):
+        prompt = "甲方：甲公司。乙方：乙公司。甲公司应向乙公司付款。"
+        with TestClient(self.app()) as client:
+            response = self.post(client, prompt=prompt)
+            self.assertEqual(200, response.status_code)
+            sent = json.loads(self.calls[-1].content)['messages'][0]['content']
+            self.assertIn('<PARTYA_001>', sent)
+            self.assertIn('<PARTYB_001>', sent)
+            self.assertNotIn('甲公司', sent)
+            self.assertNotIn('乙公司', sent)
+            self.assertEqual(prompt, response.json()['choices'][0]['message']['content'])
+
     def test_classifier_missing_secret_and_unknown_categories_never_egress(self):
         for classifier in (None, lambda _raw: "SECRET", lambda _raw: "unknown"):
             with self.subTest(classifier=classifier):
@@ -191,9 +203,9 @@ class RuntimeAssemblyTests(unittest.TestCase):
             self.assertGreaterEqual(self.post(client).status_code, 400)
             self.assertEqual(0, len(self.calls))
 
-    def test_missing_kms_ner_short_keys_or_evidence_bucket_rejected(self):
+    def test_missing_kms_ner_correlation_key_or_evidence_bucket_rejected(self):
         for changes in ({"kms": None}, {"ner_package_dir": self.root/"missing-ner"},
-                        {"hmac_key": b"short"}, {"correlation_key": b"short"},
+                        {"correlation_key": b"short"},
                         {"evidence_bucket": ""}, {"classifier": "STANDARD"}):
             with self.subTest(changes=changes), self.assertRaises(SafetyError):
                 self.app(**changes)
@@ -224,7 +236,13 @@ class RuntimeAssemblyTests(unittest.TestCase):
 
     def test_operator_launcher_uses_same_factory_and_requires_no_fake_defaults(self):
         import start_gateway
-        with patch.dict(os.environ, self.operator_env, clear=True):
+        from detection.dictionary_store import snapshot_payload
+        store = Mock(scope='processing-tenant/' + self.domain)
+        store.bootstrap.side_effect = lambda seed: compile_dictionary(snapshot_payload(
+            seed().dictionary_id, 1, self.domain, [entry.model_dump() for entry in seed().entries]))
+        store.active.return_value = (1, None)
+        with patch.dict(os.environ, self.operator_env, clear=True), \
+                patch('detection.dictionary_store.PostgresDictionaryStore', return_value=store):
             # DNS must remain controlled for synthetic supplier hosts.
             with patch("infra.egress_client.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))]):
                 app = start_gateway.build_app(providers_config_path=self.provider_file)
@@ -232,10 +250,14 @@ class RuntimeAssemblyTests(unittest.TestCase):
             self.assertTrue(screen.config.enabled)
             self.assertEqual(screen.config.threshold, 0.35)
             self.assertEqual(screen.config.budget_ms, 2)
-            with TestClient(app) as client:
+            client = TestClient(app)
+            try:
                 self.assertEqual(200, client.get("/healthz").status_code)
                 self.assertEqual(503, client.get("/readyz").status_code)
                 self.assertEqual(503, self.post(client).status_code)
+            finally:
+                client.close()
+                app.state.runtime_pipelines[0].detector.close()
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(SafetyError):
             start_gateway.build_app(providers_config_path=self.provider_file)
 

@@ -202,6 +202,12 @@ class DeploymentEntrypointTests(unittest.TestCase):
         def controlled_factory(**kwargs):
             return real_factory(**kwargs, transport=fixture.transport, resolver=lambda _host: ("127.0.0.1",),
                                 ner_timeout=120.0)
+        dictionary_store = unittest.mock.Mock(scope=f'processing-tenant/{fixture.domain}')
+        from detection.dictionary_store import snapshot_payload
+        dictionary_store.bootstrap.side_effect = lambda seed: runtime_fixtures.compile_dictionary(snapshot_payload(
+            seed().dictionary_id, 1, fixture.domain,
+            [entry.model_dump() for entry in seed().entries]))
+        dictionary_store.active.return_value = (1, None)
         for category in ("STANDARD", "LOCAL", "UNKNOWN", None):
             with self.subTest(category=category):
                 env = dict(fixture.operator_env)
@@ -214,9 +220,10 @@ class DeploymentEntrypointTests(unittest.TestCase):
                 with patch.dict(os.environ, env, clear=True), \
                      patch.object(sys, "argv", ["start_gateway.py", "--config", str(fixture.provider_file)]), \
                      patch.object(start_gateway, "create_runtime_app", side_effect=controlled_factory), \
+                     patch('detection.dictionary_store.PostgresDictionaryStore', return_value=dictionary_store), \
                      patch.object(start_gateway.uvicorn, "run", side_effect=lambda app, **_kwargs: captured.append(app)), \
                      redirect_stdout(self.stdout), redirect_stderr(self.stderr):
-                    self.assertEqual(0, start_gateway.main())
+                    self.assertEqual(0, start_gateway.main(), self.stderr.getvalue())
                 calls_before = len(fixture.calls)
                 with TestClient(captured[0]) as client:
                     self.assertEqual(200, client.get("/healthz").status_code)

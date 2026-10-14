@@ -19,6 +19,14 @@ export type Revise = components['schemas']['Revise'];
 export type ReviseResult = components['schemas']['ReviseResult'];
 export type Basis = components['schemas']['Basis'];
 export type Revocation = components['schemas']['Revocation'];
+export type DocumentRedaction = components['schemas']['DocumentRedaction'];
+export type DocumentFormat = NonNullable<paths['/api/admin/documents/redact']['post']['parameters']['query']>['format'];
+export type DictionaryPage = components['schemas']['DictionaryPage'];
+export type DictionaryEntry = components['schemas']['DictionaryEntryView'];
+export type DictionaryState = components['schemas']['DictionaryState'];
+export type DictionaryVersions = components['schemas']['DictionaryVersions'];
+export type DictionaryFilters = NonNullable<paths['/api/admin/dictionary']['get']['parameters']['query']>;
+export type DictionaryEdit = paths['/api/admin/dictionary/entries']['post']['requestBody']['content']['application/json'];
 export type AuditPage = components['schemas']['AuditPage'];
 export type AuditDetail = components['schemas']['AuditDetail'];
 export type CatalogEntry = components['schemas']['CatalogEntry'];
@@ -103,6 +111,28 @@ export const api = {
   session: (signal?: AbortSignal) => request<Session>('/api/admin/session', { signal }),
   login: (body: Login) => request<Session>('/api/admin/login', { method: 'POST', body: JSON.stringify(body) }),
   logout: () => request<Revocation>('/api/admin/logout', { method: 'POST' }),
+
+  dictionary: (filters: DictionaryFilters, signal?: AbortSignal) =>
+    request<DictionaryPage>('/api/admin/dictionary' + buildParams(filters), { signal }),
+  dictionaryVersions: (signal?: AbortSignal) =>
+    request<DictionaryVersions>('/api/admin/dictionary/versions', { signal }),
+  saveDictionaryEntry: (body: DictionaryEdit, entryId?: string) =>
+    request<DictionaryState>('/api/admin/dictionary/entries' + (entryId ? '/' + encodeURIComponent(entryId) : ''), {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  deleteDictionaryEntry: (entryId: string, revision: number) =>
+    request<DictionaryState>('/api/admin/dictionary/entries/' + encodeURIComponent(entryId) + '/delete', {
+      method: 'POST', body: JSON.stringify({ expected_revision: revision }),
+    }),
+  publishDictionary: (revision: number) =>
+    request<DictionaryState>('/api/admin/dictionary/publish', {
+      method: 'POST', body: JSON.stringify({ expected_revision: revision }),
+    }),
+
+  redactDocument: (file: File, format: DocumentFormat, signal?: AbortSignal) =>
+    request<DocumentRedaction>('/api/admin/documents/redact?format=' + encodeURIComponent(format), {
+      method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream' }, signal,
+    }),
 
   history: (filters: HistoryFilters, signal?: AbortSignal) =>
     request<HistoryPage>('/api/admin/requests' + buildParams(filters as Record<string, unknown>), { signal }),
@@ -191,6 +221,13 @@ export const api = {
 export function errorText(error: unknown): string {
   if (error instanceof ApiError) {
     const errorMap: Record<string, string> = {
+        DICTIONARY_UNAVAILABLE: '词典服务暂不可用，请检查数据库表和服务配置',
+        DICTIONARY_SCOPE_REJECTED: '当前会话不能管理此词典',
+        DICTIONARY_ENTRY_NOT_FOUND: '词条已不存在，请刷新列表',
+        DICTIONARY_ENTRY_CONFLICT: '同一实体文本已存在，请编辑已有词条',
+        DICTIONARY_REVISION_CONFLICT: '词典已被其他页面修改，请刷新后重新核对',
+        DICTIONARY_EMPTY_PUBLICATION: '至少保留一个启用词条后才能发布',
+        DICTIONARY_LIMIT_EXCEEDED: '词典已达到词条数量上限',
       ADMIN_LOGIN_FAILED: '用户名或密码错误',
       ADMIN_LOGIN_THROTTLED: '登录尝试过多，请稍后重试',
       ADMIN_SESSION_INVALID: '会话已过期，请重新登录',
@@ -201,6 +238,20 @@ export function errorText(error: unknown): string {
       ADMIN_ORIGIN_REJECTED: '登录来源校验失败',
       ADMIN_CSRF_INVALID: '会话校验失败，请刷新后重试',
       ADMIN_REQUEST_INVALID: '请求参数或格式不合法',
+        DOCUMENT_FORMAT_UNSUPPORTED: '不支持此格式，请使用页面列出的文件类型；旧版 DOC 请先转换为 DOCX',
+        DOCUMENT_INVALID: '文件损坏、内容格式不符或不是有效 UTF-8 文本',
+        DOCUMENT_NO_TEXT: '文件中没有可读取文本；扫描件请先进行 OCR',
+        DOCUMENT_ENCRYPTED: '暂不支持加密文件，请先在本地解密',
+        DOCUMENT_UNSUPPORTED_CONTENT: '文件包含图片、嵌入对象或其他无法完整解析的内容，请先整理为纯文本文件',
+        DOCUMENT_LIMIT_EXCEEDED: '文件或解析内容超出限制（文件最大 10 MiB，文本最多 20 万字符）',
+        DOCUMENT_SECRET_DETECTED: '检测到高敏秘密，文件处理已阻断',
+        DOCUMENT_RESERVED_TOKEN: '文件包含保留的脱敏占位符，请使用原始文件',
+        DOCUMENT_TIMEOUT: '文件解析或检测超时，请缩小文件后重试',
+        DOCUMENT_BUSY: '已有文件正在处理，请稍后重试',
+        DOCUMENT_SCOPE_REJECTED: '当前管理员的处理范围与文件服务不一致',
+        DOCUMENT_DETECTION_UNAVAILABLE: '必需检测器或版本校验失败，未生成脱敏文件',
+        DOCUMENT_SERVICE_UNAVAILABLE: '文件脱敏服务暂不可用，请检查本地运行配置',
+        REQUEST_TOO_LARGE: '文件超出上传限制',
       KNOWLEDGE_SCHEMA_INCOMPATIBLE: '知识库数据库结构不匹配或未初始化',
       KNOWLEDGE_SOURCE_NOT_FOUND: '知识来源不存在',
       KNOWLEDGE_SOURCE_WITHDRAWN: '知识来源已被撤回',

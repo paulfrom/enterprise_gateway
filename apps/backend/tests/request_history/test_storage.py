@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import time
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -120,7 +121,7 @@ class HistoryPostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not os.environ.get('GATEWAY_HISTORY_PG_CONFIG'):
-            raise unittest.SkipTest('Explicit isolated history PostgreSQL configuration required')
+            raise unittest.SkipTest('Explicit existing shared PostgreSQL configuration required')
         cls.config = configuration()
 
     def setUp(self):
@@ -136,12 +137,15 @@ class HistoryPostgresTests(unittest.TestCase):
         return self.store.begin(protocol=PROTOCOL,model=model,raw_body=body)
 
     def admin(self):
-        return psycopg.connect(self.config['admin_dsn'],connect_timeout=10)
+        return self.store._connection('writer')
 
-    def expire(self, identifier):
-        with self.admin() as conn:
+    def expire(self, identifier, *, store=None):
+        # Move our own record to a near-future expiry while the writer policy
+        # still admits it, then observe actual PostgreSQL time-based expiry.
+        with (store or self.store)._connection('writer') as conn:
             conn.execute("UPDATE request_records SET created_at=clock_timestamp()-INTERVAL '2 day',"
-                         "expires_at=clock_timestamp()-INTERVAL '1 day' WHERE request_id=%s", (identifier,))
+                         "expires_at=clock_timestamp()+INTERVAL '100 milliseconds' WHERE request_id=%s", (identifier,))
+        time.sleep(0.15)
 
     def test_four_exact_stages_and_missing_stage_state(self):
         self.store.check_ready()
@@ -231,7 +235,7 @@ class HistoryPostgresTests(unittest.TestCase):
         with self.assertRaises(HistoryNotFound):
             self.store.get_request(foreign.request_id)
         self.expire(mine.request_id)
-        self.expire(foreign.request_id)
+        self.expire(foreign.request_id, store=other)
         self.assertTrue(self.store.has_records())
         self.assertEqual([],self.store.list_requests()['items'])
         with self.assertRaises(HistoryNotFound):
@@ -240,6 +244,7 @@ class HistoryPostgresTests(unittest.TestCase):
         self.assertFalse(self.store.has_records())
         with self.admin() as conn:
             self.assertEqual(0,conn.execute('SELECT count(*) FROM request_stage_contents WHERE request_id=%s',(mine.request_id,)).fetchone()[0])
+        with other._connection('purger') as conn:
             self.assertEqual(1,conn.execute('SELECT count(*) FROM request_records WHERE request_id=%s',(foreign.request_id,)).fetchone()[0])
 
     def test_envelope_swap_rejected_and_audit_failure_releases_no_plaintext(self):

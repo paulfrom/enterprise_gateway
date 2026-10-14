@@ -356,7 +356,7 @@ class ResponseRestorerTests(unittest.TestCase):
         with self.context as ctx:
             tok = ctx.token_for("SECRET", canary)
             # Corrupt the token in the message
-            corrupted = tok[:-5] + "XXXX>>"
+            corrupted = tok[:-2] + "X>"
             raw = {
                 "id": "chatcmpl-canary",
                 "object": "chat.completion",

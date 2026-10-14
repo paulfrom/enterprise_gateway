@@ -233,7 +233,7 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(context._active)
                     self.assertTrue(context._closed)
                     self.assertEqual(0, context.entry_count)
-                    self.assertEqual(b'', context.key)
+                    self.assertIsNone(context.key)
 
     async def test_unproven_history_and_upstream_errors_have_zero_plaintext_release(self):
         for protocol in PROTOCOLS:
@@ -359,7 +359,7 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual({}, stream.restorer._buffers)
                 self.assertEqual(0, stream.context.entry_count)
                 self.assertFalse(stream.context._active)
-                self.assertEqual(b'', stream.context.key)
+                self.assertIsNone(stream.context.key)
                 raw = b''.join(message.get('body', b'') for message in sent)
                 self.assertNotIn(b'call-0', raw)
                 self.assertNotIn(b'partial_json', raw)

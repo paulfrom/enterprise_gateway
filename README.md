@@ -4,7 +4,7 @@
 
 1. **外发分级与精确隐私脱敏**：
    * **分级拦截**：高敏与禁止外发数据强阻断在企业本地网络；获准内容经过多引擎检测与脱敏后安全外发。
-   * **请求级精确伪名替换**：基于 HMAC 机制在请求内存中建立临时原值映射，在受支持文本字段内精确恢复已知令牌；不保证检测零漏检或模型语义正确。
+   * **请求级类型与角色替换**：以 `<ORG_001>`、`<PARTYA_001>` 等短占位符在请求内存建立原值映射，保留类型与明确交易角色，在受支持文本字段内精确恢复已知令牌；不保证检测零漏检或模型语义正确。
    * **全链路安全防护**：涵盖上游错误正文丢弃、异常断链防泄露、AES-GCM 信封加密落盘重放（Spool）、以及持久密钥认证包封与明确销毁边界。
 2. **企业受控知识资产沉淀**：
    * 已实现来源可追溯的受限观察与候选沉淀，以及单管理员来源治理、直接发布、修订、拒绝和撤回。未知权限限制到服务端处理域；消费授权通过版本化治理显式确认，并取全部贡献来源的授权交集。原始 ACL 与未验证来源身份保留，PostgreSQL/RLS、Outbox 和授权读取执行实际权限边界。
@@ -26,7 +26,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 ## 核心安全与架构原则
 
 * **明确处理边界**：已准入的内容字段执行检测与脱敏；未支持字段拒绝。检测故障默认报错，可由服务端显式配置故障透传。
-* **请求级隔离映射**：原值恢复映射仅保存在单次请求生命周期内存中，严禁写入外部持久数据库或审计日志，避免放大攻击面。
+* **请求级隔离映射**：占位符到原值的恢复表仅在单次请求内存使用。实体词典作为独立受管资产入库，不用于跨请求补回恢复表。
 * **多级流水线检测**：集成预置中文规则（身份证、手机号、统一信用代码等）、敏感私钥/密码探测、企业自定义词典、以及 ONNX 本地 NER 模型长文本滑动窗口推理。
 * **受控异常体系**：全系统使用统一的受控错误注册表（`SafetyError`），异常诊断绝不携带业务明文，切断堆栈回溯链，杜绝错误回显泄露。
 * **信封加密异步 Spool**：外发与重放报文采用 DEK/KEK 两级 AES-GCM 信封加密落盘，保障不可抗力下的持久化审计与断点恢复。
@@ -57,7 +57,7 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 │    └── Span 区间合并与冲突消歧 (Span Resolver)                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ 4. 请求脱敏与映射 (masking)                                      │
-│    ├── 内存 HMAC 伪名映射表 (Mapping)                            │
+│    ├── 内存类型/角色序号映射表 (Mapping)                            │
 │    └── 原文占位符精确替换 (Replacer)                             │
 ├─────────────────────────────────────────────────────────────────┤
 │ 5. 加密落盘与安全外发 (infra & gateway)                           │
@@ -84,7 +84,8 @@ SSE业务内容在协议终态与真实响应体EOF都验证后统一释放，�
 | `apps/backend/src/protocol` | 协议与准入：OpenAI Chat Completions 与 Claude Messages 严格协议模型、受信身份、准入预算与静态模板免检 |
 | `apps/backend/src/policy` | 外发政策：受信外发分级政策契约与出站权限评估 |
 | `apps/backend/src/detection` | 隐私检测：混合检测编排器、Presidio 正则识别器、企业词典匹配、本地 ONNX NER 推理及长文本分窗 |
-| `apps/backend/src/masking` | 脱敏与映射：请求级 HMAC 伪名映射生成、正向敏感文本替换与反向响应原值还原 |
+| `apps/backend/src/masking` | 脱敏与映射：请求级类型/角色短占位符生成、正向敏感文本替换与反向响应原值还原 |
+| `apps/backend/src/document` | 文件文字解析与脱敏：内存处理 DOCX、Excel、文字 PDF 和 UTF-8 文本，生成脱敏 Markdown |
 | `apps/backend/src/audit` | 审计与质检：释放意图台账、审计存储容量水位、质量评价口径与外发留证门禁 |
 | `apps/backend/src/knowledge` | 受控知识域：实体与关系模型、单管理员版本化治理、多来源授权交集、消费回执与失效 Tombstone |
 
@@ -106,7 +107,7 @@ uv sync --frozen --no-editable --group dev --cache-dir .uv-cache
 ~~~
 
 ### 2. 运行自动化测试套件
-完整测试需要真实隔离PostgreSQL及非owner、无superuser/BYPASSRLS的应用角色。通过`GATEWAY_TEST_PG_CONFIG`指定受控JSON配置文件，或使用被Git忽略的`.env.test`；字段为`app_dsn`、`admin_dsn`、`schema`、`application_role`。`admin_dsn`和`app_dsn`必须指向`enterprise_gateway`数据库，`schema`固定为`gw_test_gateway`；历史与知识测试共用这一schema，缺配置直接失败。常规测试进程通过数据库锁串行化，遇到已有schema拒绝自动重置；退出时清理本进程对象，清理失败明确报错。初始化回滚和结构漂移测试可以创建短暂schema并清理。管理连接需有创建schema和定义受限函数的权限；管理owner与应用角色分别使用独立连接，测试会修改结构和权限，不得连接正在服务的业务表。
+完整测试复用开发服务使用的公共 PostgreSQL、同一数据库与已有 schema；不创建或删除数据库、schema、角色，不修改授权或 RLS，也不自动建表。通过 `GATEWAY_TEST_PG_CONFIG` 指定私有 JSON，或使用被 Git 忽略的 `apps/backend/.env.test`；配置包含 `schema`、`application_role` / `app_dsn`、`history_role` / `history_dsn`、`admin_role` / `admin_app_dsn`，分别使用基础设施提供的现有受限登录。库名和 schema 不固定，允许 `public`。测试入口只读核验现有表和权限；用合成租户/业务域隔离数据，退出不删除共享表或历史数据。配置或表缺失直接失败，不自动补建。完整建表 SQL、配置示例和使用方式见[公共 PostgreSQL 使用约定](docs/postgresql-infrastructure.md)。 单独PG回归执行 `bash scripts/check_pg.sh`，入口不执行DDL或授权。
 
 ~~~bash
 # Linux 后端检查（从 apps/backend 执行）
@@ -116,9 +117,9 @@ bash scripts/check.sh
 uv run --frozen --no-editable --group dev --cache-dir .uv-cache python -m unittest discover -s tests -t . -v
 ~~~
 
-应用集成通过`gateway.app.create_app`装配完整`ProviderRouter`、`ByokAuthenticator`、至少32字节`hmac_key`和服务端可信分类函数`classifier(raw_body: bytes) -> str`。分类必须来自受信业务系统或获准分类器，客户端自报头或正文不提供授权依据。流水线使用实际规则/词典/NER、固定供应商映射、真实磁盘水位、持久审计和加密 spool；缺可信分类时就绪与模型接口返回503。配置变化构造新装配，在途请求继续使用原路由快照。
+应用集成通过`gateway.app.create_app`装配完整`ProviderRouter`、`ByokAuthenticator`和服务端可信分类函数`classifier(raw_body: bytes) -> str`。分类必须来自受信业务系统或获准分类器，客户端自报头或正文不提供授权依据。流水线使用实际规则/词典/NER、固定供应商映射、真实磁盘水位、持久审计和加密 spool；缺可信分类时就绪与模型接口返回503。配置变化构造新装配，在途请求继续使用原路由快照。
 
-`gateway.runtime.create_runtime_app`是独立多供应商 BYOK 的唯一装配工厂。调用者提供处理租户/域、独立来源关联与映射 HMAC 密钥、KMS、词典、NER目录、状态目录、受信政策、水位政策及证据留存桶。`config/providers.json`仅包含服务端固定 URL、协议、模型白名单与超时，不接受供应商 Key、重复渠道/模型、未知字段或客户端选址。默认配置仅是可修改的路由样例，不证明对应模型仍供应或已经准入；Claude 已停用模型已移出默认配置，Messages 协议须使用另行核验的供应商配置。
+`gateway.runtime.create_runtime_app`是独立多供应商 BYOK 的唯一装配工厂。调用者提供处理租户/域、来源关联密钥、KMS、词典、NER目录、状态目录、受信政策、水位政策及证据留存桶。`config/providers.json`仅包含服务端固定 URL、协议、模型白名单与超时，不接受供应商 Key、重复渠道/模型、未知字段或客户端选址。默认配置仅是可修改的路由样例，不证明对应模型仍供应或已经准入；Claude 已停用模型已移出默认配置，Messages 协议须使用另行核验的供应商配置。
 
 网关入口和供应商上游均支持 HTTP/HTTPS，HTTPS 为可选配置。上游 URL 可使用域名、私网或公网 HTTP 地址，例如 `http://10.0.0.8:8000/v1/chat/completions`；仍须匹配配置的协议路径和模型白名单。两种传输都执行 BYOK、分类、检测、留证、固定出口和 DNS 地址集校验。选择 HTTPS 时验证证书链与主机名，失败即拒绝，不自动降级；HTTP 不提供传输加密。
 
@@ -137,9 +138,9 @@ DeepSeek响应恢复支持普通 `content`、`reasoning_content`、`reasoning_de
 | `GATEWAY_PROCESSING_DOMAIN` / `GATEWAY_PROCESSING_TENANT` | 服务端受限处理范围，不能从供应商 Key 推导 |
 | `GATEWAY_STATE_DIR` | 持久目录，包含 `keys/`、`intents/`、`evidence/`、`spool/` |
 | `GATEWAY_KMS_MASTER_KEY` 或 `_FILE` | 恰好32字节，包封本地持久独立 KEK |
-| `GATEWAY_HMAC_KEY` 或 `_FILE` | 至少32字节，请求映射/完整性用途 |
 | `GATEWAY_SOURCE_CORRELATION_KEY` 或 `_FILE` | 至少32字节，仅未验证来源关联 |
-| `GATEWAY_DICTIONARY_FILE` | 符合现有词典 schema 和内容哈希的受控 JSON |
+| `GATEWAY_DICTIONARY_PG_DSN` 或 `_FILE` | 词典受限数据库连接；未配置时复用知识管理连接 |
+| `GATEWAY_DICTIONARY_FILE` | 首次入库时的受控 JSON 种子；已有发布版本后不再读取 |
 | `GATEWAY_POLICY_FILE` | 符合 `ClassificationPolicy` schema 的受信政策 JSON |
 | `GATEWAY_NER_PACKAGE_DIR` | 已核验完整本地 ONNX 模型包 |
 | `GATEWAY_NER_TIMEOUT_SECONDS` | 可选的 NER 单次检测时间预算（秒），代码默认 30，Compose 部署默认 120；大文本 CPU 推理需按硬件调整，仍受请求总超时约束 |
@@ -195,15 +196,17 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 数据库初始化与 worker 启动共享最小权限检查：应用角色不能具有创建数据库/角色、复制能力、切换到特权角色或直接/间接成为 PostgreSQL `pg_*` 全局预定义角色的成员。登录用户、会话用户与当前 SQL 用户须一致，不接受管理连接降级成应用角色。worker 对全部资产表检查 forced RLS，且应用角色不能拥有表或成为表 owner 的成员。单次执行 `--once` 在提交失败或隔离异常时返回非零；成功提交或幂等跳过返回0，失败记录仍保留以便重放。
 
-新部署优先使用 `scripts/prepare_gateway_database.py --config <private-input.json> --output-config <new-private-bound-config.json>`，在一个事务中初始化同一 schema 内的全部17张表。输入字段为 `schema`、DDL owner 的 `admin_dsn`、知识 `application_role` / `app_dsn`、历史 `history_role` / `history_dsn`、知识管理 `admin_role` / `admin_app_dsn`；三个应用角色须预建、分别登录且没有属主或管理角色可达路径。输出包含秘密，应放在受限且 Git 忽略的目录。该工具拒绝已有 schema，不负责业务数据迁移。结构合并与未来正文去重、知识图迁移的设计分别见 [ADR 0008](docs/adr/0008-unified-database-namespace.md) 和[数据库设计审查](docs/database-design.md)。以下独立知识/历史初始化入口仍适用于单模块部署和契约验证。
+PostgreSQL 是已有公共基础设施。项目提供[完整建表 SQL](deploy/sql/gateway_tables.sql)，由部署方在指定的已有数据库与 schema 中手工执行，包含当前 v4 的22张表、约束、索引、触发器、受限函数及 RLS 定义。文件不创建数据库、schema、角色或扩展，也不授予数据库/schema权限。应用与测试不持有基础设施管理员连接。数据库、schema、账号及授权由基础设施管理方维护；各服务连接同一数据库，通过现有角色区分知识、历史和知识管理用途。
 
-首次部署 PostgreSQL 时，管理方使用受控 JSON 文件（`schema`、`application_role`、`admin_role`、`admin_dsn`、`app_dsn`；`admin_role` 为预建专用受限角色）显式初始化一个尚不存在的 v2 schema：
+默认 SQL 使用已有 `public` schema 和已有知识管理角色 `gw_knowledge_admin`。需要使用其他现有名称时，可离线导出 SQL，再由部署方手工执行：
 
 ~~~bash
-.venv/bin/python scripts/prepare_knowledge_database.py --config <private-input.json> --output-config <new-private-bound-config.json>
+cd apps/backend
+.venv/bin/python scripts/export_gateway_sql.py --schema <existing-schema> --admin-role <existing-admin-role> > /tmp/gateway-tables.sql
+.venv/bin/python scripts/check_gateway_database.py --config <private-service-connections.json>
 ~~~
 
-工具复用当前数据库定义，在一个管理事务中建立表、受限授权与 forced RLS；拒绝已有 schema、特权应用角色和可切换到管理角色的账号，不修改既有数据或提供迁移。输出文件包含连接秘密，必须置于受限、Git 忽略的目录；取其 `app_dsn` 写入 worker 的 DSN 秘密文件，不能把 `admin_dsn`交给 worker。真实远端部署必须启用并验证数据库 TLS（如 `sslmode=verify-full` 与受信 CA）；仅完成连接或建表不能证明传输安全。
+导出命令不连接数据库；完整SQL可手工重复执行，保留已有表、策略与数据。检查命令仅执行只读验证，不创建或修复对象。已有 v2 表集合只需手工执行[别名表增量 SQL](deploy/sql/entity_aliases_v3.sql)，不重建其他表。详细权限边界、SQL执行方式和配置见[公共 PostgreSQL 使用约定](docs/postgresql-infrastructure.md)；未来正文去重设计见[数据库设计审查](docs/database-design.md)。
 
 本地合成部署验证入口为 `scripts/verify_local_deployment.py`，参数通过 `--help` 查看。它使用实际网关、检测、加密与独立 worker，本机合成上游只模拟供应商协议；结果写入调用方指定目录。合成分类与上游不构成真实供应商或业务准入。
 
@@ -227,6 +230,8 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 管理控制台仅供固定管理员账号使用。访问同源 `/login` 以 admin 登录（密码由部署方在初始化时设定），服务端校验后签发 HttpOnly 会话 Cookie；登录后进入 `/admin` 管理壳，`/admin/requests` 可查看当前租户/保护域内全部未过期请求的输入、脱敏外发、供应商回复、还原输出，不按用户或供应商 Key 分组。四阶段可用正文默认直接展示和复制，无遮挡开关；列表支持模型/协议/状态/错误码/时间窗筛选和游标分页，部分或未产生的阶段单独标记，网关拒绝正文不会标成成功模型回复。未登录访问管理页面会跳转登录页；退出或会话失效后页面清除正文并回到登录页。
 
+登录后访问 `/admin/documents` 的“文件脱敏”页面，可上传最大 10 MiB 的 DOCX、Excel、文字型 PDF 或 UTF-8 文本，预览并下载脱敏 Markdown。处理复用本地规则、词典和 NER，不调用供应商；检测或解析失败拒绝整份文件，不保存原文件和原值映射。输出不保留原版式，旧版 DOC 须先转换，扫描 PDF 不支持；XLS 仅能读取缓存值。接口、支持范围与限额见[文件脱敏契约](docs/contracts/file-redaction.md)。
+
 历史与知识使用同一 PostgreSQL schema、分别限定表权限；历史使用用途为 `request-history` 的加密密钥和访问留痕；访问审计绑定操作者 admin 及会话关联摘要，不记录正文、密码或会话令牌。完整四阶段可推断原值关系，须按原文敏感级别治理。供应商 Key 不作为查询凭据，不保存到历史；会话令牌只经 Cookie 携带，服务端仅存摘要，不进入浏览器持久存储。
 
 部署须显式提供以下整组配置，缺项拒绝启动；未选择历史装配时不采集四阶段正文：
@@ -237,7 +242,7 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 | `GATEWAY_HISTORY_RETENTION_DAYS` | 明确的留存天数，范围1～36500，无默认值 |
 | `GATEWAY_HISTORY_BUCKET` | 历史加密用途的受控留存桶 |
 
-历史与知识一起部署时，使用上述统一初始化入口。单独部署历史模块时，可使用 `scripts/prepare_request_database.py --config <private-input.json> --output-config <new-private-bound.json>` 初始化尚不存在的历史 schema。输入字段为 `schema`、`application_role`、`admin_dsn`、`app_dsn`；应用账号须预先具备数据库连接权限且不能拥有或切换到管理角色。工具在事务内建立2张表及forced RLS，拒绝已有 schema，不提供迁移。将输出的应用连接存入受限秘密文件；管理连接不交给服务。管理员状态由 `scripts/prepare_admin_state.py` 一次性显式初始化（保存随机盐与 scrypt 派生值，不保存明文密码；已存在时拒绝覆盖），管理员状态目录独立于历史数据库，历史未启用时仍可登录管理控制台。
+历史与知识使用同一已有数据库和 schema，按上述完整 SQL 手工部署；不再提供自动初始化数据库/schema的 CLI。历史服务使用基础设施提供的现有受限连接。管理员状态由 `scripts/prepare_admin_state.py` 一次性显式初始化（保存随机盐与 scrypt 派生值，不保存明文密码；已存在时拒绝覆盖），管理员状态目录独立于历史数据库，历史未启用时仍可登录管理控制台。
 
 历史配置完成后，首次显式执行 `start_gateway.py --provision-keys` 初始化用途密钥，再正常启动。已有历史（包括过期但未删除的记录）而密钥丢失时拒绝补建。查询 API 是 `GET /api/admin/requests?limit=50&status=&cursor=` 和 `GET /api/admin/requests/{request_id}`，仅接受同源管理员会话 Cookie，管理写操作另需会话绑定的 `X-Admin-CSRF` 头。模型调用返回 `x-request-id`。筛选仅针对元数据，不索引正文。
 
@@ -247,7 +252,7 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 知识管理 API 已支持来源、候选、发布和观察的全状态查询，以及来源治理、候选直接发布/拒绝/修订、来源撤回和发布撤销。所有接口使用管理员会话；写请求需同源校验与 `X-Admin-CSRF`。发布校验候选版本、全部来源的当前治理版本、消费受众交集、用途及有效期限，返回真实发布标识；幂等重试不会产生重复发布或 Outbox 事件。
 
-启用知识管理时配置 `GATEWAY_ADMIN_KNOWLEDGE_PG_DSN` 或 `_FILE`，只能设置其中一个。它指向 DDL v2 knowledge schema，`search_path` 必须绑定该 schema，数据库登录身份是预建的专用受限 `admin_role`。初始化使用的 `admin_dsn` 是 DDL 属主连接，不能作为网关管理应用连接。管理登录角色不得拥有或可切换到 schema、表、序列或函数的属主身份，也不得具有特权或全局预定义角色成员关系。每次管理事务绑定服务端租户/域和 `app.admin_context='true'`，并核对结构指纹；旧结构不会自动迁移或修复。
+启用知识管理时配置 `GATEWAY_ADMIN_KNOWLEDGE_PG_DSN` 或 `_FILE`，只能设置其中一个。 使用基础设施已有图时设置 `GATEWAY_KNOWLEDGE_GRAPH_NAME`，与私有PG配置的 `graph_name` 一致；不创建图或schema。它指向 DDL v2 knowledge schema，`search_path` 必须绑定该 schema，数据库登录身份是预建的专用受限 `admin_role`。初始化使用的 `admin_dsn` 是 DDL 属主连接，不能作为网关管理应用连接。管理登录角色不得拥有或可切换到 schema、表、序列或函数的属主身份，也不得具有特权或全局预定义角色成员关系。每次管理事务绑定服务端租户/域和 `app.admin_context='true'`，并核对结构指纹；旧结构不会自动迁移或修复。
 
 审计管理使用同一 FileKMS 和受控证据根，后台构建批量上限 200、间隔 5 秒。新证据的服务端默认保留策略为 30 天（`model-query-retention-30d-v1`），只为具有持久可信关联和完整生命周期元数据的证据建立目录。`GET /api/admin/audit/records` 返回元数据和目录积压，`GET /api/admin/audit/records/{record_id}` 返回获准单条正文，`GET /api/admin/audit/events` 返回访问事件；最终会话、期限或可靠留痕检查失败时不返回正文。
 
@@ -267,12 +272,14 @@ docker compose -f deploy/compose.yaml up -d backend frontend knowledge-worker
 
 仓库只有根 npm workspace 锁文件和 `apps/backend` Python 项目。`.node-version` 固定已验证的 Node 22 补丁版本，Python 3.11，冻结 uv 依赖；从根运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> bash scripts/check.sh`。检查同时核对结构、wheel 与源码、Docker 运行依赖和锁文件；后端 OpenAPI 与前端生成类型分别检查漂移，构建前实际检查 app/node TypeScript 项目，并验证类型错误能阻断构建。npm 审计的 high/critical 问题返回非零退出码。
 
-数据库复用本机已有 PostgreSQL 5433。原生进程使用 `127.0.0.1:5433`，Compose 提供 `host.docker.internal:host-gateway` 映射，容器 DSN 指向宿主 5433，不能使用容器自身的回环地址。连接文件与模型、operator、密钥、持久状态均使用本机受控资源，不创建替代 PG 服务。历史与知识的17张表集中在同一 schema，分别使用受限连接和表级授权；worker 不得获得历史表权限。禁止将 DDL 管理连接交给应用。测试使用专用 `enterprise_gateway` 数据库与固定 `gw_test_gateway` schema，不再逐进程创建两套随机 schema。业务与故障注入测试属于独立环境，不能共用正在服务的表。
+数据库复用本机已有 PostgreSQL 5433。原生进程使用 `127.0.0.1:5433`，Compose 提供 `host.docker.internal:host-gateway` 映射，容器 DSN 指向宿主5433。开发服务、worker、管理端及测试共用指定的已有数据库和 schema；当前关系模型包含22张表（含 `entity_aliases` 和4张脱敏词典表）。数据库、schema、角色和扩展由公共基础设施维护，项目只提供手工表DDL与只读检查，不创建替代PG服务。知识与历史分别使用现有受限连接，DDL属主连接不交给应用或测试。CI运行在能访问同一基础设施的 `enterprise-gateway` 自托管Linux runner，通过 `GATEWAY_PG_CONFIG_JSON` secret提供现有服务配置，不启动PostgreSQL容器。
 
 `bash rebuild_and_run.sh` 使用已有本地启动配置（如存在）或标准 Compose 配置；标准部署可显式运行 `bash rebuild_and_run.sh --env-file <受控绝对配置路径>`。默认绑定 `0.0.0.0` 开通外部访问，先校验再构建/更新，不先停止全栈。支持 `--export [tar_path]` 导出本地构建镜像为归档文件，支持 `--export-only [tar_path]` 仅构建/导出，不依赖运行秘密或拉起容器。已有密钥和管理员状态直接复用；初始化工具只用于尚未初始化的资源。持久卷显式绑定 `enterprise_gateway_gateway-state` 与 `enterprise_gateway_gateway-admin-state`，镜像预建 `/app/state/admin` 并使用 UID 65532。前后端基础镜像均固定 digest；后端只打包已准备的 ONNX 制品。
 
-浏览器回归执行 `GATEWAY_HISTORY_PG_CONFIG=<受控本机PG测试配置> npm run test:e2e --workspace apps/admin-web`。它启动真实后端和 Chrome，使用固定的 `gw_test_gateway` schema、合成供应商及历史，结束后仅清理本轮创建的对象。`CHROME_PATH` 可指定本机 Chrome；无本机 Chrome 时使用 Playwright 安装的 Chromium。全量检查可设置 `GATEWAY_CHECK_BROWSER=1`，同一私有 PG 文件也可通过 `GATEWAY_TEST_PG_CONFIG` 提供知识测试配置。构建后的 Nginx 浏览器流程运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> python3 scripts/run_nginx_e2e.py`；代理故障检查运行 `python3 scripts/check_proxy.py`。TypeScript 拒绝 canary 运行 `python3 scripts/check_typecheck.py`。Docker 输入隔离检查为 `python3 scripts/check_docker_context.py`，仅构建合成 canary，不复制真实秘密。
+浏览器回归执行 `GATEWAY_HISTORY_PG_CONFIG=<受控本机PG测试配置> npm run test:e2e --workspace apps/admin-web`。它启动真实后端和 Chrome，复用已有表、使用合成供应商和独立测试数据作用域，结束不删除数据库对象或历史数据。`CHROME_PATH` 可指定本机 Chrome；无本机 Chrome 时使用 Playwright 安装的 Chromium。全量检查可设置 `GATEWAY_CHECK_BROWSER=1`，同一私有 PG 文件也可通过 `GATEWAY_TEST_PG_CONFIG` 提供知识测试配置。构建后的 Nginx 浏览器流程运行 `GATEWAY_HISTORY_PG_CONFIG=<受控PG测试配置> python3 scripts/run_nginx_e2e.py`；代理故障检查运行 `python3 scripts/check_proxy.py`。TypeScript 拒绝 canary 运行 `python3 scripts/check_typecheck.py`。Docker 输入隔离检查为 `python3 scripts/check_docker_context.py`，仅构建合成 canary，不复制真实秘密。
 
-当前 React 管理端提供登录、会话恢复、退出和请求历史筛选/分页/四阶段正文。其他既有管理 API 仍保留认证与授权，尚未实现的管理页面不算作已交付能力。
+当前 React 管理端提供登录、会话恢复、退出、请求历史筛选/分页/四阶段正文、文件脱敏预览和 Markdown 下载，以及本地脱敏词典查询、编辑、停用、删除和版本发布。其他既有管理 API 仍保留认证与授权，尚未实现的管理页面不算作已交付能力。
 
 设置 `GATEWAY_CHECK_DOCKER=1` 可在聚合入口追加两端 context canary、镜像构建与实际内容/hash、代理错误及 Nginx 浏览器检查。独立镜像核验入口为 `python3 scripts/check_images.py`，需先在相同源码上构建本机 dist 和两端镜像。退出请求失败时，网页立即清除历史与正文并提示服务端注销未确认。
+
+本地词典以 PostgreSQL 为权威来源，管理页为 `/admin/dictionary`。保存修改形成草稿；发布编译成功后用于新聊天请求和文件脱敏，在途请求保留原快照，NER 池继续复用。字段与发布边界见[词典契约](docs/contracts/redaction-dictionary.md)。已有 v3 表集合部署[词典增量 SQL](deploy/sql/redaction_dictionary_v4.sql)，由基础设施提供现有管理登录的四张新表 DML 权限。

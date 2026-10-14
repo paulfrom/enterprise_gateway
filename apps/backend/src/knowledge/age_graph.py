@@ -6,8 +6,8 @@ Architectural Guarantees:
 3. Outbox transactional events drive asynchronous projection synchronization:
    - KNOWLEDGE_PUBLISHED: MERGE vertices (subject, object) and MERGE claim edge.
    - KNOWLEDGE_REVOKED / KNOWLEDGE_WITHDRAWN: Deactivate claim edges (soft-tombstone is_active=false).
-4. Full idempotent rebuild allows dropping and reconstructing the entire AGE graph directly from
-   committed publications, claims, and entities in PostgreSQL.
+4. Scope-bound rebuild replaces only authorized graph rows in an existing infrastructure graph.
+   Runtime code never creates extensions, graphs, labels, schemas or grants.
 5. Governed Cypher queries enforce strict parameter-based tenant/domain isolation and sanitize
    forbidden write operations (CREATE, MERGE, SET, DELETE, DROP, REMOVE).
 """
@@ -169,7 +169,7 @@ class GraphQueryResult:
 
 
 class AgeGraphManager:
-    """Controls AGE graph lifecycle, initialization, permissions, and raw Cypher execution."""
+    """Use an existing infrastructure AGE graph for projection and Cypher execution."""
 
     def __init__(self, dsn: str, graph_name: str | None = None):
         self.dsn = dsn
@@ -189,43 +189,20 @@ class AgeGraphManager:
             if "ag_catalog" not in current_path:
                 cur.execute(f"SET search_path = ag_catalog, {current_path}")
 
-    def ensure_graph(self, *, application_role: str | None = None) -> None:
-        """Create extension and graph if they do not exist, and grant permissions to application role."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
-            with conn.cursor() as cur:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS age CASCADE")
-                cur.execute("SET search_path = ag_catalog, '$user', public")
-                exists = cur.execute(
-                    "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s",
-                    (self.graph_name,),
-                ).fetchone()
-                if not exists:
-                    cur.execute(sql.SQL("SELECT create_graph(%s)"), (self.graph_name,))
-                for label, function in (('Entity', 'create_vlabel'), ('Claim', 'create_elabel')):
-                    relation = sql.Identifier(self.graph_name, label).as_string(conn)
-                    if cur.execute('SELECT to_regclass(%s)', (relation,)).fetchone()[0] is None:
-                        cur.execute(sql.SQL('SELECT {}(%s,%s)').format(sql.Identifier(function)),
-                                    (self.graph_name, label))
-                if application_role:
-                    cur.execute(sql.SQL("GRANT USAGE ON SCHEMA ag_catalog TO {}").format(sql.Identifier(application_role)))
-                    cur.execute(sql.SQL("GRANT ALL ON ALL TABLES IN SCHEMA ag_catalog TO {}").format(sql.Identifier(application_role)))
-                    cur.execute(sql.SQL("GRANT ALL ON ALL SEQUENCES IN SCHEMA ag_catalog TO {}").format(sql.Identifier(application_role)))
-                    cur.execute(sql.SQL("GRANT ALL ON ALL FUNCTIONS IN SCHEMA ag_catalog TO {}").format(sql.Identifier(application_role)))
-                    cur.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(sql.Identifier(self.graph_name), sql.Identifier(application_role)))
-                    cur.execute(sql.SQL("GRANT ALL ON ALL TABLES IN SCHEMA {} TO {}").format(sql.Identifier(self.graph_name), sql.Identifier(application_role)))
-                    cur.execute(sql.SQL("GRANT ALL ON ALL SEQUENCES IN SCHEMA {} TO {}").format(sql.Identifier(self.graph_name), sql.Identifier(application_role)))
 
-    def drop_graph(self) -> None:
-        """Drop the graph and all associated objects."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SET search_path = ag_catalog, '$user', public")
-                exists = cur.execute(
-                    "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s",
-                    (self.graph_name,),
-                ).fetchone()
-                if exists:
-                    cur.execute(sql.SQL("SELECT drop_graph(%s, true)"), (self.graph_name,))
+    def verify_graph(self) -> None:
+        """Read-only check of an infrastructure-provided AGE graph and labels."""
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute('SET TRANSACTION READ ONLY')
+            if not conn.execute("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='age')").fetchone()[0]:
+                raise KnowledgeError('Existing AGE infrastructure is required')
+            if not conn.execute('SELECT EXISTS(SELECT 1 FROM ag_catalog.ag_graph WHERE name=%s)',
+                                (self.graph_name,)).fetchone()[0]:
+                raise KnowledgeError('Existing AGE projection graph is required')
+            for label in ('Entity', 'Claim'):
+                relation = sql.Identifier(self.graph_name, label).as_string(conn)
+                if conn.execute('SELECT to_regclass(%s)', (relation,)).fetchone()[0] is None:
+                    raise KnowledgeError('Existing AGE projection labels are required')
 
     def execute_cypher(
         self,
@@ -409,12 +386,10 @@ class OutboxGraphSyncer:
 
     def rebuild_all_projections(self, *, batch_size: int = 500, tenant_id: str | None = None,
                                 domain: str | None = None) -> dict[str, int]:
-        """Rebuild the authorized scope, or the whole namespace for an explicit owner job."""
-        if (tenant_id is None) != (domain is None) or (tenant_id is not None and (not tenant_id or not domain)):
+        """Rebuild only the explicit scope inside the existing shared projection."""
+        if not tenant_id or not domain:
             raise KnowledgeError('Graph rebuild requires a complete scope')
-        if tenant_id is None:
-            self.graph.drop_graph()
-        self.graph.ensure_graph()
+        self.graph.verify_graph()
 
         nodes_count = 0
         edges_count = 0

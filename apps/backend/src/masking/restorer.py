@@ -21,7 +21,7 @@ from typing import Annotated, Any, Callable, ClassVar, Literal, NoReturn, TypeVa
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from infra.errors import SafetyCode, SafetyError
-from masking.mapping import MappingContext
+from masking.mapping import MappingContext, has_reserved_token
 from protocol.protocols import DeepSeekToolCall, ClaudeToolUseBlock, ClaudeThinkingBlock
 from protocol.tool_buffer import BoundedToolCallBuffer
 import json
@@ -42,10 +42,6 @@ __all__ = [
     "restore_response",
 ]
 
-_RESERVED_PREFIX = "<<ENT"
-_RESERVED_PREFIXES = (_RESERVED_PREFIX, "<<E", "<<EN")
-
-
 def _reject_json(protocol: str) -> Callable[[JsonRejectKind], NoReturn]:
     def reject(kind: JsonRejectKind) -> NoReturn:
         if kind is JsonRejectKind.DUPLICATE_KEY:
@@ -59,7 +55,7 @@ def _reject_json(protocol: str) -> Callable[[JsonRejectKind], NoReturn]:
 
 def _has_reserved_token(text: str) -> bool:
     """Return True if text contains or ends with reserved token indicators."""
-    return _RESERVED_PREFIX in text or text.endswith(("<<E", "<<EN"))
+    return has_reserved_token(text)
 
 
 class DeepSeekPromptTokensDetails(BaseModel):

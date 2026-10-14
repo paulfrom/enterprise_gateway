@@ -1,4 +1,4 @@
-"""Real local controls and isolated PostgreSQL; supplier responses are synthetic.
+"""Real local controls and shared PostgreSQL; supplier responses are synthetic.
 
 This module deliberately composes the existing RuntimeAssemblyTests fixture
 instead of inheriting its test suite. No real supplier or business text is used.
@@ -27,7 +27,7 @@ SUPPLIER_HEADERS = {"Authorization": "Bearer synthetic-key"}
 
 
 @contextmanager
-def synthetic_history_runtime():
+def synthetic_history_runtime(*, with_dictionary=False):
     """Fresh scope, real detector/FileKMS/PG, real admin state and a finite echo supplier."""
     fixture = test_runtime.RuntimeAssemblyTests(methodName="runTest")
     app = None
@@ -89,10 +89,18 @@ def synthetic_history_runtime():
             return response
 
         fixture.transport = httpx.MockTransport(supplier)
+        dictionary_options = {}
+        if with_dictionary:
+            from detection.dictionary_store import PostgresDictionaryStore
+            from tests.pg_support import get_admin_dsn
+            dictionary_store = PostgresDictionaryStore(get_admin_dsn(), tenant_id=tenant_id, domain=fixture.domain)
+            dictionary_options = {'dictionary': dictionary_store.bootstrap(fixture.dictionary),
+                                  'dictionary_store': dictionary_store}
         app = fixture.app(
             tenant_id=tenant_id, history_store=store, admin_service=admin_service,
             ner_timeout=60.0,
             classifier=lambda body: "SECRET" if b"BLOCKED_PREVIEW" in body else "STANDARD",
+            **dictionary_options,
         )
         yield SimpleNamespace(app=app, fixture=fixture, store=store,
                               admin_service=admin_service, config=config,
@@ -144,7 +152,7 @@ class HistoryRuntimePostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not os.environ.get("GATEWAY_HISTORY_PG_CONFIG"):
-            raise unittest.SkipTest("Explicit isolated history PostgreSQL configuration required")
+            raise unittest.SkipTest("Explicit existing shared PostgreSQL configuration required")
         configuration()
 
     def test_two_protocols_record_actual_four_stages_encrypted_in_pg(self):
@@ -177,7 +185,7 @@ class HistoryRuntimePostgresTests(unittest.TestCase):
                     self.assertNotIn("synthetic-key", json.dumps(detail))
                     self.assertEqual("no-store", detail_response.headers["cache-control"])
             self.assertEqual(2, len(runtime.fixture.calls))
-            with psycopg.connect(runtime.config["admin_dsn"], connect_timeout=10) as connection:
+            with runtime.store._connection('reader') as connection:
                 envelopes = connection.execute(
                     "SELECT envelope FROM request_stage_contents WHERE request_id=ANY(%s::uuid[])", (ids,),
                 ).fetchall()

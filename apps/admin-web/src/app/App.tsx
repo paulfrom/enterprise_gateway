@@ -11,6 +11,7 @@ import {
   AuditOutlined,
   LogoutOutlined,
   BranchesOutlined,
+    FileProtectOutlined,
 } from '@ant-design/icons';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -26,6 +27,8 @@ import {
 import {
   Dashboard,
   History,
+    Documents,
+    Dictionary,
   KnowledgeSources,
   KnowledgeCandidates,
   KnowledgePublications,
@@ -137,6 +140,8 @@ function Console() {
   const menuItems = [
     { key: '/admin', icon: <DashboardOutlined />, label: '系统概览' },
     { key: '/admin/requests', icon: <HistoryOutlined />, label: '请求历史' },
+      { key: '/admin/documents', icon: <FileProtectOutlined />, label: '文件脱敏' },
+      { key: '/admin/dictionary', icon: <BookOutlined />, label: '脱敏词典' },
     { key: '/admin/sources', icon: <BookOutlined />, label: '知识来源' },
     { key: '/admin/candidates', icon: <CheckCircleOutlined />, label: '候选审核' },
     { key: '/admin/publications', icon: <SendOutlined />, label: '资产发布' },
@@ -231,6 +236,8 @@ function Console() {
             />
             <Route path="/admin" element={protectedPage(<Dashboard session={session} />)} />
             <Route path="/admin/requests" element={protectedPage(<History />)} />
+              <Route path="/admin/documents" element={protectedPage(<Documents />)} />
+              <Route path="/admin/dictionary" element={protectedPage(<Dictionary />)} />
             <Route path="/admin/sources" element={protectedPage(<KnowledgeSources />)} />
             <Route path="/admin/candidates" element={protectedPage(<KnowledgeCandidates />)} />
             <Route path="/admin/publications" element={protectedPage(<KnowledgePublications />)} />

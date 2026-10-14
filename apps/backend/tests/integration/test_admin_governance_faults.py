@@ -154,51 +154,6 @@ class AdminGovernanceFaultIsolationTests(unittest.TestCase):
                         self.assertEqual(len(runtime.fixture.calls), 4)
             asyncio.run(exercise())
 
-    def test_v1_like_schema_rejected_without_ddl_or_data_mutation(self):
-        with synthetic_governance_runtime() as runtime:
-            schema = "gw_test_v1_" + uuid4().hex[:12]
-            owner_dsn = runtime.config["admin_dsn"]
-            with psycopg.connect(owner_dsn) as conn:
-                conn.execute(sql.SQL("CREATE SCHEMA {} AUTHORIZATION CURRENT_USER").format(sql.Identifier(schema)))
-                conn.execute(sql.SQL("CREATE TABLE {}.knowledge_sources(source_id TEXT PRIMARY KEY,payload TEXT NOT NULL)").format(sql.Identifier(schema)))
-                conn.execute(sql.SQL("INSERT INTO {}.knowledge_sources VALUES ('marker','unchanged')").format(sql.Identifier(schema)))
-                conn.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(sql.Identifier(schema), sql.Identifier(runtime.config["admin_role"])))
-                conn.execute(sql.SQL("GRANT SELECT ON {}.knowledge_sources TO {}").format(sql.Identifier(schema), sql.Identifier(runtime.config["admin_role"])))
-            def snapshot():
-                with psycopg.connect(owner_dsn) as conn:
-                    objects = conn.execute("SELECT c.relname,c.relkind,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s ORDER BY c.relname", (schema,)).fetchall()
-                    columns = conn.execute("SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema=%s ORDER BY table_name,ordinal_position", (schema,)).fetchall()
-                    rows = conn.execute(sql.SQL("SELECT * FROM {}.knowledge_sources ORDER BY source_id").format(sql.Identifier(schema))).fetchall()
-                    functions = conn.execute("SELECT p.proname,pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s ORDER BY p.proname", (schema,)).fetchall()
-                    policies = conn.execute("SELECT tablename,policyname,qual,with_check FROM pg_policies WHERE schemaname=%s ORDER BY tablename,policyname", (schema,)).fetchall()
-                    return objects, columns, rows, functions, policies
-            try:
-                before = snapshot()
-                dsn = make_conninfo(owner_dsn, options="-c search_path=" + schema)
-                old_storage = PostgresKnowledgeStorage(runtime.config["app_dsn"], tenant_id=runtime.tenant,
-                    domain=runtime.domain, admin_dsn=dsn, admin_role=runtime.config["admin_role"])
-                service = KnowledgeGovernanceService(storage=old_storage, tenant_id=runtime.tenant, domain=runtime.domain)
-                app = runtime.app
-                async def exercise():
-                    async with app.router.lifespan_context(app):
-                        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway") as client:
-                            headers = await login(client)
-                            await self.protected_protocol_matrix(client, runtime)
-                            response = await client.get("/api/admin/sources", headers=headers)
-                            self.assertEqual(response.status_code, 503, response.text)
-                            self.assertEqual(response.json(), {"error": {"code": "KNOWLEDGE_SCHEMA_INCOMPATIBLE"}})
-                            publication = await client.post("/api/admin/candidates/" + str(uuid4()) + "/publish",
-                                headers=headers, json={"expected_version": 1, "use": "knowledge", "audiences": ["legal"],
-                                    "valid_until": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
-                                    "idempotency_key": "legacy-no-write", "basis": "synthetic schema admission check"})
-                            self.assertEqual(publication.status_code, 503, publication.text)
-                            self.assertEqual(publication.json(), {"error": {"code": "KNOWLEDGE_SCHEMA_INCOMPATIBLE"}})
-                with patch.object(runtime.service, '_storage', old_storage):
-                    asyncio.run(exercise())
-                self.assertEqual(snapshot(), before)
-            finally:
-                with psycopg.connect(owner_dsn) as conn:
-                    conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
     def test_catalog_write_failure_backlog_and_rescan_recover_original_evidence(self):
         from infra.envelope_crypto import parse_record
@@ -232,43 +187,41 @@ class AdminGovernanceFaultIsolationTests(unittest.TestCase):
             asyncio.run(exercise())
 
     def test_management_queue_saturation_preserves_protected_protocol_matrix(self):
-        # Real PostgreSQL AccessExclusiveLock holds the admin workers on their
-        # actual source-list SELECT; model admission uses independent resources.
+        # Stall only this test's management calls, leaving the shared PG tables
+        # and other services available while actual HTTP admission is exercised.
+        from contextlib import contextmanager
+        import threading
         with synthetic_governance_runtime() as runtime:
+            entered = threading.Barrier(5)
+            release = threading.Event()
+            original = runtime.storage.admin_transaction
+
+            @contextmanager
+            def stalled_transaction(**scope):
+                entered.wait(timeout=15)
+                if not release.wait(60):
+                    raise RuntimeError('Synthetic management release timed out')
+                with original(**scope) as conn:
+                    yield conn
+
             async def exercise():
                 async with runtime.app.router.lifespan_context(runtime.app):
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url='http://gateway') as client:
                         headers = await login(client)
-                        blocker = psycopg.connect(runtime.config['admin_dsn'])
-                        pending = []
-                        try:
-                            blocker.execute('LOCK TABLE knowledge_sources IN ACCESS EXCLUSIVE MODE')
+                        with patch.object(runtime.storage, 'admin_transaction', side_effect=stalled_transaction):
                             pending = [asyncio.create_task(client.get('/api/admin/sources',headers=headers)) for _ in range(4)]
-                            deadline = time.monotonic()+10
-                            while True:
-                                with psycopg.connect(runtime.config['admin_dsn']) as observer:
-                                    waiting = observer.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT table_name,column_name,ordinal_position%%'").fetchone()[0]
-                                if waiting == 4:
-                                    break
-                                self.assertLess(time.monotonic(),deadline,'four actual admin queries did not block')
-                                await asyncio.sleep(0.02)
-                            overflow = await client.get('/api/admin/sources',headers=headers)
-                            self.assertEqual(503,overflow.status_code,overflow.text)
-                            self.assertEqual({'error':{'code':'KNOWLEDGE_ADMIN_UNAVAILABLE'}},overflow.json())
-                            await self.protected_protocol_matrix(client,runtime)
-                        finally:
-                            blocker.rollback()
-                            blocker.close()
-                            results = await asyncio.gather(*pending)
-                        self.assertTrue(all(response.status_code in (200,503) for response in results))
-                        drain_deadline = time.monotonic()+10
-                        while True:
-                            recovered = await client.get('/api/admin/sources',headers=headers)
-                            if recovered.status_code == 200:
-                                break
-                            self.assertEqual(503,recovered.status_code,recovered.text)
-                            self.assertLess(time.monotonic(),drain_deadline,'admin slots did not drain after lock release')
-                            await asyncio.sleep(0.05)
+                            try:
+                                await asyncio.to_thread(entered.wait, 15)
+                                overflow = await client.get('/api/admin/sources',headers=headers)
+                                self.assertEqual(503,overflow.status_code,overflow.text)
+                                self.assertEqual({'error':{'code':'KNOWLEDGE_ADMIN_UNAVAILABLE'}},overflow.json())
+                                await self.protected_protocol_matrix(client,runtime)
+                            finally:
+                                release.set()
+                                results = await asyncio.gather(*pending)
+                            self.assertTrue(all(response.status_code == 200 for response in results))
+                        recovered = await client.get('/api/admin/sources',headers=headers)
+                        self.assertEqual(200,recovered.status_code,recovered.text)
             asyncio.run(exercise())
 
     def test_stopped_real_consumer_leaves_publication_pending_and_model_path_available(self):

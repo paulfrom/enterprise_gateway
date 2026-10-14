@@ -15,9 +15,9 @@ scripts/**
 !scripts/check_gateway_health.py
 !scripts/check_local_resources.py
 !scripts/prepare_admin_state.py
-!scripts/prepare_gateway_database.py
-!scripts/prepare_knowledge_database.py
-!scripts/prepare_request_database.py
+!scripts/check_gateway_database.py
+!scripts/export_gateway_sql.py
+!scripts/check_age_graph.py
 !scripts/purge_request_history.py
 !models/
 models/**

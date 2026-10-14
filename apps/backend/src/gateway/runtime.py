@@ -19,6 +19,7 @@ from audit.evidence_gate import EvidenceGate
 from detection.detection_orchestrator import DEFAULT_NER_TIMEOUT, DetectionOrchestrator
 from detection.dictionary import CompiledDictionary
 from detection.quick_screen import QuickScreenConfig
+from document.service import FileRedactor
 from gateway.app import create_app
 from gateway.provider_router import ProviderRouter, create_provider_pipeline, load_provider_configs
 from infra.egress_client import Resolver
@@ -32,14 +33,14 @@ from protocol.identity import ByokAuthenticator
 
 def create_runtime_app(
     *, provider_config_path: Path, domain: str, tenant_id: str,
-    correlation_key: bytes, hmac_key: bytes, kms: KmsProvider,
+    correlation_key: bytes, kms: KmsProvider, hmac_key: bytes | None = None,
     dictionary: CompiledDictionary, ner_package_dir: Path, state_directory: Path,
     policy: ClassificationPolicy, watermark_policy: WatermarkPolicy,
     evidence_bucket: str, classifier: Callable[[bytes], str] | None = None,
     package_version: str = "runtime-v1", ner_timeout: float = DEFAULT_NER_TIMEOUT,
     max_body_bytes: int = 1048576, transport: httpx.BaseTransport | None = None,
     resolver: Resolver | None = None,
-    history_store=None, admin_service=None,
+    history_store=None, admin_service=None, dictionary_store=None,
     knowledge_governance=None, audit_reader=None, audit_builder=None,
     detection_failure_mode: str = 'error',
     quick_screen: QuickScreenConfig | None = None,
@@ -65,8 +66,6 @@ def create_runtime_app(
                                       correlation_key=correlation_key)
     if not isinstance(dictionary, CompiledDictionary) or dictionary.domain != domain:
         raise SafetyError(SafetyCode.SCOPE_MISMATCH, "runtime assets")
-    if not isinstance(hmac_key, bytes) or len(hmac_key) < 32:
-        raise SafetyError(SafetyCode.INVALID_HMAC_KEY)
     if not isinstance(policy, ClassificationPolicy) or not isinstance(watermark_policy, WatermarkPolicy):
         raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "runtime policy")
     if not isinstance(kms, KmsProvider):
@@ -84,6 +83,7 @@ def create_runtime_app(
 
     detector = None
     pipelines = []
+    file_redactor = None
     try:
         detector = DetectionOrchestrator(dictionary=dictionary, ner_package_dir=ner_package_dir,
             ner_timeout=ner_timeout, quick_screen=quick_screen, ner_max_workers=ner_max_workers,
@@ -109,11 +109,30 @@ def create_runtime_app(
             pipelines.append(pipeline)
             by_model.update({model: pipeline for model in config.models})
         router = ProviderRouter(by_model)
+        def verify_file_assets():
+            pipeline = pipelines[0]
+            if pipeline.detector is not detector:
+                raise SafetyError(SafetyCode.CORRUPTED_PACKAGE)
+            handle = pipeline.version_handle
+            handle.assert_consistent_hash(pipeline._version_manager.active_package_hash)
+            handle.manifest.require_complete()
+            handle.manifest.verify_payloads(pipeline._component_payloads())
+            return handle.package_hash
+        if admin_service is not None:
+            file_redactor = FileRedactor(detector=detector, domain=domain,
+                scope=f'{tenant_id}/{domain}', verify_assets=verify_file_assets)
         app = create_app(router=router, authenticator=authenticator,
                          classifier=classifier, hmac_key=hmac_key,
                          history_store=history_store, admin_service=admin_service,
                          knowledge_governance=knowledge_governance, audit_reader=audit_reader, audit_builder=audit_builder,
+                         file_redactor=file_redactor,
                          )
+        if dictionary_store is not None:
+            from gateway.dictionary_runtime import DictionaryRuntimeService
+            if dictionary_store.scope != f'{tenant_id}/{domain}' or not dictionary.version.startswith('db-'):
+                raise SafetyError(SafetyCode.SCOPE_MISMATCH, 'dictionary store assembly')
+            app.state.dictionary_service = DictionaryRuntimeService(
+                app, dictionary_store, revision=int(dictionary.version[3:]))
 
         import threading
         builder_stop = threading.Event()
@@ -129,6 +148,8 @@ def create_runtime_app(
 
         def close_resources():
             builder_stop.set()
+            if file_redactor is not None:
+                file_redactor.close()
             if builder_thread is not None:
                 builder_thread.join(timeout=5)
             for name in ('admin_audit_executor', 'admin_knowledge_executor'):
@@ -174,6 +195,8 @@ def create_runtime_app(
         return app
     except BaseException:
         try:
+            if file_redactor is not None:
+                file_redactor.close()
             if detector is not None:
                 detector.close()
         finally:

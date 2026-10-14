@@ -37,6 +37,7 @@ API（全部经统一管理员依赖）：
 
 | 方法与路由 | 语义 |
 |---|---|
+| POST /api/admin/documents/redact | 上传文件并生成脱敏 Markdown，详见[文件脱敏契约](file-redaction.md) |
 | POST /api/admin/login | 严格 username/password，正确凭据签发 Cookie，统一错误与节流，验证同源 |
 | GET /api/admin/session | 当前管理员、管理范围、有效期及 CSRF token；无有效会话 401 |
 | POST /api/admin/logout | 立即持久注销当前会话，清 Cookie；同源及 CSRF 校验 |
@@ -63,13 +64,13 @@ API（全部经统一管理员依赖）：
 
 - 管理服务使用专用受限 PG 应用连接，worker 与 consumer 继续使用各自受限连接；均不得为 owner、superuser 或 BYPASSRLS。
 - 管理 RLS 分支同时绑定专用管理数据库身份、服务端 AdminContext 和本部署租户/域；不只相信 app.roles 字符串。worker/consumer 数据库身份不能 SET ROLE 到管理服务身份，部署门禁验证可达成员关系及各表 forced RLS。
-- DDL 带明确结构版本/指纹及单管理员验证/动作记录；初始化检查表、函数、触发器及 RLS 完整契约。首次上线使用新的隔离 schema/实例，初始化器继续拒绝已有 namespace。
+- DDL 带明确结构版本/指纹及单管理员验证/动作记录；初始化检查表、函数、触发器及 RLS 完整契约。部署复用公共PG的已有数据库/schema，部署方手工执行表SQL；运行时和测试仅检查现有结构，不要求新实例或空schema。
 - 初始化仅创建新的 schema；结构不符时拒绝对应能力，不修改已有对象。
 - admin 查询受限/拒绝/撤回/到期元数据不使用消费者 active publication 过滤；正文读取遵守实际保留与密钥状态。
 
 DDL v2 新增 `knowledge_admin_actions`、`knowledge_governance_versions`、`knowledge_publication_sources`。候选具有 `candidate_version` 和 `derived_from`，发布绑定精确候选版本、用途、消费受众、有效期限、管理员动作和幂等键；消费者资产、回执与 Outbox 保存实际版本、谱系和投递状态。结构准入使用 `SCHEMA_VERSION=3` 和 `SCHEMA_FINGERPRINT_V3`：对数据库元数据规范化后计算，保留列、约束、函数体、触发器和策略语义，剔除部署 schema/角色名字面量及 OID。
 
-DDL v3 将 `entity_aliases` 纳入固定结构与指纹，强制租户、业务域及专用管理员 RLS；别名读写不执行 DDL。普通应用角色即使设置管理员 GUC 也不能读写别名。已有完整 v2 namespace 通过显式、仅新增的迁移升级；运行时和初始化器仍不自动改动已有结构。停止旧版本服务后，在 `apps/backend` 执行 `PYTHONPATH=src .venv/bin/python scripts/migrate_knowledge_aliases.py --config /private/database-deployment.json`，配置需包含 owner `admin_dsn`、`schema`、`application_role` 与 `admin_role`。迁移保留既有数据，对 v3 重复执行无变更，未知结构漂移拒绝并回滚。
+DDL v3 将 `entity_aliases` 纳入固定结构与指纹，强制租户、业务域及专用管理员 RLS；别名读写不执行 DDL。普通应用角色即使设置管理员 GUC 也不能读写别名。已有v2表集合由部署方手工执行 `deploy/sql/entity_aliases_v3.sql`，在已有schema内只新增别名表及其RLS策略，保留其他表和数据；使用其他schema/管理角色时按公共PostgreSQL使用约定离线导出。运行时、测试和CI不执行建表、迁移或授权。
 
 `GATEWAY_ADMIN_KNOWLEDGE_PG_DSN` 与 `_FILE` 恰选一个；它是管理应用的专用受限登录连接，与初始化 DDL 的 owner 连接区分。管理事务设置 `app.tenant`、`app.domain`、`app.admin_context='true'`，管理 RLS 同时校验 `current_user` 的专用身份与部署范围。普通 worker/consumer 不能靠设置 GUC 或自报受众进入管理分支。启动及管理连接池每次取出连接时检查全部 schema 表/序列、函数和 namespace 的属主及可达成员路径，包括 NOINHERIT 下可切换的路径；结构指纹不替代权限检查。
 
@@ -133,7 +134,7 @@ DDL v3 将 `entity_aliases` 纳入固定结构与指纹，强制租户、业务�
 
 默认图空间绑定数据库和事实源 SQL namespace，采用稳定哈希后缀；不同 namespace 的数据与重建互不影响，测试 namespace 不复用部署图空间。
 
-部署 owner 在 `apps/backend` 执行 `PYTHONPATH=src .venv/bin/python scripts/prepare_age_graph.py --config /private/database-deployment.json`，预建图、Entity/Claim 标签并向专用受限管理员角色授权。管理 API 重建仅删除和重放固定租户/业务域的投影，保留其他范围；其数据库连接设置对应管理员 RLS 上下文。
+AGE扩展、图以及Entity/Claim标签属于基础设施预置资源。项目不创建或删除扩展、图schema、标签或角色，不修改图授权。在 `apps/backend` 执行 `PYTHONPATH=src .venv/bin/python scripts/check_age_graph.py --config /private/service-connections.json` 仅做只读检查。管理API重建仅删除和重放指定租户/业务域的投影行，保留其他范围；不支持删除整个共享图后重建。
 
 `POST /api/admin/graph/query` 仅接受能完整解析和改写的 openCypher 子集：带明确变量和 `Entity` 标签的节点模式，以及最多四跳、每条边均带 `Claim` 标签的固定长度关系模式；支持属性字面量/参数匹配、由 `AND` 连接的简单属性比较、`RETURN` 节点/边/属性或 `count`、可选 `DISTINCT`/列别名及整数 `LIMIT`。默认最多 100 行，显式上限为 1000 行、16 列，数据库事务只读且查询超时为 5 秒。未支持的语法、匿名变量、无标签节点、可变长度路径、`UNION`、`WITH`、子查询、注释、多语句和写操作均在执行前拒绝。
 

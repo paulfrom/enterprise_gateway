@@ -21,6 +21,18 @@ class AdminSession(BaseModel):
 class Revocation(BaseModel):
     revoked: bool
 
+class DocumentRedaction(BaseModel):
+    format: str
+    output_format: Literal['markdown']
+    redacted_text: str
+    characters: int
+    block_count: int
+    entity_count: int
+    replacement_count: int
+    entity_types: dict[str, int]
+    warnings: list[str]
+    package_hash: str
+
 class ErrorDetail(BaseModel):
     code: str
     message: str | None = None

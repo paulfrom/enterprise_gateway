@@ -1,8 +1,8 @@
-"""Single-admin governance service v2 contract tests against real PostgreSQL.
+"""Single-admin governance service v3 contract tests against real PostgreSQL.
 
-Schema v2 removed the persisted two-reviewer approval flow entirely; durable
+The governance model removed the persisted two-reviewer approval flow entirely; durable
 governance mutations are bound to recorded single-admin actions. These tests
-exercise the v2 governance service end to end on an isolated real schema:
+exercise the current governance service end to end on existing shared tables with fresh synthetic scopes:
 admin-direct publish, multi-source authorization intersection, idempotent
 publication, supersession/withdrawal cascades, availability against actual
 outbox/receipt state, and stable pagination.
@@ -40,7 +40,7 @@ _HEX = '0123456789abcdef'
 
 
 class GovernancePgTestCase(unittest.TestCase):
-    """Shared real-PG fixture for v2 governance service tests."""
+    """Shared real-PG fixture for the current governance service tests."""
 
     @classmethod
     def setUpClass(cls):
@@ -64,11 +64,10 @@ class GovernancePgTestCase(unittest.TestCase):
     # Connection and seeding helpers
     # ------------------------------------------------------------------
     @contextmanager
-    def admin_conn(self, *, admin_context=True):
+    def admin_conn(self, *, admin_context=True, tenant=None):
         conn = psycopg.connect(self.config['admin_app_dsn'])
         try:
-            conn.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.config['admin_role'])))
-            conn.execute("SELECT set_config('app.tenant',%s,true)", (self.tenant,))
+            conn.execute("SELECT set_config('app.tenant',%s,true)", (tenant or self.tenant,))
             conn.execute("SELECT set_config('app.domain',%s,true)", (self.domain,))
             if admin_context:
                 conn.execute("SELECT set_config('app.admin_context','true',true)")
@@ -888,7 +887,7 @@ class TestGovernanceAuthorizationAndReuse(GovernancePgTestCase):
                 use=None, now=self.fresh_now())
         self.assertEqual('KNOWLEDGE_CANDIDATE_NOT_FOUND', cm.exception.code)
 
-    def test_export_and_dictionary_on_v2_model(self):
+    def test_authorized_export_and_dictionary(self):
         _, candidate_id = self._restricted_setup()
         self.confirm('src-byok', audiences=('reader',))
         publication_id = self.publish(candidate_id, audiences=('reader',))
