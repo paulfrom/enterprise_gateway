@@ -44,7 +44,6 @@ services:
       GATEWAY_PROCESSING_DOMAIN: ${GATEWAY_PROCESSING_DOMAIN:?required processing domain}
       GATEWAY_PROCESSING_TENANT: ${GATEWAY_PROCESSING_TENANT:?required processing tenant}
       GATEWAY_EVIDENCE_BUCKET: ${GATEWAY_EVIDENCE_BUCKET:?required evidence retention bucket}
-      GATEWAY_HMAC_KEY_FILE: /run/secrets/hmac_key
       GATEWAY_SOURCE_CORRELATION_KEY_FILE: /run/secrets/source_correlation_key
       GATEWAY_KMS_MASTER_KEY_FILE: /run/secrets/kms_master_key
       GATEWAY_DICTIONARY_FILE: /app/operator/dictionary.json
@@ -69,7 +68,6 @@ services:
       GATEWAY_HISTORY_RETENTION_DAYS: ${GATEWAY_HISTORY_RETENTION_DAYS:?required explicit history retention days}
       GATEWAY_HISTORY_BUCKET: ${GATEWAY_HISTORY_BUCKET:?required history key bucket}
     secrets:
-      - hmac_key
       - source_correlation_key
       - kms_master_key
       - history_pg_dsn
@@ -134,8 +132,6 @@ volumes:
     name: enterprise_gateway_gateway-admin-state
 
 secrets:
-  hmac_key:
-    file: ${GATEWAY_HMAC_KEY_FILE:?required HMAC secret file}
   source_correlation_key:
     file: ${GATEWAY_SOURCE_CORRELATION_KEY_FILE:?required correlation secret file}
   kms_master_key:
@@ -144,6 +140,6 @@ secrets:
     file: ${GATEWAY_KNOWLEDGE_PG_DSN_FILE:?required restricted PG connection file}
   history_pg_dsn:
     file: ${GATEWAY_HISTORY_PG_DSN_FILE:?required restricted history PG connection file}
-  # Empty optional secret keeps only knowledge management unavailable.
+  # Also supplies the database dictionary's scoped management connection.
   admin_knowledge_pg_dsn:
-    file: ${GATEWAY_ADMIN_KNOWLEDGE_PG_DSN_FILE:-/dev/null}
+    file: ${GATEWAY_ADMIN_KNOWLEDGE_PG_DSN_FILE:?required restricted dictionary/knowledge management connection file}

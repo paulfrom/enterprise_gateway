@@ -8,7 +8,7 @@
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "包含未登记令牌：<<ENT_v1_0123456789abcdef0123456789abcdef>>"
+        "content": "包含未登记令牌：<ORG_999>"
       },
       "finish_reason": "stop"
     }

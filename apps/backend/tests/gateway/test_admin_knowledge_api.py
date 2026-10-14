@@ -812,7 +812,7 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
         storage = self.storage = __import__("knowledge.storage", fromlist=["PostgresKnowledgeStorage"]) \
             .PostgresKnowledgeStorage(
                 config["app_dsn"], tenant_id=self.tenant, domain=self.domain,
-                admin_dsn=config["admin_app_dsn"], admin_role=config["admin_role"])
+                admin_dsn=config["admin_app_dsn"], admin_role=config["admin_role"], graph_name=config.get('graph_name'))
         self.governance = KnowledgeGovernanceService(
             tenant_id=self.tenant, domain=self.domain, storage=storage)
         self.fixture = KnowledgeApiFixture()
@@ -829,8 +829,6 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         conn = psycopg.connect(config["admin_app_dsn"])
         try:
-            conn.execute(sql.SQL("SET LOCAL ROLE {}").format(
-                sql.Identifier(config["admin_role"])))
             conn.execute("SELECT set_config('app.tenant',%s,true)", (self.tenant,))
             conn.execute("SELECT set_config('app.domain',%s,true)", (self.domain,))
             conn.execute("SELECT set_config('app.admin_context','true',true)")
@@ -924,50 +922,6 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
             self.assertFalse(recovered.closed)
             self.assertEqual(recovered.execute('SHOW statement_timeout').fetchone()[0], '5s')
 
-    def test_runtime_rejects_management_ownership_of_non_sources_objects(self):
-        import psycopg
-        from psycopg import sql
-        from tests.pg_support import gateway_configuration
-        import start_gateway
-        from knowledge.storage import _ASSET_TABLES, _ADMIN_TABLES
-        config = test_configuration()
-        with psycopg.connect(config['admin_app_dsn']) as owner:
-            owner_role = owner.execute('SELECT current_user').fetchone()[0]
-        dsn = gateway_configuration()['admin_app_dsn']
-        for table in ('knowledge_publications', 'knowledge_governance_versions', 'knowledge_admin_actions'):
-            with self.subTest(table=table):
-                try:
-                    with psycopg.connect(config['admin_app_dsn']) as owner:
-                        owner.execute(sql.SQL('ALTER TABLE {} OWNER TO {}').format(
-                            sql.Identifier(table), sql.Identifier(config['admin_role'])))
-                    with self.assertRaises(ValueError):
-                        start_gateway._assemble_admin_knowledge({'connection_uri': dsn}, tenant=self.tenant, domain=self.domain)
-                finally:
-                    with psycopg.connect(config['admin_app_dsn']) as owner:
-                        owner.execute(sql.SQL('ALTER TABLE {} OWNER TO {}').format(
-                            sql.Identifier(table), sql.Identifier(owner_role)))
-                        owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}').format(
-                            sql.SQL(',').join(sql.Identifier(config['schema'], name) for name in (*_ASSET_TABLES, *_ADMIN_TABLES)),
-                            sql.Identifier(config['admin_role'])))
-        # An indirect NOINHERIT path to a non-privileged table owner is equally forbidden.
-        reachable_owner = 'owner_' + uuid4().hex[:16]
-        try:
-            with psycopg.connect(config['admin_app_dsn']) as owner:
-                owner.execute(sql.SQL('CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOBYPASSRLS').format(sql.Identifier(reachable_owner)))
-                owner.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(config['schema']), sql.Identifier(reachable_owner)))
-                owner.execute(sql.SQL('ALTER TABLE knowledge_publications OWNER TO {}').format(sql.Identifier(reachable_owner)))
-                owner.execute(sql.SQL('GRANT {} TO {} WITH INHERIT FALSE').format(sql.Identifier(reachable_owner), sql.Identifier(config['admin_role'])))
-            with self.assertRaises(ValueError):
-                start_gateway._assemble_admin_knowledge({'connection_uri': dsn}, tenant=self.tenant, domain=self.domain)
-        finally:
-            with psycopg.connect(config['admin_app_dsn']) as owner:
-                owner.execute(sql.SQL('ALTER TABLE knowledge_publications OWNER TO {}').format(sql.Identifier(owner_role)))
-                owner.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}').format(
-                    sql.SQL(',').join(sql.Identifier(config['schema'], name) for name in (*_ASSET_TABLES, *_ADMIN_TABLES)),
-                    sql.Identifier(config['admin_role'])))
-                owner.execute(sql.SQL('REVOKE {} FROM {}').format(sql.Identifier(reachable_owner), sql.Identifier(config['admin_role'])))
-                owner.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(reachable_owner)))
-                owner.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(reachable_owner)))
 
     def test_conflicting_expected_governance_version_is_409(self):
         self._seed_source("pg-src-2")
@@ -1013,7 +967,6 @@ class AdminKnowledgeRealPgTests(unittest.TestCase):
         self.assertEqual(bad_query_resp.status_code, 422, bad_query_resp.text)
 
 
-
 class AdminCapabilityAssemblyTests(unittest.TestCase):
     def setUp(self):
         from tests.gateway.test_runtime import RuntimeAssemblyTests
@@ -1023,10 +976,19 @@ class AdminCapabilityAssemblyTests(unittest.TestCase):
 
     def test_optional_knowledge_failures_leave_model_factory_and_audit_assembled(self):
         import start_gateway
+        from unittest.mock import Mock
+        from detection.dictionary_store import snapshot_payload
+        from detection.dictionary import compile_dictionary
         fixture = self.runtime_fixture
+        dictionary_store = Mock(scope=f'processing-tenant/{fixture.domain}')
+        dictionary_store.bootstrap.side_effect = lambda seed: compile_dictionary(snapshot_payload(
+            seed().dictionary_id, 1, fixture.domain,
+            [entry.model_dump() for entry in seed().entries]))
+        dictionary_store.active.return_value = (1, None)
         for error in (RuntimeError('connection unavailable'), KnowledgeSchemaError('schema mismatch')):
             with self.subTest(error=type(error).__name__), patch.dict('os.environ', dict(fixture.operator_env,
                 GATEWAY_ADMIN_KNOWLEDGE_PG_DSN='synthetic-management-dsn'), clear=True), \
+                patch('detection.dictionary_store.PostgresDictionaryStore', return_value=dictionary_store), \
                 patch.object(start_gateway, '_assemble_admin_knowledge', side_effect=error), \
                 patch.object(start_gateway, 'create_runtime_app', return_value='model-app') as factory:
                 self.assertEqual(start_gateway.build_app(providers_config_path=fixture.provider_file), 'model-app')

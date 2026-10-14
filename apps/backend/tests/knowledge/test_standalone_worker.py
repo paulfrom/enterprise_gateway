@@ -1,4 +1,4 @@
-"""Actual consumer entrypoint, persistent local keys, and isolated real PostgreSQL."""
+"""Actual consumer entrypoint, persistent local keys, and shared real PostgreSQL."""
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json

@@ -9,7 +9,7 @@ Key持有证明不能转化为企业身份。BYOK入口构造UnverifiedSourceCon
 
 部署入口沿用 ASGI/uvicorn 的受信 Python 模块装配模式：运维可用 `module:callable` 指定同步分类函数，程序集成继续使用同一 `build_app`；没有默认获准实现。模块目录属于供应链受信代码，客户端不能指定、上传或替换。入口与供应商上游允许 HTTP/HTTPS，包括非 loopback 地址；传输协议由运维固定配置，不是统一 HTTPS 准入门禁。沿用 httpx 的 URL scheme 选择与 uvicorn 的可选证书参数，不新增豁免开关；HTTPS 使用原生证书对并在启动前校验，上游保留证书/主机名验证，TLS 失败不降级。HTTP 不提供传输加密，两种协议仍执行相同 BYOK、分类、检测、留证与固定出口校验；容器默认端口仅发布到 loopback，公网监听由运维显式决定。
 
-数据库初始化是独立管理操作：仅创建未存在的新 schema，复用当前 SQL 定义，在同一 PostgreSQL 事务执行 DDL、受限授权和 forced RLS；不将管理凭据交给 worker，不改历史 schema，不提供兼容布局或迁移。初始化工具检查应用账号及其可切换角色，既有 worker 继续只消费受限连接。远端生产连接需单独满足 TLS、身份和生命周期治理。
+表部署是显式手工管理操作：在公共PG的已有数据库/schema中执行项目提供的表SQL，应用与测试不创建数据库/schema/角色或修改基础设施授权。只读检查工具验证现有应用账号与表契约，worker只消费受限连接，不持有基础设施管理员凭据。远端生产连接需单独满足 TLS、身份和生命周期治理。
 
 部署初始化与 worker 启动使用同一角色门禁：拒绝超级用户、BYPASSRLS、创建数据库/角色及复制能力，以及 MEMBER 可达的特权角色和任意 `pg_*` 全局预定义角色。预定义文件/程序执行能力不能仅用 rolsuper 标志判断；检查包含 NOINHERIT 下仍能 SET ROLE 的成员关系。专用连接不支持身份切换，要求登录用户、session_user 和 current_user 一致，不能用管理凭据加 role 参数伪装为受限服务连接。worker 另核验全部资产表的 forced RLS，并以 pg_has_role MEMBER 拒绝当前 owner 及其可达成员，不以六张核心表或单个 OID 相等代表完整权限边界。单次 worker 提交失败必须向运维返回非零退出码，不能以保存失败统计代替失败状态。
 

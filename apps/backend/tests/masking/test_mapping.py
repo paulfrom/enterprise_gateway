@@ -1,426 +1,166 @@
-"""Executable mapping contracts, not evidence of a working detection gateway."""
+"""Readable request-local mappings, role consistency and namespace guards."""
+from __future__ import annotations
 
 import asyncio
-import json
-import re
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
+from detection.spans import Span
 from infra.errors import SafetyCode, SafetyError
-from masking.mapping import MappingContext
-from detection.spans import Span, redact_text
-
-
-KEY = bytes(range(32))
-FIXTURES = Path(__file__).parent / "fixtures" / "mapping"
-_TOKEN_FORMAT = re.compile(r"<<ENT_[A-Za-z0-9.-]{1,32}_[0-9a-f]{32}>>\Z")
+from masking.mapping import MappingContext, reject_reserved_literals
 
 
 class MappingTests(unittest.TestCase):
-    def context(self, scope="domain-a", version="v1"):
-        return MappingContext(scope, version, KEY)
-
-    def assert_blocked(self, code, operation):
+    def assert_code(self, code, operation):
         with self.assertRaises(SafetyError) as failure:
             operation()
         self.assertEqual(code, failure.exception.code)
 
-    def test_exact_roundtrip_preserves_distinct_spellings(self):
-        originals = ["A", "Ａ", " A ", "é", "é", "甲公司", '含"引号\\及\n换行']
-        with self.context() as context:
-            tokens = [context.token_for("ORG", value) for value in originals]
+    def test_exact_spellings_and_types_keep_independent_mappings(self):
+        originals = ('企业甲', '企业甲 ', '企业 甲', '企業甲', '企业甲\n')
+        with MappingContext('synthetic-domain') as context:
+            tokens = [context.token_for('ORG', original) for original in originals]
             self.assertEqual(len(originals), len(set(tokens)))
-            for original, token in zip(originals, tokens):
-                self.assertEqual(original, context.restore(token))
-            self.assertEqual(tokens[0], context.token_for("ORG", originals[0]))
-
-    def test_scope_type_key_version_and_key_separate_tokens(self):
-        with self.context() as first, self.context("domain-b") as second, self.context(version="v2") as third:
-            token = first.token_for("ORG", "甲")
-            alternatives = [second.token_for("ORG", "甲"), third.token_for("ORG", "甲"), first.token_for("PERSON", "甲")]
-            self.assertNotIn(token, alternatives)
-            self.assert_blocked("UNKNOWN_TOKEN", lambda: second.restore(token))
-        with MappingContext("domain-a", "v1", b"x" * 32) as changed_key:
-            self.assertNotEqual(token, changed_key.token_for("ORG", "甲"))
-
-    def test_canonical_framing_prevents_concatenation_ambiguity(self):
-        with self.context("ab") as first, self.context("a") as second:
-            self.assertNotEqual(first.token_for("ORG", "c"), second.token_for("ORG", "bc"))
-
-    def test_mappings_are_request_local_even_for_the_same_domain(self):
-        with self.context() as first, self.context() as second:
-            token = first.token_for("ORG", "甲公司")
-            self.assertEqual(0, second.entry_count)
-            self.assert_blocked("UNKNOWN_TOKEN", lambda: second.restore(token))
-            self.assertEqual(token, second.token_for("ORG", "甲公司"))
-            self.assertEqual("甲公司", second.restore(token))
-
-    def test_collision_does_not_overwrite_original(self):
-        with self.context() as context, patch("masking.mapping.hmac.digest", return_value=b"x" * 32):
-            token = context.token_for("ORG", "甲公司")
-            self.assert_blocked("TOKEN_COLLISION", lambda: context.token_for("ORG", "乙公司"))
-            self.assertEqual("甲公司", context.restore(token))
-            self.assertEqual(1, context.entry_count)
-
-    def test_context_clears_references_on_exception_and_cannot_reopen(self):
-        context = self.context()
-        self.assert_blocked("MAPPING_NOT_ACTIVE", lambda: context.token_for("ORG", "甲公司"))
-        with self.assertRaises(RuntimeError):
-            with context:
-                context.token_for("ORG", "甲公司")
-                raise RuntimeError("synthetic interruption")
-        self.assertEqual(0, context.entry_count)
-        self.assertEqual(b"", context.key)
-        self.assert_blocked("MAPPING_NOT_ACTIVE", lambda: context.restore("text"))
-        self.assert_blocked("MAPPING_LIFECYCLE", context.__enter__)
-
-    def test_unknown_and_malformed_tokens_fail_without_echoing_content(self):
-        with self.context() as context:
-            valid = context.token_for("ORG", "甲公司")
-            for suffix in (valid[:-1], "<<ENT_broken>>", "<<ENT_", "<<EN"):
-                self.assert_blocked("MALFORMED_TOKEN", lambda: context.restore("private-content" + suffix))
-            self.assert_blocked("UNKNOWN_TOKEN", lambda: context.restore("<<ENT_v1_" + "0" * 32 + ">>"))
-            try:
-                context.restore("private-content<<ENT_broken")
-            except SafetyError as failure:
-                self.assertNotIn("private-content", str(failure))
-
-    def test_natural_token_namespace_is_rejected_even_without_detected_spans(self):
-        with self.context() as context:
-            token = context.token_for("ORG", "甲公司")
-            self.assert_blocked("RESERVED_TOKEN_LITERAL", lambda: redact_text("literal " + token, [], context))
-            self.assert_blocked("RESERVED_TOKEN_LITERAL", lambda: context.token_for("ORG", token))
-
-    def test_invalid_unicode_is_controlled(self):
-        with self.context() as context:
-            self.assert_blocked("INVALID_UNICODE", lambda: context.token_for("ORG", "\ud800"))
-
-
-class StableTokenMatrixTests(unittest.TestCase):
-    """Stable token generation tests driven by the synthetic fixture matrix."""
-
-    def setUp(self):
-        with open(FIXTURES / "token-matrix.json", "r", encoding="utf-8") as handle:
-            self.matrix = json.load(handle)
-        self.keys = {name: bytes.fromhex(raw) for name, raw in self.matrix["keys"].items()}
-
-    def context(self, scope="domain-a", version="v1", key=None):
-        return MappingContext(scope, version, self.keys["key-a"] if key is None else key)
-
-    def test_same_scope_version_type_and_original_yield_one_stable_token(self):
-        case = self.matrix["stability"]
-        with self.context(case["scope"], case["key_version"]) as context:
-            tokens = {context.token_for(case["entity_type"], case["original"]) for _ in range(case["calls"])}
-        self.assertEqual(1, len(tokens))
-        (token,) = tokens
-        self.assertIsNotNone(_TOKEN_FORMAT.fullmatch(token))
-
-    def test_separation_matrix_yields_distinct_wellformed_tokens(self):
-        base = self.matrix["stability"]
-        with self.context(base["scope"], base["key_version"]) as context:
-            base_token = context.token_for(base["entity_type"], base["original"])
-            for case in self.matrix["separation"]:
-                with MappingContext(case["scope"], case["key_version"], self.keys[case["key"]]) as other:
-                    token = other.token_for(case["entity_type"], case["original"])
-                self.assertNotEqual(base_token, token, case["case"])
-                self.assertIsNotNone(_TOKEN_FORMAT.fullmatch(token), case["case"])
-
-    def test_variant_spellings_get_distinct_tokens_and_each_restores_exactly(self):
-        originals = [entry["original"] for entry in self.matrix["variants"]]
-        with self.context("variant-scope") as context:
-            tokens = [context.token_for("ORG", original) for original in originals]
-            self.assertEqual(len(tokens), len(set(tokens)))
-            for original, token in zip(originals, tokens):
+            self.assertEqual('<ORG_001>', tokens[0])
+            self.assertEqual(tokens[0], context.token_for('ORG', originals[0]))
+            self.assertEqual('<PER_001>', context.token_for('PER', originals[0]))
+            for token, original in zip(tokens, originals, strict=True):
                 self.assertEqual(original, context.restore(token))
 
-    def test_token_digest_is_128_bit_hex_inside_reserved_frame(self):
-        with self.context() as context:
-            token = context.token_for("ORG", "合成原值")
-        self.assertTrue(token.startswith("<<ENT_v1_"))
-        self.assertTrue(token.endswith(">>"))
-        digest = token.removeprefix("<<ENT_v1_").removesuffix(">>")
-        self.assertEqual(32, len(digest))
-        self.assertEqual(16, len(bytes.fromhex(digest)))
+    def test_counters_do_not_stop_at_999(self):
+        with MappingContext('synthetic-domain') as context:
+            for number in range(1, 1002):
+                token = context.token_for('ORG', f'合成企业{number}')
+            self.assertEqual('<ORG_1001>', token)
+            self.assertEqual('合成企业1001', context.restore(token))
 
+    def test_subset_repetition_and_no_entity_reference(self):
+        with MappingContext('synthetic-domain') as context:
+            token = context.token_for('ORG', '合成企业甲')
+            context.token_for('ORG', '合成企业乙')
+            self.assertEqual('合成企业甲 / 合成企业甲', context.restore(token + ' / ' + token))
+            self.assertEqual('无实体的结论', context.restore('无实体的结论'))
 
-class P01RejectionTests(unittest.TestCase):
-    """Controlled rejections for illegal generator inputs."""
+    def test_same_placeholder_in_other_requests_has_no_shared_original(self):
+        with MappingContext('scope-a') as one, MappingContext('scope-b') as two:
+            token = one.token_for('ORG', '合成企业甲')
+            self.assert_code(SafetyCode.UNKNOWN_TOKEN, lambda: two.restore(token))
+            self.assertEqual(token, two.token_for('ORG', '合成企业乙'))
+            self.assertEqual('合成企业甲', one.restore(token))
+            self.assertEqual('合成企业乙', two.restore(token))
 
-    def context(self, scope="domain-a", version="v1", key=KEY):
-        return MappingContext(scope, version, key)
-
-    def assert_canary_clean(self, failure, canary):
-        self.assertNotIn(canary, str(failure.exception))
-        self.assertNotIn(canary, repr(failure.exception))
-        self.assertIsNone(failure.exception.__cause__)
-        self.assertIsNone(failure.exception.__context__)
-
-    def test_invalid_entity_type_rejected(self):
-        invalid = ["", "org", "Org", "1ORG", "ORG-", "ORG.", "ORG NAME", "ORG/TYPE", "X" * 33]
-        with self.context() as context:
-            for entity_type in invalid:
-                with self.assertRaises(SafetyError) as failure:
-                    context.token_for(entity_type, "合成原值")
-                self.assertEqual(SafetyCode.INVALID_ENTITY_TYPE, failure.exception.code, entity_type)
-
-    def test_empty_original_rejected(self):
-        with self.context() as context:
-            with self.assertRaises(SafetyError) as failure:
-                context.token_for("ORG", "")
-            self.assertEqual(SafetyCode.EMPTY_ENTITY, failure.exception.code)
-
-    def test_invalid_key_version_rejected_at_construction(self):
-        invalid = ["", "v" * 33, "bad version", "v/1", "v_1", "v:1", "<<ENT", 123, None]
-        for version in invalid:
-            with self.assertRaises(SafetyError) as failure:
-                MappingContext("domain-a", version, KEY)
-            self.assertEqual(SafetyCode.INVALID_KEY_VERSION, failure.exception.code, version)
-
-    def test_short_or_non_bytes_hmac_key_rejected_at_construction(self):
-        invalid = [b"", b"x" * 31, "x" * 32, bytearray(b"x" * 32), None]
-        for key in invalid:
-            with self.assertRaises(SafetyError) as failure:
-                MappingContext("domain-a", "v1", key)
-            self.assertEqual(SafetyCode.INVALID_HMAC_KEY, failure.exception.code)
-
-    def test_invalid_scope_rejected_at_construction(self):
-        for scope in ["", "   ", 123, None]:
-            with self.assertRaises(SafetyError) as failure:
-                MappingContext(scope, "v1", KEY)
-            self.assertEqual(SafetyCode.INVALID_SCOPE, failure.exception.code)
-
-    def test_synthetic_collision_rejected_without_overwriting_or_leaking(self):
-        canary_one = "CNRY-collision-alpha-161"
-        canary_two = "CNRY-collision-beta-271"
-        with self.context() as context, patch("masking.mapping.hmac.digest", return_value=b"\x5a" * 32):
-            token = context.token_for("ORG", canary_one)
-            with self.assertRaises(SafetyError) as failure:
-                context.token_for("ORG", canary_two)
-            self.assertEqual(SafetyCode.TOKEN_COLLISION, failure.exception.code)
-            self.assert_canary_clean(failure, canary_two)
-            self.assertEqual(canary_one, context.restore(token))
-            self.assertEqual(1, context.entry_count)
-
-    def test_synthetic_collision_across_entity_types_rejected(self):
-        with self.context() as context, patch("masking.mapping.hmac.digest", return_value=b"\x5a" * 32):
-            context.token_for("ORG", "合成同一原值")
-            with self.assertRaises(SafetyError) as failure:
-                context.token_for("PERSON", "合成同一原值")
-            self.assertEqual(SafetyCode.TOKEN_COLLISION, failure.exception.code)
-            self.assertEqual(1, context.entry_count)
-
-    def test_repeat_issue_of_same_value_is_idempotent(self):
-        with self.context() as context:
-            first = context.token_for("ORG", "合成甲公司")
-            second = context.token_for("ORG", "合成甲公司")
-            self.assertEqual(first, second)
-            self.assertEqual(1, context.entry_count)
-
-    def test_token_exposes_no_original_and_single_flip_is_unknown(self):
-        canary = "CNRY-token-opacity-577"
-        with self.context() as context:
-            token = context.token_for("ORG", canary)
-            self.assertNotIn(canary, token)
-            flipped = token[:-3] + ("0" if token[-3] != "0" else "1") + token[-2:]
-            with self.assertRaises(SafetyError) as failure:
-                context.restore(flipped)
-            self.assertEqual(SafetyCode.UNKNOWN_TOKEN, failure.exception.code)
-            self.assert_canary_clean(failure, canary)
-
-
-class RequestIsolationTests(unittest.TestCase):
-    """Request-local mappings, explicit lifecycle, and no shared state tests."""
-
-    def setUp(self):
-        with open(FIXTURES / "concurrency.json", "r", encoding="utf-8") as handle:
-            self.spec = json.load(handle)
-
-    def context(self, scope="domain-a", version="v1", key=KEY):
-        return MappingContext(scope, version, key)
-
-    def test_concurrent_threads_hold_isolated_mappings(self):
-        failures: list[BaseException] = []
-        per_thread: dict[int, tuple[list[str], int]] = {}
-        barrier = threading.Barrier(self.spec["thread_count"])
-
-        def worker(index: int) -> None:
-            try:
-                scope = f"{self.spec['scope_prefix']}{index}"
-                with MappingContext(scope, self.spec["key_version"], KEY) as context:
-                    barrier.wait(timeout=30)
-                    tokens = [context.token_for(self.spec["entity_type"], value) for value in self.spec["originals"]]
-                    per_thread[index] = (tokens, context.entry_count)
-                    for value, token in zip(self.spec["originals"], tokens):
-                        if context.restore(token) != value:
-                            failures.append(AssertionError(f"thread {index} in-context restore mismatch"))
-            except BaseException as exc:  # report any thread-side failure to the main thread
-                failures.append(exc)
-
-        threads = [threading.Thread(target=worker, args=(index,)) for index in range(self.spec["thread_count"])]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=60)
-        self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual([], failures)
-        self.assertEqual(self.spec["thread_count"], len(per_thread))
-        for index, (tokens, count) in per_thread.items():
-            self.assertEqual(len(self.spec["originals"]), count, index)
-            self.assertEqual(len(tokens), len(set(tokens)), index)
-        baseline = per_thread[0][0]
-        for index in range(1, self.spec["thread_count"]):
-            for left, right in zip(baseline, per_thread[index][0]):
-                self.assertNotEqual(left, right)
-
-    def test_new_context_has_no_cross_request_mapping(self):
-        scope = f"{self.spec['scope_prefix']}0"
-        with MappingContext(scope, self.spec["key_version"], KEY) as first:
-            token = first.token_for(self.spec["entity_type"], self.spec["originals"][0])
-        with MappingContext(scope, self.spec["key_version"], KEY) as second:
-            self.assertEqual(0, second.entry_count)
-            with self.assertRaises(SafetyError) as failure:
-                second.restore(token)
-            self.assertEqual(SafetyCode.UNKNOWN_TOKEN, failure.exception.code)
-
-    def test_base_exception_subclass_exit_still_releases_context(self):
-        class SyntheticInterrupt(BaseException):
-            pass
-
-        context = self.context()
-        with self.assertRaises(SyntheticInterrupt):
-            with context:
-                context.token_for("ORG", "甲公司")
-                raise SyntheticInterrupt()
-        self.assertEqual(0, context.entry_count)
-        self.assertEqual(b"", context.key)
-        with self.assertRaises(SafetyError) as failure:
-            context.token_for("ORG", "甲公司")
-        self.assertEqual(SafetyCode.MAPPING_NOT_ACTIVE, failure.exception.code)
-        with self.assertRaises(SafetyError) as failure:
-            context.__enter__()
-        self.assertEqual(SafetyCode.MAPPING_LIFECYCLE, failure.exception.code)
-
-    def test_asyncio_cancelled_error_exit_still_releases_context(self):
-        context = self.context()
-        with self.assertRaises(asyncio.CancelledError):
-            with context:
-                context.token_for("ORG", "甲公司")
-                raise asyncio.CancelledError
-        self.assertEqual(0, context.entry_count)
-        self.assertEqual(b"", context.key)
-        with self.assertRaises(SafetyError) as failure:
-            context.restore("text")
-        self.assertEqual(SafetyCode.MAPPING_NOT_ACTIVE, failure.exception.code)
-        with self.assertRaises(SafetyError) as failure:
-            context.__enter__()
-        self.assertEqual(SafetyCode.MAPPING_LIFECYCLE, failure.exception.code)
-
-    def test_reentering_active_context_rejected_and_outer_still_closes(self):
-        context = self.context()
-        with self.assertRaises(SafetyError) as failure:
-            with context:
-                context.token_for("ORG", "甲公司")
-                with context:
-                    pass
-        self.assertEqual(SafetyCode.MAPPING_LIFECYCLE, failure.exception.code)
-        self.assertEqual(0, context.entry_count)
-        with self.assertRaises(SafetyError) as failure:
-            context.__enter__()
-        self.assertEqual(SafetyCode.MAPPING_LIFECYCLE, failure.exception.code)
-
-    def test_closed_context_cannot_be_reused(self):
-        context = self.context()
+    def test_legacy_arguments_are_not_needed_or_retained(self):
+        context = MappingContext('synthetic-domain', 'legacy', b'synthetic-key')
         with context:
-            context.token_for("ORG", "甲公司")
+            self.assertIsNone(context.key)
+            self.assertEqual('<ORG_001>', context.token_for('ORG', '合成企业'))
+
+    def test_unknown_malformed_and_bare_placeholders_fail_without_originals(self):
+        with MappingContext('synthetic-domain') as context:
+            context.token_for('ORG', 'PRIVATE_CANARY')
+            self.assert_code(SafetyCode.UNKNOWN_TOKEN, lambda: context.restore('<ORG_002>'))
+            for text in ('<ORG_01>', '<org_001>', '<ORG-001>', '<ORG_0X1>', '<ORG_001', 'ORG_001', '<<ENT_old>>'):
+                with self.subTest(text=text), self.assertRaises(SafetyError) as failure:
+                    context.restore(text)
+                self.assertEqual(SafetyCode.MALFORMED_TOKEN, failure.exception.code)
+                self.assertNotIn('PRIVATE_CANARY', str(failure.exception))
+
+    def test_originals_cannot_impersonate_current_or_retired_tokens(self):
+        for text in ('<ORG_001>', '<PARTYA_1000>', '<org_001>', '<ORG_01>', '<ORG_001', '<<ENT', '<<EN'):
+            with self.subTest(text=text):
+                self.assert_code(SafetyCode.RESERVED_TOKEN_LITERAL, lambda: reject_reserved_literals(text))
+
+    def test_html_and_non_placeholder_angle_text_are_preserved(self):
+        text = '<h1>标题</h1> a < b <custom-element>内容</custom-element>'
+        reject_reserved_literals(text)
+        with MappingContext('synthetic-domain') as context:
+            self.assertEqual(text, context.restore(text))
+
+    def test_overlong_and_truncated_markers_never_pass_as_plain_text(self):
+        with MappingContext('synthetic-domain') as context:
+            context.token_for('ORG', 'PRIVATE_CANARY')
+            for text in ('<ORG_' + 'X' * 10000 + '>', '<OR', '<ORG'):
+                self.assert_code(SafetyCode.MALFORMED_TOKEN, lambda: context.restore(text))
+
+    def test_lifecycle_clears_all_original_references_on_exception(self):
+        context = MappingContext('synthetic-domain')
+        with self.assertRaises(RuntimeError), context:
+            context.token_for('ORG', 'PRIVATE_CANARY')
+            raise RuntimeError('synthetic')
         self.assertEqual(0, context.entry_count)
-        with self.assertRaises(SafetyError) as failure:
-            context.__enter__()
-        self.assertEqual(SafetyCode.MAPPING_LIFECYCLE, failure.exception.code)
-        with self.assertRaises(SafetyError) as failure:
-            context.token_for("ORG", "甲公司")
-        self.assertEqual(SafetyCode.MAPPING_NOT_ACTIVE, failure.exception.code)
-        with self.assertRaises(SafetyError) as failure:
-            context.restore("text")
-        self.assertEqual(SafetyCode.MAPPING_NOT_ACTIVE, failure.exception.code)
+        self.assertEqual({}, context._tokens)
+        self.assertEqual({}, context._roles)
+        self.assert_code(SafetyCode.MAPPING_LIFECYCLE, context.__enter__)
+        self.assert_code(SafetyCode.MAPPING_NOT_ACTIVE, lambda: context.restore('<ORG_001>'))
+
+    def test_cancelled_and_base_exceptions_clear_references(self):
+        for exception in (asyncio.CancelledError, KeyboardInterrupt):
+            context = MappingContext('synthetic-domain')
+            with self.assertRaises(exception), context:
+                context.token_for('ORG', 'PRIVATE_CANARY')
+                raise exception()
+            self.assertEqual(0, context.entry_count)
+
+    def test_parallel_requests_restore_their_own_original(self):
+        def request(number):
+            original = f'合成企业{number}'
+            with MappingContext('synthetic-domain') as context:
+                return context.restore(context.token_for('ORG', original))
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            self.assertEqual([f'合成企业{i}' for i in range(40)], list(executor.map(request, range(40))))
+
+    def test_invalid_scope_type_text_and_unicode_are_controlled(self):
+        for scope in ('', ' ', None, 123):
+            self.assert_code(SafetyCode.INVALID_SCOPE, lambda: MappingContext(scope))
+        with MappingContext('synthetic-domain') as context:
+            for entity_type in ('', 'org', 'O' * 33, None):
+                self.assert_code(SafetyCode.INVALID_ENTITY_TYPE, lambda: context.token_for(entity_type, '原值'))
+            self.assert_code(SafetyCode.EMPTY_ENTITY, lambda: context.token_for('ORG', ''))
+            self.assert_code(SafetyCode.INVALID_UNICODE, lambda: context.token_for('ORG', '\ud800'))
+            self.assert_code(SafetyCode.INVALID_TEXT, lambda: context.restore(None))
+
+    def test_counter_collision_never_overwrites_original(self):
+        with MappingContext('synthetic-domain') as context:
+            token = context.token_for('ORG', '合成企业甲')
+            context._counters['ORG'] = 0
+            self.assert_code(SafetyCode.TOKEN_COLLISION, lambda: context.token_for('ORG', '合成企业乙'))
+            self.assertEqual('合成企业甲', context.restore(token))
 
 
-class ReservedLiteralGuardTests(unittest.TestCase):
-    """Reserved token namespace rejection, lookalikes untouched, no escape branch tests."""
+class RoleMappingTests(unittest.TestCase):
+    @staticmethod
+    def fragment(text, value, entity_type='ORG'):
+        start = text.index(value)
+        return text, (Span(start, start + len(value), entity_type),)
 
-    def setUp(self):
-        with open(FIXTURES / "reserved-literals.json", "r", encoding="utf-8") as handle:
-            self.matrix = json.load(handle)
+    def test_later_role_declaration_applies_to_earlier_fragments(self):
+        fragments = [self.fragment('合成公司甲负责付款。', '合成公司甲'),
+                     self.fragment('甲方：合成公司甲', '合成公司甲')]
+        with MappingContext('synthetic-domain') as context:
+            context.assign_roles(fragments)
+            self.assertEqual('<PARTYA_001>', context.token_for('ORG', '合成公司甲'))
 
-    def context(self):
-        return MappingContext("domain-a", "v1", KEY)
+    def test_contract_and_investment_roles_follow_explicit_cues(self):
+        for cue, prefix in (('乙方', 'PARTYB'), ('总承包', 'GENCON'), ('分包', 'SUBCON'),
+                            ('担保人', 'GUARANTOR'), ('牵头投资方', 'LEAD'), ('标的公司', 'TARGET')):
+            with self.subTest(cue=cue), MappingContext('synthetic-domain') as context:
+                context.assign_roles([self.fragment(cue + '：合成企业', '合成企业')])
+                self.assertEqual(f'<{prefix}_001>', context.token_for('ORG', '合成企业'))
 
-    def test_ordinary_lookalike_literals_are_not_misjudged(self):
-        with self.context() as context:
-            for literal in self.matrix["accepted"]:
-                token = context.token_for("ORG", literal)
-                self.assertEqual(literal, context.restore(token), literal)
-        with self.context() as context:
-            for literal in self.matrix["accepted"]:
-                text = f"前缀{literal}后缀合成敏感值"
-                spans = [Span(len(f"前缀{literal}后缀"), len(text), "ORG", 3)]
-                masked = redact_text(text, spans, context)
-                self.assertIn(literal, masked, literal)
-                self.assertNotIn("合成敏感值", masked, literal)
-                self.assertEqual(text, context.restore(masked), literal)
+    def test_conflicting_roles_fall_back_to_type_for_all_mentions(self):
+        with MappingContext('synthetic-domain') as context:
+            context.assign_roles([self.fragment('甲方：合成企业', '合成企业'),
+                                  self.fragment('乙方：合成企业', '合成企业')])
+            self.assertEqual('<ORG_001>', context.token_for('ORG', '合成企业'))
 
-    def test_reserved_prefix_anywhere_is_rejected(self):
-        with self.context() as context:
-            for literal in self.matrix["rejected"]:
-                with self.assertRaises(SafetyError) as failure:
-                    context.token_for("ORG", literal)
-                self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, failure.exception.code, literal)
+    def test_persons_are_not_assigned_organization_roles(self):
+        with MappingContext('synthetic-domain') as context:
+            context.assign_roles([self.fragment('甲方：合成人员', '合成人员', 'PER')])
+            self.assertEqual('<PER_001>', context.token_for('PER', '合成人员'))
 
-    def test_redact_text_rejects_reserved_prefix_in_text(self):
-        nested = "<<ENT_v1_" + "ab" * 16 + ">>"
-        with self.context() as context:
-            for literal in ("<<ENT", nested):
-                with self.assertRaises(SafetyError) as failure:
-                    redact_text(f"前文{literal}后文", [], context)
-                self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, failure.exception.code, literal)
-            token = context.token_for("ORG", "合成甲公司")
+    def test_roles_cannot_be_changed_after_token_allocation(self):
+        with MappingContext('synthetic-domain') as context:
+            context.token_for('ORG', '合成企业')
             with self.assertRaises(SafetyError) as failure:
-                redact_text(f"literal {token}", [], context)
-            self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, failure.exception.code)
-
-    def test_no_escape_or_decode_compatibility_for_reserved_prefix(self):
-        with self.context() as context:
-            backslash_escaped = "\\<<ENT"
-            with self.assertRaises(SafetyError) as failure:
-                context.token_for("ORG", backslash_escaped)
-            self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, failure.exception.code)
-            entity_encoded = "%3C%3CENT"
-            token = context.token_for("ORG", entity_encoded)
-            self.assertEqual(entity_encoded, context.restore(token))
-
-    def test_rejection_messages_carry_no_business_content(self):
-        canary = "CNRY-p03-guard-90210"
-        with self.assertRaises(SafetyError) as failure:
-            MappingContext(canary + "\ud800", "v1", KEY)
-        self.assertEqual(SafetyCode.INVALID_UNICODE, failure.exception.code)
-        self.assertNotIn(canary, str(failure.exception))
-        self.assertNotIn(canary, repr(failure.exception))
-        self.assertIsNone(failure.exception.__cause__)
-        self.assertIsNone(failure.exception.__context__)
-        with self.context() as context:
-            with self.assertRaises(SafetyError) as failure:
-                context.token_for("ORG", canary + "<<ENT")
-            self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, failure.exception.code)
-            self.assertNotIn(canary, str(failure.exception))
-            self.assertNotIn(canary, repr(failure.exception))
-            self.assertIsNone(failure.exception.__cause__)
-            self.assertIsNone(failure.exception.__context__)
-            with self.assertRaises(SafetyError) as failure:
-                redact_text(f"前文{canary}<<ENT后文", [], context)
-            self.assertEqual(SafetyCode.RESERVED_TOKEN_LITERAL, failure.exception.code)
-            self.assertNotIn(canary, str(failure.exception))
-
-
-if __name__ == "__main__":
-    unittest.main()
+                context.assign_roles([self.fragment('甲方：合成企业', '合成企业')])
+            self.assertEqual(SafetyCode.MAPPING_LIFECYCLE, failure.exception.code)

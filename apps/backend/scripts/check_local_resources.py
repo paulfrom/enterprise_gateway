@@ -36,14 +36,28 @@ def main(argv=None):
             with tempfile.TemporaryFile(dir=directory) as probe:
                 probe.write(b'SYNTHETIC_PERMISSION_PROBE'); probe.flush()
             phase = 'assets'
-            for name in ('GATEWAY_DICTIONARY_FILE', 'GATEWAY_POLICY_FILE'):
+            for name in ('GATEWAY_POLICY_FILE',):
                 if not Path(os.environ[name]).is_file(): raise ValueError('controlled asset missing')
+            seed_file = os.environ.get('GATEWAY_DICTIONARY_FILE')
+            if seed_file and not Path(seed_file).is_file():
+                raise ValueError('dictionary initial seed missing')
             if not Path(os.environ['GATEWAY_NER_PACKAGE_DIR']).is_dir():
                 raise ValueError('existing model package required')
             phase = 'key_files'
             from start_gateway import _load_secret, _history_spec
-            for name in ('GATEWAY_KMS_MASTER_KEY', 'GATEWAY_HMAC_KEY', 'GATEWAY_SOURCE_CORRELATION_KEY'):
+            for name in ('GATEWAY_KMS_MASTER_KEY', 'GATEWAY_SOURCE_CORRELATION_KEY'):
                 _load_secret(name, exact_bytes=32 if name == 'GATEWAY_KMS_MASTER_KEY' else None)
+            phase = 'dictionary_database'
+            from detection.dictionary_store import PostgresDictionaryStore
+            from start_gateway import _load_text_secret
+            setting = 'GATEWAY_DICTIONARY_PG_DSN'
+            if not (os.environ.get(setting) or os.environ.get(setting + '_FILE')):
+                setting = 'GATEWAY_ADMIN_KNOWLEDGE_PG_DSN'
+            dictionary = PostgresDictionaryStore(_load_text_secret(setting),
+                tenant_id=os.environ['GATEWAY_PROCESSING_TENANT'], domain=os.environ['GATEWAY_PROCESSING_DOMAIN'])
+            dictionary.check_ready()
+            if not seed_file:
+                dictionary.active()
             phase = 'history_database'
             history = _history_spec()
             if history is not None:

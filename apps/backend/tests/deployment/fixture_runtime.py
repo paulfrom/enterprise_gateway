@@ -52,7 +52,7 @@ async def supplier(request: Request):
     keys = json.loads(os.environ["DEPLOYMENT_SYNTHETIC_KEYS"])
     claude = request.url.path.endswith("/messages")
     key = request.headers.get("x-api-key") if claude else request.headers.get("authorization", "").removeprefix("Bearer ")
-    masked = not any(truth in raw.decode() for truth in TRUTHS) and "<<ENT_" in text
+    masked = not any(truth in raw.decode() for truth in TRUTHS) and "<ORG_" in text
     if not masked or key not in keys:
         _stats["violations"] += 1
         return JSONResponse({"error": "fixture supplier validation failed"}, status_code=400)

@@ -7,7 +7,7 @@ from tests.request_history.pg_support import configuration
 from tests.request_history.test_local_e2e import synthetic_history_runtime, synthetic_requests
 from starlette.testclient import TestClient
 class AdminConsoleFullChainTests(unittest.TestCase):
-    """TestClient full chain over the real runtime assembly and isolated PostgreSQL."""
+    """TestClient full chain over the real runtime assembly and shared PostgreSQL."""
 
     @classmethod
     def setUpClass(cls):

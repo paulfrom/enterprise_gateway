@@ -4,10 +4,10 @@ import re
 from collections.abc import Iterable, Mapping
 from infra.errors import SafetyCode, SafetyError
 from gateway.ingress import BusinessTextFragment, ValidatedIngressRequest
-from masking.mapping import MappingContext
+from masking.mapping import MappingContext, has_reserved_token
 from protocol.protocols import CLAUDE_MESSAGES_PROTOCOL, DEEPSEEK_CHAT_PROTOCOL, ClaudeMessagesRequest, DeepSeekChatRequest
 from detection.span_resolver import ResolvedSpan
-from detection.spans import Span, redact_text
+from detection.spans import Span, redact_text, merge_spans
 
 def _to_span(item: object) -> Span:
     if isinstance(item, Span):
@@ -71,10 +71,22 @@ def replace_request(
     for path in fragment_spans:
         if path not in fragments_by_path:
             raise SafetyError(SafetyCode.UNSAFE_REPLACEMENT, 'path')
+    prepared_spans = {}
+    for path, fragment in fragments_by_path.items():
+        raw = fragment_spans.get(path, ())
+        if isinstance(raw, (str, bytes)) or raw is None:
+            raise SafetyError(SafetyCode.INVALID_DETECTOR_RESULTS)
+        try:
+            raw = tuple(raw)
+        except TypeError:
+            raise SafetyError(SafetyCode.INVALID_DETECTOR_RESULTS) from None
+        prepared_spans[path] = merge_spans(tuple(_to_span(s) for s in raw), text_length=len(fragment.content))
+    context.assign_roles((fragment.content, prepared_spans[path])
+                         for path, fragment in fragments_by_path.items())
     for path, fragment in fragments_by_path.items():
         if fragment.requires_detection and path not in fragment_spans:
             raise SafetyError(SafetyCode.DETECTION_INCOMPLETE, 'fragment')
-        raw_spans = fragment_spans.get(path, ())
+        raw_spans = prepared_spans[path]
         if isinstance(raw_spans,(str,bytes)) or raw_spans is None:
             raise SafetyError(SafetyCode.INVALID_DETECTOR_RESULTS)
         try: raw_spans = tuple(raw_spans)
@@ -85,7 +97,7 @@ def replace_request(
                 raise SafetyError(SafetyCode.UNSAFE_REPLACEMENT, 'structure')
             # Reserved tokens in structure must also fail, even when detectors
             # report no entity span.
-            if '<<ENT' in fragment.content:
+            if has_reserved_token(fragment.content):
                 raise SafetyError(SafetyCode.RESERVED_TOKEN_LITERAL)
             continue
         if not fragment.requires_detection and spans:

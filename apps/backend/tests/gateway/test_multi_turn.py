@@ -20,7 +20,6 @@ from gateway.pipeline import ProtectedPipeline
 from infra.egress_client import BoundEgressClient, BoundUpstream
 from infra.envelope_crypto import StaticTestKmsProvider
 from infra.errors import SafetyCode, SafetyError
-from detection.inference_executor import InferenceExecutor
 from infra.spool import SpoolWriter
 from policy.policy import CategoryLabel, CategoryRule, ClassificationPolicy
 from protocol.admission import AdmissionLimiter
@@ -69,12 +68,10 @@ class TestMultiTurnConversation(unittest.TestCase):
         self.compiled_dict = compile_dictionary(payload)
 
         # Detector
-        self.executor = InferenceExecutor(max_workers=1)
         self.detector = DetectionOrchestrator(
             recognizers=default_recognizers(),
             dictionary=self.compiled_dict,
             ner_package_dir=MINI_PACKAGE,
-            executor=self.executor,
         )
 
         self.watermark_guard = AuditWatermarkGuard(
@@ -103,7 +100,7 @@ class TestMultiTurnConversation(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        self.executor.close()
+        self.detector.close()
         self.temp_dir.cleanup()
 
     def test_p15_five_turn_conversation_redaction_and_restoration(self) -> None:

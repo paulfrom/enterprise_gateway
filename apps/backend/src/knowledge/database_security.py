@@ -51,6 +51,8 @@ def assert_restricted_application_role(
     ).fetchone()[0]
     if global_role:
         raise DatabaseRoleError("application_has_global_predefined_role")
+    if conn.execute("SELECT has_database_privilege(current_user,current_database(),'CREATE')").fetchone()[0]:
+        raise DatabaseRoleError('application_can_create_schema')
 
 
 def assert_no_privilege_path(conn: psycopg.Connection, *, role: str, forbidden_role: str) -> None:

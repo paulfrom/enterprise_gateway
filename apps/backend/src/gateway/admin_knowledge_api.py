@@ -285,8 +285,8 @@ def install_knowledge_admin_routes(app, auth_service, governance):
         def execute():
             from knowledge.age_graph import AgeGraphManager, OutboxGraphSyncer, GovernedGraphQueryService
             admin_dsn = governance._storage.admin_dsn
-            mgr = AgeGraphManager(admin_dsn)
-            mgr.ensure_graph()
+            mgr = AgeGraphManager(admin_dsn, graph_name=getattr(governance._storage, 'graph_name', None))
+            mgr.verify_graph()
             syncer = OutboxGraphSyncer(admin_dsn, mgr)
             for _ in range(10):
                 synced = syncer.sync_outbox_events(limit=100, tenant_id=governance._tenant_id,
@@ -330,7 +330,7 @@ def install_knowledge_admin_routes(app, auth_service, governance):
         def execute():
             from knowledge.age_graph import AgeGraphManager, OutboxGraphSyncer
             admin_dsn = governance._storage.admin_dsn
-            mgr = AgeGraphManager(admin_dsn)
+            mgr = AgeGraphManager(admin_dsn, graph_name=getattr(governance._storage, 'graph_name', None))
             syncer = OutboxGraphSyncer(admin_dsn, mgr)
             stats = syncer.rebuild_all_projections(tenant_id=governance._tenant_id, domain=governance._domain)
             return {

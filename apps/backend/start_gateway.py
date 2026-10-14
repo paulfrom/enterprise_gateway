@@ -96,7 +96,11 @@ def _admin_knowledge_spec() -> dict | None:
     name = 'GATEWAY_ADMIN_KNOWLEDGE_PG_DSN'
     if not os.environ.get(name) and not os.environ.get(name + '_FILE'):
         return None
-    return {'connection_uri': _load_text_secret(name)}
+    spec = {'connection_uri': _load_text_secret(name)}
+    graph_name = os.environ.get('GATEWAY_KNOWLEDGE_GRAPH_NAME', '').strip()
+    if graph_name:
+        spec['graph_name'] = graph_name
+    return spec
 
 
 def _assemble_admin_knowledge(spec, *, tenant, domain):
@@ -104,20 +108,22 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
     from contextlib import contextmanager
     import queue
     import psycopg
-    from psycopg import sql
-    from knowledge.storage import PostgresKnowledgeStorage
+    from knowledge.storage import PostgresKnowledgeStorage, _ASSET_TABLES, _ADMIN_TABLES
     from knowledge.governance import KnowledgeGovernanceService
     from knowledge.database_security import assert_restricted_application_role, assert_no_history_access
 
     def assert_no_owned_objects(connection):
-        # Ownership is not part of the v2 fingerprint. Every protected object's
-        # owner, including schema/functions/sequences, must remain unreachable.
+        # Check project objects and the schema owner, while permitting unrelated
+        # infrastructure objects alongside our tables in the existing schema.
         owner_path = connection.execute(
             "SELECT EXISTS(SELECT 1 FROM ("
-            " SELECT relowner AS owner FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
-            " UNION SELECT proowner FROM pg_proc WHERE pronamespace=current_schema()::regnamespace"
+            " SELECT relowner AS owner FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname=ANY(%s)"
+            " UNION SELECT proowner FROM pg_proc WHERE pronamespace=current_schema()::regnamespace AND proname=ANY(%s)"
             " UNION SELECT nspowner FROM pg_namespace WHERE oid=current_schema()::regnamespace"
-            ") owners WHERE pg_has_role(current_user,owner,'MEMBER'))").fetchone()[0]
+            ") owners WHERE pg_has_role(current_user,owner,'MEMBER'))",
+            (list((*_ASSET_TABLES, *_ADMIN_TABLES)),
+             ['enforce_publication_admission', 'invalidate_knowledge_source', 'read_authorized_knowledge_candidate']),
+        ).fetchone()[0]
         if owner_path:
             raise ValueError('management role must not reach protected object owners')
 
@@ -149,7 +155,7 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
                     connections.append(connection)
                     self._pool.put(connection)
                 super().__init__(spec['connection_uri'], tenant_id=tenant, domain=domain,
-                    admin_dsn=spec['connection_uri'], admin_role=role)
+                    admin_dsn=spec['connection_uri'], admin_role=role, graph_name=spec.get('graph_name'))
                 with self.admin_transaction(tenant_id=tenant, domain=domain):
                     pass
             except BaseException:
@@ -171,7 +177,6 @@ def _assemble_admin_knowledge(spec, *, tenant, domain):
                 assert_restricted_application_role(connection, expected_role=self.admin_role)
                 assert_no_history_access(connection)
                 assert_no_owned_objects(connection)
-                connection.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(self.admin_role)))
                 connection.execute("SELECT set_config('app.tenant',%s,true)", (tenant_id,))
                 connection.execute("SELECT set_config('app.domain',%s,true)", (domain,))
                 connection.execute("SELECT set_config('app.admin_context','true',true)")
@@ -306,19 +311,28 @@ def _ner_worker_options() -> dict[str, int | bool]:
 
 def build_app(*, providers_config_path: Path | None = None,
               classifier: Callable[[bytes], str] | None = None):
-    """One assembly path; policies/dictionary are controlled files, not demos."""
+    """One assembly path; the published database dictionary is authoritative."""
     domain = _required("GATEWAY_PROCESSING_DOMAIN")
     tenant = _required("GATEWAY_PROCESSING_TENANT")
     state = Path(_required("GATEWAY_STATE_DIR"))
     evidence_bucket = _required("GATEWAY_EVIDENCE_BUCKET")
-    hmac_key = _load_secret("GATEWAY_HMAC_KEY")
     correlation_key = _load_secret("GATEWAY_SOURCE_CORRELATION_KEY")
-    dictionary_data = parse_strict_json(Path(_required("GATEWAY_DICTIONARY_FILE")).read_bytes(),
-                                         reject=_reject_asset)
-    dictionary = compile_dictionary(dictionary_data)
     policy = load_policy(Path(_required("GATEWAY_POLICY_FILE")).read_bytes())
     _, _, kms = _key_store()
     _probe_keys(kms, evidence_bucket)
+    from detection.dictionary_store import PostgresDictionaryStore
+    dictionary_connection = 'GATEWAY_DICTIONARY_PG_DSN'
+    if not (os.environ.get(dictionary_connection) or os.environ.get(dictionary_connection + '_FILE')):
+        dictionary_connection = 'GATEWAY_ADMIN_KNOWLEDGE_PG_DSN'
+    dictionary_store = PostgresDictionaryStore(_load_text_secret(dictionary_connection),
+                                               tenant_id=tenant, domain=domain)
+    seed = None
+    dictionary_file = os.environ.get('GATEWAY_DICTIONARY_FILE')
+    if dictionary_file:
+        def seed():
+            dictionary_data = parse_strict_json(Path(dictionary_file).read_bytes(), reject=_reject_asset)
+            return compile_dictionary(dictionary_data)
+    dictionary = dictionary_store.bootstrap(seed)
     providers = providers_config_path or Path(os.environ.get("PROVIDERS_CONFIG", ROOT_DIR / "config" / "providers.json"))
     history = _history_spec()
     history_store = None if history is None else _assemble_history(history, kms, state,
@@ -357,13 +371,13 @@ def build_app(*, providers_config_path: Path | None = None,
     override = {} if ner_timeout is None else {"ner_timeout": ner_timeout}
     override.update(_ner_worker_options())
     return create_runtime_app(provider_config_path=providers, domain=domain, tenant_id=tenant,
-        correlation_key=correlation_key, hmac_key=hmac_key, kms=kms,
+        correlation_key=correlation_key, kms=kms,
         dictionary=dictionary, ner_package_dir=Path(_required("GATEWAY_NER_PACKAGE_DIR")),
         state_directory=state, policy=policy, watermark_policy=WatermarkPolicy(),
         evidence_bucket=evidence_bucket, classifier=classifier,
         detection_failure_mode=os.environ.get('GATEWAY_DETECTION_FAILURE_MODE', 'error'),
         quick_screen=quick_screen,
-        history_store=history_store, admin_service=admin_service,
+        history_store=history_store, admin_service=admin_service, dictionary_store=dictionary_store,
         knowledge_governance=governance, audit_reader=reader, audit_builder=builder,
         **override)
 

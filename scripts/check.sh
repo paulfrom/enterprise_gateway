@@ -3,12 +3,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 python3 scripts/check_structure.py
-[[ -n "${GATEWAY_HISTORY_PG_CONFIG:-}" && -r "$GATEWAY_HISTORY_PG_CONFIG" ]] || {
-  echo 'Set GATEWAY_HISTORY_PG_CONFIG to an explicit private PG 5433 test configuration.' >&2
+PG_SERVICE_CONFIG="${GATEWAY_TEST_PG_CONFIG:-${GATEWAY_HISTORY_PG_CONFIG:-}}"
+[[ -n "$PG_SERVICE_CONFIG" && -r "$PG_SERVICE_CONFIG" ]] || {
+  echo 'Set GATEWAY_TEST_PG_CONFIG to existing shared PostgreSQL service connections and tables.' >&2
   exit 1
 }
-export GATEWAY_TEST_PG_CONFIG="${GATEWAY_TEST_PG_CONFIG:-$GATEWAY_HISTORY_PG_CONFIG}"
-export GATEWAY_DATABASE_DEPLOYMENT_CONFIG="${GATEWAY_DATABASE_DEPLOYMENT_CONFIG:-$GATEWAY_HISTORY_PG_CONFIG}"
+export GATEWAY_TEST_PG_CONFIG="$PG_SERVICE_CONFIG"
+export GATEWAY_HISTORY_PG_CONFIG="$PG_SERVICE_CONFIG"
 bash apps/backend/scripts/check.sh
 npm ci
 npm audit --audit-level=high

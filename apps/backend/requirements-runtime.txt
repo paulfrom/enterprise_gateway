@@ -57,6 +57,10 @@ cymem==2.0.13
     #   preshed
     #   spacy
     #   thinc
+defusedxml==0.7.1
+    # via enterprise-privacy-gateway
+et-xmlfile==2.0.0
+    # via openpyxl
 fastapi==0.142.2
     # via enterprise-privacy-gateway
 filelock==4.0.9
@@ -113,6 +117,8 @@ numpy==2.4.6
     #   thinc
 onnxruntime==1.30.0
     # via enterprise-privacy-gateway
+openpyxl==3.1.5
+    # via enterprise-privacy-gateway
 opentelemetry-api==1.45.0
     # via fastapi
 packaging==26.3
@@ -150,6 +156,8 @@ pydantic-core==2.46.5
     # via pydantic
 pygments==2.21.0
     # via rich
+pypdf==6.20.1
+    # via enterprise-privacy-gateway
 pyyaml==6.0.3
     # via
     #   huggingface-hub
@@ -241,3 +249,5 @@ weasel==1.0.0
     # via spacy
 wrapt==2.5.0
     # via smart-open
+xlrd==2.0.2
+    # via enterprise-privacy-gateway

@@ -46,7 +46,9 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix='gateway-proxy-') as temp:
             directory = Path(temp)
-            (directory / 'admin.conf').write_text((ROOT / 'deploy/nginx/admin.conf').read_text().replace('proxy_read_timeout 300s', 'proxy_read_timeout 1s'))
+            (directory / 'admin.conf').write_text((ROOT / 'deploy/nginx/admin.conf').read_text()
+                .replace('proxy_read_timeout 300s', 'proxy_read_timeout 1s')
+                .replace('proxy_read_timeout 120s', 'proxy_read_timeout 1s'))
             (directory / 'stub.py').write_text('''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json, time, threading
 class Handler(BaseHTTPRequestHandler):
@@ -61,7 +63,13 @@ class Handler(BaseHTTPRequestHandler):
         try: self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError): pass
         if self.path.endswith('/shutdown'): threading.Thread(target=self.server.shutdown).start()
-    do_POST = do_GET
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', '0'))
+        while length:
+            chunk = self.rfile.read(min(length, 65536))
+            if not chunk: break
+            length -= len(chunk)
+        self.do_GET()
     def log_message(self, *args): pass
 server = ThreadingHTTPServer(('0.0.0.0',8080), Handler)
 server.serve_forever(); server.server_close(); time.sleep(300)
@@ -87,14 +95,22 @@ server.serve_forever(); server.server_close(); time.sleep(300)
                 check(base, path, 413, 'REQUEST_TOO_LARGE', b'x' * (1024 * 1024 + 1))
                 check(base, path + '?backend-error=1', 502, 'SYNTHETIC_BACKEND_ERROR')
                 check(base, path + '?timeout=1', 504, 'GATEWAY_TIMEOUT')
+            file_path = '/api/admin/documents/redact'
+            status, _, body = fetch(base, file_path + '?format=txt', b'x' * (2 * 1024 * 1024))
+            assert status == 200
+            assert json.loads(body)['host'] == f'127.0.0.1:{port}'
+            check(base, file_path, 413, 'REQUEST_TOO_LARGE', b'x' * (10 * 1024 * 1024 + 1))
+            check(base, file_path + '?backend-error=1', 502, 'SYNTHETIC_BACKEND_ERROR', b'x')
+            check(base, file_path + '?timeout=1', 504, 'GATEWAY_TIMEOUT', b'x')
+            assert fetch(base, '/admin/documents')[0] == 200
             for path in ('/api', '/api/requests', '/v1/unknown', '/history', '/healthz', '/readyz',
                          '/assets/missing.js', '/missing.js', '/unknown'):
                 check(base, path, 404, 'NOT_FOUND')
             fetch(base, '/api/admin/shutdown')
             time.sleep(.5)
-            for path in ('/api/admin/session', '/v1/chat/completions', '/v1/messages'):
+            for path in ('/api/admin/session', '/v1/chat/completions', '/v1/messages', file_path):
                 check(base, path, 502, 'BAD_GATEWAY')
-            print('Nginx passed: explicit Host port, 413/502/504 JSON, backend error passthrough and missing routes.')
+            print('Nginx passed: Host port, file upload limits/page, 413/502/504 JSON, backend errors and missing routes.')
     finally:
         for container in (frontend, upstream):
             subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)

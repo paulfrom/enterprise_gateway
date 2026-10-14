@@ -47,7 +47,7 @@ def seed(runtime):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pg-config", type=Path, required=True, help="Private explicit isolated PostgreSQL test config")
+    parser.add_argument("--pg-config", type=Path, required=True, help="Private existing shared PostgreSQL service configuration")
     parser.add_argument("--port", type=int, default=8876)
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
@@ -60,7 +60,7 @@ def main(argv=None):
             raise RuntimeError("Explicit PostgreSQL test config required")
         os.environ["GATEWAY_HISTORY_PG_CONFIG"] = str(args.pg_config.resolve())
         phase = "assembly"
-        with synthetic_history_runtime() as runtime:
+        with synthetic_history_runtime(with_dictionary=True) as runtime:
             phase = "seed"
             seed(runtime)
             print(json.dumps({"api_base_url": "http://127.0.0.1:" + str(args.port),

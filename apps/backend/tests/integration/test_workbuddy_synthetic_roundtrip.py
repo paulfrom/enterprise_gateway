@@ -22,7 +22,6 @@ from audit.audit_watermark import AuditWatermarkGuard, WatermarkPolicy
 from audit.evidence_gate import EvidenceGate
 from detection.detection_orchestrator import DetectionOrchestrator, default_recognizers
 from detection.dictionary import DictionaryEntry, analyze_dictionary, compile_dictionary, compute_dictionary_hash
-from detection.inference_executor import InferenceExecutor
 from gateway.app import create_app
 from gateway.pipeline import ProtectedPipeline
 from gateway.provider_router import ProviderRouter
@@ -100,12 +99,11 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
         }
         self.compiled_dict = compile_dictionary(dict_payload)
 
-        self.executor = InferenceExecutor(max_workers=2)
         self.detector = DetectionOrchestrator(
             recognizers=default_recognizers(),
             dictionary=self.compiled_dict,
             ner_package_dir=NER_PACKAGE,
-            executor=self.executor,
+            ner_max_workers=2,
         )
 
         self.watermark_guard = AuditWatermarkGuard(
@@ -122,7 +120,7 @@ class TestWorkBuddySyntheticRoundtrip(unittest.TestCase):
 
 
     def tearDown(self) -> None:
-        self.executor.close()
+        self.detector.close()
         self.temp_dir.cleanup()
 
     def test_workbuddy_full_dialogue_redaction_and_knowledge_sedimentation(self) -> None:

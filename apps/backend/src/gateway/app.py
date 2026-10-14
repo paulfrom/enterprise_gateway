@@ -93,7 +93,8 @@ def create_app(
     hmac_key: bytes | None = None,
     history_store=None,
     admin_service=None,
-    knowledge_governance=None, audit_reader=None, audit_builder=None,
+    knowledge_governance=None, audit_reader=None, audit_builder=None, file_redactor=None,
+    dictionary_service=None,
 ) -> FastAPI:
     """BYOK ingress. Classification is supplied only by trusted server integration."""
     if admin_service is not None and not isinstance(admin_service, AdminAuthService):
@@ -105,9 +106,9 @@ def create_app(
     app.state.router = router
     app.state.authenticator = authenticator
     app.state.classifier = classifier
-    app.state.hmac_key = hmac_key
     app.state.history_store = history_store
     app.state.admin_service = admin_service
+    app.state.dictionary_service = dictionary_service
     if admin_service is not None:
         from gateway.admin_api import install_admin_routes
         install_admin_routes(app, admin_service)
@@ -115,6 +116,10 @@ def create_app(
         from gateway.admin_audit_api import install_audit_admin_routes
         install_knowledge_admin_routes(app, admin_service, knowledge_governance)
         install_audit_admin_routes(app, admin_service, audit_reader, audit_builder)
+        from gateway.admin_documents_api import install_document_routes
+        install_document_routes(app, admin_service, file_redactor)
+        from gateway.admin_dictionary_api import install_dictionary_routes
+        install_dictionary_routes(app, admin_service)
         if history_store is not None:
             from gateway.history_api import install_history_routes
             install_history_routes(app, history_store, admin_service)
@@ -125,6 +130,11 @@ def create_app(
 
     @app.middleware("http")
     async def log_request_ingress(request: Request, call_next):
+        # Authenticate and enforce the streaming upload limit in the file route.
+        # Reading the body or logging user-supplied metadata here bypasses it.
+        if (request.url.path == '/api/admin/documents' or request.url.path.startswith('/api/admin/documents/')
+                or request.url.path == '/api/admin/dictionary' or request.url.path.startswith('/api/admin/dictionary/')):
+            return await call_next(request)
         client = f"{request.client.host}:{request.client.port}" if request.client else "unknown"
         headers_str = "\n".join(
             f"  {k}: {'<redacted>' if k.lower() in sensitive_headers else v}"
@@ -154,6 +164,12 @@ def create_app(
 
     def missing_gates():
         missing = []
+        if app.state.dictionary_service is not None:
+            try:
+                app.state.dictionary_service.store.check_ready()
+                app.state.dictionary_service.refresh()
+            except Exception:
+                missing.append('published_dictionary_database')
         bound = app.state.router
         if not isinstance(bound, ProviderRouter):
             missing.append("admitted_protocol_and_provider")
@@ -199,8 +215,6 @@ def create_app(
             missing.append("restricted_source_context")
         if not callable(app.state.classifier):
             missing.append("trusted_data_classification")
-        if not isinstance(app.state.hmac_key, bytes) or len(app.state.hmac_key) < 32:
-            missing.append("durable_audit_and_key_lifecycle")
         if app.state.history_store is not None:
             try:
                 app.state.history_store.check_ready()
@@ -248,7 +262,6 @@ def create_app(
                 content={"error": {"code": "MISSING_IDENTITY", "message": "缺少可信身份上下文。"}},
             )
 
-        key = app.state.hmac_key
         cancel = threading.Event()
         context = None
         history_recorder = None
@@ -272,9 +285,6 @@ def create_app(
             if auth_count > 1 or x_api_count > 1:
                 raise SafetyError(SafetyCode.INVALID_IDENTITY, 'ambiguous credential')
             identity = app.state.authenticator.authenticate(headers)
-            if not isinstance(key, bytes) or len(key) < 32:
-                raise SafetyError(SafetyCode.INVALID_HMAC_KEY)
-
             body_limit = p.body_limit if p is not None else 10485760 # 10MB default
             raw = bytearray()
             incoming = request.stream().__aiter__()
@@ -294,6 +304,11 @@ def create_app(
             payload = parse_strict_json(raw_body, reject=reject_json)
             if not isinstance(payload, dict) or not isinstance(payload.get('model'), str):
                 raise SafetyError(SafetyCode.MALFORMED_JSON)
+            if app.state.dictionary_service is not None:
+                try:
+                    await asyncio.to_thread(app.state.dictionary_service.refresh)
+                except Exception:
+                    raise SafetyError(SafetyCode.DETECTION_INCOMPLETE, 'dictionary snapshot') from None
             p = app.state.router.get_pipeline(payload['model'])
             if isinstance(p, ProtectedPipeline) and (p.detector._executor._closed or p.egress_client._client.is_closed):
                 return JSONResponse(status_code=503, content={"error": {"code": "CHANNEL_NOT_ADMITTED"}})
@@ -309,7 +324,7 @@ def create_app(
             category = app.state.classifier(raw_body)
             if not isinstance(category, str) or not category.strip():
                 raise SafetyError(SafetyCode.POLICY_REJECTED)
-            context = MappingContext(p.domain, 'v1', key)
+            context = MappingContext(p.domain)
             context.__enter__()
             work = asyncio.create_task(asyncio.to_thread(p.process_request,
                     raw_body=raw_body,

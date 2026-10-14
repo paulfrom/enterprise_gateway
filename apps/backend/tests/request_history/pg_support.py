@@ -1,4 +1,4 @@
-"""History fixtures share the gateway test schema with purpose-bound grants."""
+"""History fixtures reuse existing shared tables with purpose-bound service logins."""
 from tests.pg_support import history_configuration
 
 

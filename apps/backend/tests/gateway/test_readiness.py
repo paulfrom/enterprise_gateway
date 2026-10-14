@@ -14,6 +14,7 @@ class ReadinessConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         fixture = roundtrip.IntegrationRoundtripTests()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
+        await asyncio.to_thread(fixture.detector.warmup)
         pipeline = fixture._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, roundtrip.UpstreamSpyTransport(
             lambda request: self.fail('readiness must never call a supplier')),
             allowed_models=frozenset({'deepseek-flash', 'deepseek-v4-pro'}))

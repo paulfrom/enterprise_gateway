@@ -42,9 +42,9 @@ class TestBranchStreamingRestorer(unittest.TestCase):
             restorer = BranchStreamingRestorer(ctx)
 
             # Split token into 3 parts
-            part1 = token[:8]
-            part2 = token[8:20]
-            part3 = token[20:]
+            part1 = token[:3]
+            part2 = token[3:6]
+            part3 = token[6:]
 
             out1 = restorer.feed("b0", f"员工编号：{part1}")
             self.assertEqual("员工编号：", out1)  # Token prefix is buffered!
@@ -66,20 +66,20 @@ class TestBranchStreamingRestorer(unittest.TestCase):
             restorer = BranchStreamingRestorer(ctx)
 
             # Feed partial token to branch 0
-            restorer.feed("branch_0", f"A: {token_a[:10]}")
+            restorer.feed("branch_0", f"A: {token_a[:4]}")
             # Feed complete token to branch 1
             out_b = restorer.feed("branch_1", f"B: {token_b}")
             self.assertEqual("B: 公司乙", out_b)
 
             # Complete branch 0
-            out_a = restorer.feed("branch_0", token_a[10:])
+            out_a = restorer.feed("branch_0", token_a[4:])
             self.assertEqual("公司甲", out_a)
 
     def test_unknown_token_fails_closed(self) -> None:
         """Token with valid syntax but unknown value fails closed."""
         with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
             restorer = BranchStreamingRestorer(ctx)
-            fake_token = f"<<ENT_v1_{'0' * 32}>>"
+            fake_token = "<ORG_999>"
             with self.assertRaises(SafetyError) as exc_info:
                 restorer.feed("b0", fake_token)
             self.assertEqual(SafetyCode.UNKNOWN_TOKEN, exc_info.exception.code)

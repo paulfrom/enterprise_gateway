@@ -36,7 +36,7 @@ def synthetic_governance_runtime(*, enable_management=True):
         fixture.setUp()
         tenant, domain = 'governance-' + uuid4().hex, fixture.domain
         storage = PostgresKnowledgeStorage(config['app_dsn'], tenant_id=tenant, domain=domain,
-            admin_dsn=config['admin_app_dsn'], admin_role=config['admin_role'])
+            admin_dsn=config['admin_app_dsn'], admin_role=config['admin_role'], graph_name=config.get('graph_name'))
         service = KnowledgeGovernanceService(tenant_id=tenant, domain=domain, storage=storage)
         admin_store = AdminStateStore(fixture.root/'state'/'admin')
         from scripts.prepare_admin_state import INITIAL_ADMIN_PASSWORD
