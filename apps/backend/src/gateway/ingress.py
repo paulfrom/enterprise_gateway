@@ -138,10 +138,11 @@ class IngressValidator:
             )
 
         payload = parsed.model_dump(exclude_none=True)
-        # DeepSeek reasoning history has no admitted proof format. The gateway
-        # must reject it before detection or any upstream release.
-        if any(m.get('reasoning_content') is not None for m in payload['messages']):
-            raise SafetyError(SafetyCode.PROTOCOL_VIOLATION, 'unverified history')
+        # Client-echoed assistant reasoning (``reasoning_content`` / ``reasoning``)
+        # and client ledger fields are admitted by the protocol layer but carry
+        # Field(exclude=True), so they are absent from ``payload`` here and can
+        # never enter detection, evidence, knowledge or the upstream release.
+        # History assistant ``content`` is still re-detected every turn.
         if history_adapter is not None:
             history_adapter.validate_message_history(payload['messages'])
         elif any(isinstance(m.get('content'), list) and any(

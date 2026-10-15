@@ -22,6 +22,9 @@ import re
 from infra.errors import SafetyCode, SafetyError
 
 
+# Client identity/metadata headers that must not influence authorization decisions.
+# These are stripped at egress by EGRESS_HEADER_WHITELIST in infra.egress_client,
+# preventing client-side injection of identity claims into upstream requests.
 FORBIDDEN_CLIENT_IDENTITY_HEADERS: frozenset[str] = frozenset({
     "x-user-id",
     "x-subject-id",
@@ -191,7 +194,12 @@ def validate_request_authorization(
 
 
 def assert_no_client_header_spoofing(headers: Mapping[str, Any]) -> None:
-    """Fail closed if client headers attempt to inject or modify identity parameters."""
+    """Fail closed if client headers attempt to inject or modify identity parameters.
+
+    Note: Not used in active request processing paths. The pipeline ignores these
+    headers and relies on egress header whitelisting to strip them before upstream
+    transmission. Retained for potential future use or alternative code paths.
+    """
     if not isinstance(headers, Mapping):
         raise SafetyError(SafetyCode.INVALID_IDENTITY, "headers must be a mapping")
     for key in headers:
@@ -208,7 +216,12 @@ def resolve_trusted_identity(
     *,
     now: datetime | None = None,
 ) -> TrustedIdentity:
-    """Enforce trusted authentication context and reject untrusted header claims."""
+    """Enforce trusted authentication context and reject untrusted header claims.
+
+    Note: Not used in active request processing paths. The pipeline uses
+    validate_request_authorization for identity validation without header checking.
+    Retained for potential future use or alternative code paths.
+    """
     if headers is not None:
         assert_no_client_header_spoofing(headers)
 
@@ -318,8 +331,11 @@ def extract_byok_credential(headers: Mapping[str, str]) -> str:
 
 
 def _request_credential(headers: Mapping[str, str]) -> str:
-    """Validate ingress identity claims and select the canonical BYOK token."""
-    assert_no_client_header_spoofing(headers)
+    """Validate ingress identity claims and select the canonical BYOK token.
+
+    Client identity/metadata headers are untrusted and ignored for BYOK source
+    resolution; they do not cause rejection of the inference request.
+    """
     return extract_byok_credential(headers)
 
 

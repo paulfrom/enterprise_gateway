@@ -65,9 +65,8 @@ class ByokAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kw['identity'].source_id, expected.source_id)
         self.assertEqual(kw['identity'].source_acl, expected.source_acl)
 
-    async def test_unknown_classification_and_forged_source_header_rejected(self):
+    async def test_unknown_classification_rejected_and_client_headers_ignored(self):
         res = await self.post(self.app(lambda raw: ''))
         self.assertEqual(res.status_code, 403)
         res = await self.post(self.app(lambda raw: 'TEST'), headers={'authorization': 'Bearer synthetic', 'x-domain': 'other'})
-        self.assertEqual(res.status_code, 400)
-        self.pipeline.process_request.assert_not_called()
+        self.assertEqual(res.status_code, 200)

@@ -46,7 +46,6 @@ from infra.egress_client import BoundEgressClient
 from infra.errors import SafetyCode, SafetyError
 from audit.evidence_gate import EvidenceGate, EvidencePermit, EvidenceSpec
 from protocol.identity import (
-    FORBIDDEN_CLIENT_IDENTITY_HEADERS,
     TrustedIdentity, UnverifiedSourceContext,
     validate_request_authorization,
 )
@@ -310,10 +309,8 @@ class ProtectedPipeline:
         # Gate 1: Identity validity period and required request intent/purpose
         validate_request_authorization(identity, now=now, required_purpose="model-query")
 
-        # Gate 1a: Untrusted Client Headers Check
-        for h in headers:
-            if h.lower() in FORBIDDEN_CLIENT_IDENTITY_HEADERS:
-                raise SafetyError(SafetyCode.UNTRUSTED_HEADER_REJECTED, h)
+        # Client metadata and identity headers are ignored for authorization and
+        # safely stripped prior to upstream egress via EGRESS_HEADER_WHITELIST.
 
         # Gate 1b: Domain Scope Consistency Checks
         if identity.domain != route.domain:

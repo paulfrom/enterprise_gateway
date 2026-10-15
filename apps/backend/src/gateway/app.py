@@ -11,6 +11,7 @@ import hashlib
 import threading
 import time
 import json
+import logging
 
 from infra.config import ReviewSettings
 from infra.errors import SafetyCode, SafetyError
@@ -422,6 +423,9 @@ def create_app(
                 return attach_request_id(response)
         except SafetyError as exc:
             if context is not None: context.__exit__(None,None,None)
+            # Structured, plaintext-free diagnostics: only the code is logged so
+            # blocked requests can be triaged without decrypting history.
+            logging.getLogger(__name__).warning('REQUEST_BLOCKED code=%s', exc.code.value)
             return await record_failure(_render_safety_error(exc), 'blocked', exc.code.value)
         except Exception as exc:
             from gateway.pipeline import UpstreamFailure

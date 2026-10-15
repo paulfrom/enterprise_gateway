@@ -115,6 +115,57 @@ class OnlineRegressionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             fixture.tearDown()
 
+    def test_client_reasoning_and_ledger_never_reach_egress(self):
+        fixture = fixture_module.IntegrationRoundtripTests(); fixture.setUp()
+        try:
+            reasoning_canary = 'CANARY_REASONING_SECRET'
+            annotation_canary = 'CANARY_ANNOTATION_SECRET'
+            forbidden_fields = ('reasoning_content', 'reasoning', 'annotations', 'messageId',
+                                'stepSeq', 'requestModelId', 'requestModelName', 'traceId',
+                                'rawUsage', 'startsNewUserRequest', 'conversationRequestId')
+
+            def respond(req):
+                raw = req.content.decode()
+                for token in (reasoning_canary, annotation_canary, '阿尔法科技', '张三'):
+                    self.assertNotIn(token, raw)
+                body = json.loads(req.content)
+                assistant = body['messages'][0]
+                for field in forbidden_fields:
+                    self.assertNotIn(field, assistant)
+                self.assertNotIn('annotations', assistant['content'][0])
+                return httpx.Response(200, json={'id': 'ledger-proof', 'object': 'chat.completion',
+                    'created': 1, 'model': body['model'], 'choices': [{'index': 0,
+                    'message': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': 'stop'}],
+                    'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}})
+
+            spy = UpstreamSpyTransport(respond)
+            pipeline = fixture._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
+            raw = json.dumps({'model': 'deepseek-flash', 'messages': [
+                {'role': 'assistant',
+                 'content': [{'type': 'text', 'text': '历史 阿尔法科技的张三',
+                              'annotations': [{'note': annotation_canary}]}],
+                 'reasoning_content': reasoning_canary,
+                 'reasoning': reasoning_canary + '-alias',
+                 'messageId': 'm-1', 'stepSeq': 1, 'model': 'deepseek-flash',
+                 'requestModelId': 'rm-1', 'requestModelName': 'deepseek-flash',
+                 'traceId': 't-1', 'rawUsage': {'prompt_tokens': 1},
+                 'usage': {'total_tokens': 2}, 'startsNewUserRequest': True,
+                 'agent': 'main', 'conversationRequestId': 'c-1'},
+                {'role': 'user', 'content': '请查询阿尔法科技的张三。'}]}, ensure_ascii=False)
+            with MappingContext(fixture.domain, 'v1', TEST_HMAC_KEY) as context:
+                result = pipeline.process_request(raw_body=raw,
+                    headers={'authorization': 'Bearer synthetic-client-key'},
+                    identity=fixture.identity, category='STANDARD', context=context)
+            self.assertEqual(1, len(spy.calls))
+            dumped = json.dumps(result.redacted_request.model_dump(), ensure_ascii=False)
+            for token in (reasoning_canary, annotation_canary, 'messageId', 'rawUsage',
+                          'reasoning_content', 'annotations'):
+                self.assertNotIn(token, dumped)
+            self.assertNotIn('阿尔法科技', dumped)
+            self.assertNotIn('张三', dumped)
+        finally:
+            fixture.tearDown()
+
     def test_receipts_bind_full_assembly_hash_across_same_named_versions(self):
         fixture=fixture_module.IntegrationRoundtripTests();fixture.setUp()
         try:

@@ -237,14 +237,60 @@ class ProtocolLifecycleHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unproven_history_and_upstream_errors_have_zero_plaintext_release(self):
         for protocol in PROTOCOLS:
-            history = ([{'role': 'assistant', 'content': 'hello', 'reasoning_content': 'unproved'},
-                        {'role': 'assistant', 'content': 'hello', 'compression': 'unproved'}]
-                       if protocol == DEEPSEEK_CHAT_PROTOCOL else
-                       [{'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'unproved', 'signature': 'fake'}]},
-                        {'role': 'assistant', 'content': [{'type': 'redacted_thinking', 'data': 'unproved'}]},
-                        {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'unproved', 'signature': 'fake',
-                            'metadata': {'scope': self.fixture.domain, 'version': 'fake', 'receipt': 'fake'}}]}])
-            for message in history:
+            if protocol == DEEPSEEK_CHAT_PROTOCOL:
+                # Client-echoed reasoning and ledger fields are admitted but must
+                # never reach the upstream payload; history content is re-redacted.
+                admitted = [
+                    {'role': 'assistant',
+                     'content': [{'type': 'text', 'text': '历史 阿尔法科技的张三',
+                                  'annotations': [{'secret': 'CANARY_ANNOTATION'}]}],
+                     'reasoning_content': 'CANARY_REASONING',
+                     'reasoning': 'CANARY_ALIAS',
+                     'startsNewUserRequest': True,
+                     'agent': 'main',
+                     'conversationRequestId': 'c-1',
+                     'messageId': 'm-1',
+                     'stepSeq': 1,
+                     'model': 'deepseek-flash',
+                     'requestModelId': 'rm-1',
+                     'requestModelName': 'deepseek-flash',
+                     'traceId': 't-1',
+                     'rawUsage': {'prompt_tokens': 1},
+                     'usage': {'total_tokens': 2}},
+                ]
+                rejected = [
+                    {'role': 'assistant', 'content': 'hello', 'compression': 'unproved'},
+                    {'role': 'assistant', 'content': [{'type': 'text', 'text': 'x',
+                                                       'unknown_block': 1}]},
+                ]
+            else:
+                admitted = []
+                rejected = [
+                    {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'unproved', 'signature': 'fake'}]},
+                    {'role': 'assistant', 'content': [{'type': 'redacted_thinking', 'data': 'unproved'}]},
+                    {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'unproved', 'signature': 'fake',
+                        'metadata': {'scope': self.fixture.domain, 'version': 'fake', 'receipt': 'fake'}}]}]
+            for message in admitted:
+                body = self.request(protocol)
+                body['messages'].insert(0, message)
+                def respond(req):
+                    raw = req.content.decode()
+                    for token in ('CANARY_REASONING', 'CANARY_ALIAS', 'CANARY_ANNOTATION',
+                                  '阿尔法科技', '张三', 'reasoning_content', 'reasoning',
+                                  'annotations', 'messageId', 'stepSeq', 'requestModelId',
+                                  'requestModelName', 'traceId', 'rawUsage',
+                                  'startsNewUserRequest', 'conversationRequestId'):
+                        self.assertNotIn(token, raw)
+                    return httpx.Response(200, json={'id': 'ok', 'object': 'chat.completion',
+                        'created': 1, 'model': 'deepseek-flash',
+                        'choices': [{'index': 0,
+                                     'message': {'role': 'assistant', 'content': 'ok'},
+                                     'finish_reason': 'stop'}],
+                        'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}})
+                result, spy = await self.call(protocol, body, respond)
+                self.assertEqual(200, result.status_code, result.text)
+                self.assertEqual(1, len(spy.calls))
+            for message in rejected:
                 body = self.request(protocol)
                 body['messages'].insert(0, message)
                 result, spy = await self.call(protocol, body, lambda req: self.fail('unproven state must not leave'))
