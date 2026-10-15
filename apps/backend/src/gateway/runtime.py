@@ -16,6 +16,7 @@ from fastapi import FastAPI
 
 from audit.audit_watermark import AuditWatermarkGuard, WatermarkPolicy
 from audit.evidence_gate import EvidenceGate
+from detection.detection_cache import DetectionResultCache
 from detection.detection_orchestrator import DEFAULT_NER_TIMEOUT, DetectionOrchestrator
 from detection.dictionary import CompiledDictionary
 from detection.quick_screen import QuickScreenConfig
@@ -51,6 +52,10 @@ def create_runtime_app(
     ner_batch_wait_ms: int = 0, ner_max_batch_jobs: int = 1,
     ner_max_batch_chars: int = 512, ner_batch_tokens: int = 4096,
     ner_sentence_boundaries: bool = False,
+    detection_cache_enabled: bool = False,
+    detection_cache_entries: int = 4096,
+    detection_cache_ttl_seconds: float = 900.0,
+    detection_cache_max_spans: int = 65536,
 ) -> FastAPI:
     """Assemble real controls; own all HTTP/detector lifecycle resources.
 
@@ -99,13 +104,20 @@ def create_runtime_app(
                                 evidence_directory=paths["evidence"], kms=kms)
         spool = SpoolWriter(directory=paths["spool"], kms=kms)
         limiter = AdmissionLimiter(max_body_bytes=max_body_bytes)
+        # M2 检测结果缓存：一个缓存跨全部供应商流水线共享（同一检测器、同一装配指纹）。
+        result_cache = DetectionResultCache(
+            max_entries=detection_cache_entries,
+            ttl_seconds=detection_cache_ttl_seconds,
+            max_spans=detection_cache_max_spans,
+        ) if detection_cache_enabled else None
         by_model = {}
         for config in configs:
             pipeline = create_provider_pipeline(config, domain=domain, policy=policy,
                 detector=detector, admission_limiter=limiter, watermark_guard=guard,
                 evidence_gate=evidence, spool_writer=spool, evidence_bucket=evidence_bucket,
                 package_version=package_version, transport=transport, resolver=resolver,
-                detection_failure_mode=detection_failure_mode)
+                detection_failure_mode=detection_failure_mode,
+                detection_result_cache=result_cache)
             pipelines.append(pipeline)
             by_model.update({model: pipeline for model in config.models})
         router = ProviderRouter(by_model)

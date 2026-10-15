@@ -78,7 +78,11 @@ class ProtocolContracts(unittest.TestCase):
     def test_assistant_reasoning_history_is_typed_and_role_bound(self):
         body = {'model': 'synthetic-model', 'messages': [
             {'role': 'assistant', 'content': 'answer', 'reasoning_content': 'synthetic thought'}]}
-        self.assertEqual(self.parse(parse_deepseek_chat_completion, body).model_dump(exclude_unset=True), body)
+        parsed = self.parse(parse_deepseek_chat_completion, body)
+        # Client-echoed reasoning is admitted but never serialized: it can never
+        # enter detection, evidence, knowledge or the upstream release.
+        self.assertEqual(parsed.model_dump(exclude_unset=True), {'model': 'synthetic-model',
+            'messages': [{'role': 'assistant', 'content': 'answer'}]})
         for role, reasoning in (('user', 'thought'), ('tool', 'thought'), ('assistant', True),
                                 ('assistant', {'text': 'thought'})):
             message = {'role': role, 'content': 'answer', 'reasoning_content': reasoning}

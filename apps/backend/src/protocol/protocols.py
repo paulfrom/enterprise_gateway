@@ -44,6 +44,9 @@ class DeepSeekTextBlock(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     type: Literal["text"]
     text: str
+    # Client-supplied block-level ledger; admitted for compatibility only.
+    # Never serialized: excluded from detection, evidence, knowledge and egress.
+    annotations: list[Any] | None = Field(default=None, exclude=True)
 
 
 class DeepSeekMessage(BaseModel):
@@ -53,11 +56,29 @@ class DeepSeekMessage(BaseModel):
     content: str | Annotated[list[DeepSeekTextBlock], Field(min_length=1)] | None = None
     tool_calls: list['DeepSeekToolCall'] | None = None
     tool_call_id: str | None = None
-    reasoning_content: str | None = None
+
+    # Client-echoed assistant reasoning: admitted, but never detected or
+    # forwarded. The upstream contract derives reasoning fresh each turn.
+    reasoning_content: str | None = Field(default=None, exclude=True)
+    reasoning: str | None = Field(default=None, exclude=True)
+
+    # Client-supplied message-level ledger fields: admitted for compatibility
+    # only and never serialized (see DeepSeekTextBlock.annotations).
+    startsNewUserRequest: bool | None = Field(default=None, exclude=True)
+    agent: str | None = Field(default=None, exclude=True)
+    conversationRequestId: str | None = Field(default=None, exclude=True)
+    messageId: str | None = Field(default=None, exclude=True)
+    stepSeq: int | None = Field(default=None, exclude=True)
+    model: str | None = Field(default=None, exclude=True)
+    requestModelId: str | None = Field(default=None, exclude=True)
+    requestModelName: str | None = Field(default=None, exclude=True)
+    traceId: str | None = Field(default=None, exclude=True)
+    rawUsage: dict[str, Any] | None = Field(default=None, exclude=True)
+    usage: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @model_validator(mode='after')
     def _valid_role_content(self):
-        if self.reasoning_content is not None and self.role != 'assistant':
+        if (self.reasoning_content is not None or self.reasoning is not None) and self.role != 'assistant':
             raise ValueError('reasoning role')
         if self.role == 'tool':
             if not self.tool_call_id or self.content is None or self.tool_calls:

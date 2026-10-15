@@ -17,6 +17,6 @@
 
 所有计数拒绝负值、bool、浮点数、字符串；details对象拒绝额外键、空对象或null。非流式与SSE共享同一严格usage类型。计数、null、未出现字段和结构元数据按解析后的实际字段存在性保留；不以默认null补齐供应商未发送的字段。非流式完整验证后返回，SSE在协议终态与真实EOF都验证后释放，坏尾部撤销全部待交付业务帧。
 
-DeepSeek普通思考文本不是签名或不透明状态，响应恢复不签发历史重发证明；Claude签名thinking继续按既有验签/receipt合同处理。请求解析器校验 assistant `reasoning_content` 的字符串类型和角色，入口拒绝未经准入的思考历史。本合同不扩展图片、未知结束原因、logprobs、历史证明或任意供应商扩展。
+DeepSeek普通思考文本不是签名或不透明状态，响应恢复不签发历史重发证明；Claude签名thinking继续按既有验签/receipt合同处理。请求解析器接纳 assistant 回传的思考文本（`reasoning_content` / `reasoning`，仅 `assistant` 角色）与客户端账本字段（块级 `annotations`，消息级 `startsNewUserRequest`、`agent`、`conversationRequestId`、`messageId`、`stepSeq`、`model`、`requestModelId`、`requestModelName`、`traceId`、`rawUsage`、`usage`），但这些字段一律不参与检测、不进入留证与上游外发；历史 assistant 的 `content` 仍每轮重新检测。其余未知键继续 fail-closed 拒绝。本合同不扩展图片、未知结束原因、logprobs、历史证明或任意供应商扩展。
 
 对应检查：`tests/masking/test_deepseek_response_contract.py`、`tests/protocol/test_deepseek_stream_contract.py`，以及既有restorer、stream-events回归。

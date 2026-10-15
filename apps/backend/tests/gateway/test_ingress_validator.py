@@ -39,9 +39,58 @@ class IngressValidatorTests(unittest.TestCase):
         }
         self.exemption_registry = load_exemption_registry(exemption_data)
 
-    def test_unproven_reasoning_history_is_rejected(self):
+    def test_client_echoed_reasoning_and_ledger_are_admitted_but_excluded(self):
         raw = json.dumps({'model': 'deepseek-flash', 'messages': [
-            {'role': 'assistant', 'content': 'hello', 'reasoning_content': 'synthetic-unproven'},
+            {'role': 'system', 'content': 'hello'},
+            {'role': 'assistant',
+             'content': [{'type': 'text', 'text': '历史回复含 13900001111',
+                          'annotations': [{'kind': 'x', 'secret': 'SENSITIVE_BLOCK'}]}],
+             'reasoning_content': 'synthetic-unproven',
+             'reasoning': 'synthetic-alias',
+             'startsNewUserRequest': True,
+             'agent': 'main',
+             'conversationRequestId': 'conv-1',
+             'messageId': 'm-1',
+             'stepSeq': 1,
+             'model': 'deepseek-flash',
+             'requestModelId': 'rm-1',
+             'requestModelName': 'deepseek-flash',
+             'traceId': 'trace-1',
+             'rawUsage': {'prompt_tokens': 1},
+             'usage': {'total_tokens': 2}},
+            {'role': 'user', 'content': '本轮问题'},
+        ]}, ensure_ascii=False)
+        options = dict(raw_body=raw, protocol=DEEPSEEK_CHAT_PROTOCOL, domain='test-domain',
+                       category='cat-approved', policy=self.policy,
+                       allowed_models=frozenset({'deepseek-flash'}))
+        validated = IngressValidator.validate_request(**options)
+
+        # Detection fragments cover only message text; reasoning text and client
+        # ledger fields never enter the detection scope.
+        self.assertEqual([f.json_path for f in validated.fragments],
+                         ['messages[1].content[0].text', 'messages[2].content'])
+        dumped = validated.parsed_request.model_dump()
+        assistant = dumped['messages'][1]
+        for key in ('reasoning_content', 'reasoning', 'startsNewUserRequest', 'agent',
+                    'conversationRequestId', 'messageId', 'stepSeq', 'model',
+                    'requestModelId', 'requestModelName', 'traceId', 'rawUsage', 'usage'):
+            self.assertNotIn(key, assistant)
+        self.assertNotIn('annotations', assistant['content'][0])
+
+    def test_reasoning_on_non_assistant_role_is_rejected(self):
+        raw = json.dumps({'model': 'deepseek-flash', 'messages': [
+            {'role': 'user', 'content': 'hello', 'reasoning_content': 'synthetic-unproven'},
+            {'role': 'user', 'content': 'hello'}]})
+        options = dict(raw_body=raw, protocol=DEEPSEEK_CHAT_PROTOCOL, domain='test-domain',
+                       category='cat-approved', policy=self.policy,
+                       allowed_models=frozenset({'deepseek-flash'}))
+        with self.assertRaises(SafetyError) as refused:
+            IngressValidator.validate_request(**options)
+        self.assertEqual(SafetyCode.PROTOCOL_VIOLATION, refused.exception.code)
+
+    def test_unknown_message_ledger_key_is_still_rejected(self):
+        raw = json.dumps({'model': 'deepseek-flash', 'messages': [
+            {'role': 'assistant', 'content': 'hello', 'compression': 'unproven'},
             {'role': 'user', 'content': 'hello'}]})
         options = dict(raw_body=raw, protocol=DEEPSEEK_CHAT_PROTOCOL, domain='test-domain',
                        category='cat-approved', policy=self.policy,

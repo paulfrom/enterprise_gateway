@@ -491,8 +491,18 @@ class IntegrationRoundtripTests(unittest.TestCase):
     # FAIL-CLOSED GATE TESTS: UPSTREAM CALL COUNT MUST BE 0
     # -------------------------------------------------------------
 
-    def test_untrusted_identity_header_blocks_egress_and_upstream_is_zero(self) -> None:
-        spy = UpstreamSpyTransport(lambda r: httpx.Response(200))
+    def test_untrusted_identity_header_ignored_and_stripped_at_egress(self) -> None:
+        captured_headers = {}
+        def upstream_handler(request):
+            nonlocal captured_headers
+            captured_headers = dict(request.headers)
+            return httpx.Response(200, json={
+                "id": "chatcmpl-headers-test", "object": "chat.completion", "created": 1727950000,
+                "model": "deepseek-flash", "choices": [{"index": 0, "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "response"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}})
+
+        spy = UpstreamSpyTransport(upstream_handler)
         pipeline = self._create_pipeline(DEEPSEEK_CHAT_PROTOCOL, spy)
 
         raw_req = json.dumps({
@@ -501,18 +511,16 @@ class IntegrationRoundtripTests(unittest.TestCase):
         })
 
         with MappingContext(self.domain, "v1", TEST_HMAC_KEY) as ctx:
-            with self.assertRaises(SafetyError) as exc_info:
-                pipeline.process_request(
-                    raw_body=raw_req,
-                    headers={"Authorization": "Bearer synthetic-client-key", "X-User-Id": "attacker-spoofed-id"},
-                    identity=self.identity,
-                    category="STANDARD",
-                    context=ctx,
-                )
-            self.assertEqual(SafetyCode.UNTRUSTED_HEADER_REJECTED, exc_info.exception.code)
+            pipeline.process_request(
+                raw_body=raw_req,
+                headers={"Authorization": "Bearer synthetic-client-key", "X-User-Id": "attacker-spoofed-id"},
+                identity=self.identity,
+                category="STANDARD",
+                context=ctx,
+            )
 
-        # Gate failure: upstream calls MUST be zero
-        self.assertEqual(0, len(spy.calls))
+        self.assertEqual(1, len(spy.calls))
+        self.assertNotIn("x-user-id", captured_headers)
 
     def test_scope_mismatch_blocks_egress_and_upstream_is_zero(self) -> None:
         spy = UpstreamSpyTransport(lambda r: httpx.Response(200))

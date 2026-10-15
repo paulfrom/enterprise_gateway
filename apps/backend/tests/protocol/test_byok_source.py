@@ -71,11 +71,13 @@ class ByokSourceTests(unittest.TestCase):
             with self.subTest(headers=headers), self.assertRaises(SafetyError):
                 self.authenticator().authenticate(headers)
 
-    def test_all_internal_claim_headers_rejected(self):
+    def test_internal_claim_headers_ignored_and_do_not_alter_source(self):
         for header in contract.FORBIDDEN_CLIENT_IDENTITY_HEADERS:
-            with self.subTest(header=header), self.assertRaises(SafetyError) as caught:
-                self.source(**{"authorization": "Bearer synthetic-key-a", header.upper(): "spoof"})
-            self.assertEqual(SafetyCode.UNTRUSTED_HEADER_REJECTED, caught.exception.code)
+            with self.subTest(header=header):
+                source = self.source(**{"authorization": "Bearer synthetic-key-a", header.upper(): "spoof"})
+                self.assertEqual(source.domain, "processing-domain")
+                self.assertEqual(source.tenant_id, "processing-tenant")
+                self.assertEqual(source.source_acl, frozenset({"processing-domain:restricted-candidate"}))
 
     def test_short_lived_source_only_authorizes_model_query(self):
         source = self.source()

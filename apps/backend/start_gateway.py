@@ -275,6 +275,40 @@ def _ner_timeout() -> float | None:
     return value
 
 
+def _detection_cache_options() -> dict[str, object]:
+    """检测结果缓存开关与边界；默认关闭，边界必须为正。
+
+    默认关闭，灰度达标后再改默认值；M2 起 ``on`` 装配真实结果缓存（命中复用
+    ``DetectionOutcome``），``off`` 保持现状不改检测语义。
+    """
+    mode = os.environ.get('GATEWAY_DETECTION_CACHE', 'off')
+    if mode not in ('off', 'on'):
+        raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid detection cache mode')
+    options: dict[str, object] = {'detection_cache_enabled': mode == 'on'}
+    for env_name, parameter in (('GATEWAY_DETECTION_CACHE_ENTRIES', 'detection_cache_entries'),
+                                 ('GATEWAY_DETECTION_CACHE_MAX_SPANS', 'detection_cache_max_spans')):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value < 1:
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid detection cache bounds')
+        options[parameter] = value
+    raw_ttl = os.environ.get('GATEWAY_DETECTION_CACHE_TTL_SECONDS')
+    if raw_ttl is not None:
+        try:
+            ttl = float(raw_ttl)
+        except ValueError:
+            ttl = math.nan
+        if not math.isfinite(ttl) or ttl <= 0:
+            raise SafetyError(SafetyCode.CONTRACT_VIOLATION, 'invalid detection cache ttl')
+        options['detection_cache_ttl_seconds'] = ttl
+    return options
+
+
 def _ner_worker_options() -> dict[str, int | bool]:
     options = {}
     for env_name, parameter, minimum in (
@@ -370,6 +404,7 @@ def build_app(*, providers_config_path: Path | None = None,
     ner_timeout = _ner_timeout()
     override = {} if ner_timeout is None else {"ner_timeout": ner_timeout}
     override.update(_ner_worker_options())
+    override.update(_detection_cache_options())
     return create_runtime_app(provider_config_path=providers, domain=domain, tenant_id=tenant,
         correlation_key=correlation_key, kms=kms,
         dictionary=dictionary, ner_package_dir=Path(_required("GATEWAY_NER_PACKAGE_DIR")),

@@ -52,8 +52,7 @@ class TestByokAuthentication(unittest.TestCase):
 
     def test_missing_conflicting_or_forged_credentials_rejected(self):
         for headers in ({}, {"Authorization": "Basic synthetic-key"},
-                        {"Authorization": "Bearer key", "x-api-key": "other"},
-                        {"Authorization": "Bearer key", "x-subject-id": "employee"}):
+                        {"Authorization": "Bearer key", "x-api-key": "other"}):
             with self.subTest(headers=headers), self.assertRaises(SafetyError):
                 authenticator().authenticate(headers)
 
@@ -154,9 +153,12 @@ class TestMultiProviderRouting(unittest.TestCase):
     def test_protocol_confusion_and_internal_identity_claim_never_send(self):
         response = self.post("claude-test", {"Authorization": "Bearer synthetic"})
         self.assertEqual(response.status_code, 400, response.text)
-        response = self.post("deepseek-chat", {"Authorization": "Bearer synthetic", "x-subject-id": "employee"})
-        self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.received, [])
+        response = self.post("deepseek-chat", {"Authorization": "Bearer synthetic", "x-subject-id": "employee"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.received), 1)
+        req, _ = self.received[-1]
+        self.assertNotIn("x-subject-id", req.headers)
 
 
 if __name__ == "__main__":
