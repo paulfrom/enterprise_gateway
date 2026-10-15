@@ -59,6 +59,7 @@ from detection.ner_windowing import (
     EntitySpan,
     NerWindowMerger,
 )
+from detection.org_hierarchy import extract_hierarchy_org_candidates
 from detection.recognizers import analyze_text, default_recognizers
 from detection.span_resolver import (
     DetectionCandidate,
@@ -461,6 +462,7 @@ class DetectionOrchestrator:
         except (TypeError, ValueError):
             raise SafetyError(SafetyCode.DETECTION_FAILED, "ner") from None
         candidates.extend(candidate_from(span, source="ner") for span in ner_spans)
+        candidates.extend(extract_hierarchy_org_candidates(text, candidates))
         resolved = resolve_spans(candidates, text_length=len(text))
         if metrics is not None:
             metrics['span_resolve_ms'] = metrics.get('span_resolve_ms', 0.0) + (time.perf_counter() - started) * 1000
