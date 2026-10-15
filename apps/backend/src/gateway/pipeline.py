@@ -40,6 +40,7 @@ from types import MappingProxyType
 from protocol.admission import AdmissionLimiter
 from audit.audit_intent import ReleaseIntent
 from audit.audit_watermark import AuditWatermarkGuard, WatermarkAssessment
+from detection.detection_cache import DetectionResultCache
 from detection.detection_orchestrator import DetectionOrchestrator
 from infra.egress_client import BoundEgressClient
 from infra.errors import SafetyCode, SafetyError
@@ -140,6 +141,7 @@ class ProtectedPipeline:
         request_timeout: float = 60.0,
         history_adapter=None,
         detection_failure_mode: str = 'error',
+        detection_result_cache: DetectionResultCache | None = None,
     ) -> None:
         if protocol not in (DEEPSEEK_CHAT_PROTOCOL, CLAUDE_MESSAGES_PROTOCOL):
             raise SafetyError(SafetyCode.CONTRACT_VIOLATION, "unsupported protocol")
@@ -189,6 +191,13 @@ class ProtectedPipeline:
             self._history_adapter=HistoricalStateAdapter(ReasoningStateValidator(
                 validator._verification_key,scope=domain,version=self.version_handle.package_hash,
                 provider_verifier=validator._provider_verifier))
+        # M2 检测结果缓存：把真实缓存绑定到本装配的检测指纹（规则+词典+NER）。
+        # 指纹随快照一次性固定，发布切换后旧条目不再命中，随 TTL/LRU 退出。
+        self._detection_result_cache = detection_result_cache
+        if detection_result_cache is not None:
+            detection_fingerprint = hashlib.sha256(
+                payloads['rules'] + payloads['dictionary'] + payloads['ner']).digest()
+            self.detector.configure_cache(detection_result_cache, detection_fingerprint)
 
     @property
     def channel_id(self): return self._route.channel_id
@@ -397,7 +406,13 @@ class ProtectedPipeline:
                     detection_fragments = tuple(f for f, assessment in zip(detection_fragments, assessments, strict=True)
                                                 if assessment.requires_detection)
                     check_deadline()
-                outcomes = self.detector.detect_many(tuple(f.content for f in detection_fragments), deadline_at=deadline_at,cancel=cancel) if detection_fragments else ()
+                cache_metrics = {} if self._detection_result_cache is not None else None
+                outcomes = self.detector.detect_many(tuple(f.content for f in detection_fragments), deadline_at=deadline_at,cancel=cancel, metrics=cache_metrics) if detection_fragments else ()
+                if cache_metrics:
+                    logging.getLogger(__name__).info(
+                        'DETECTION_CACHE_STATS hits=%d misses=%d evicted=%d entries=%d',
+                        cache_metrics.get('cache_hits', 0), cache_metrics.get('cache_misses', 0),
+                        cache_metrics.get('cache_evictions', 0), cache_metrics.get('cache_entries', 0))
             except Exception as exc:
                 fault_codes = {SafetyCode.DETECTION_FAILED, SafetyCode.DETECTION_INCOMPLETE,
                     SafetyCode.NER_MODEL_INVALID, SafetyCode.NER_OFFSET_UNRECOVERABLE,

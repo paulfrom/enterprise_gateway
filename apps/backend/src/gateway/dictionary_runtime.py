@@ -38,6 +38,7 @@ class DictionaryRuntimeService:
             package_version=old.package_version, allowed_models=old.allowed_models,
             model_mapping=old.model_mapping, request_timeout=old.request_timeout,
             history_adapter=old.history_adapter, detection_failure_mode=old._route.detection_failure_mode,
+            detection_result_cache=old._detection_result_cache,
         ) for old in self._templates)
         router = ProviderRouter({model: pipeline for pipeline in pipelines for model in pipeline.allowed_models})
         redactor = None

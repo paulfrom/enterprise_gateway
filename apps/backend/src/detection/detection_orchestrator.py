@@ -27,6 +27,10 @@ Fail-closed 语义：三路全部成功才产出 ``DetectionOutcome``（最终
 路的错误先抛出（确定性错误优先级）；合并由 span_resolver 完成，
 P0 秘密候选在合并时整请求阻断（``SECRET_DETECTED``）。
 
+编排器可选装配一个检测结果缓存度量钩子（``configure_cache_probe``，M1
+影子度量，见 ``detection_cache_probe``）：它只统计 ``(文本, 装配指纹)``
+重复度与可复用工作量，不改变任何检测/合并/失败语义。
+
 本模块只做检测编排与合并，不做准入、外发许可或留存决策
 （归 admission/evidence_gate/egress 系列）。
 """
@@ -40,6 +44,8 @@ from typing import Any, Callable, Iterable
 
 from presidio_analyzer import EntityRecognizer
 
+from detection.detection_cache import DetectionResultCache
+from detection.detection_cache_probe import DetectionCacheProbe
 from detection.dictionary import CompiledDictionary, analyze_dictionary
 from detection.quick_screen import QuickRiskScreen, QuickScreenConfig
 from infra.errors import SafetyCode, SafetyError
@@ -251,6 +257,53 @@ class DetectionOrchestrator:
                                 if name.endswith(('contexts', 'prefixes')) for value in values)
             self._risk_screener = QuickRiskScreen(dictionary, quick_screen, policy_cues=policy_cues,
                 custom_rules=any(type(r).__module__ != 'detection.recognizers' for r in active))
+        # 检测结果缓存（M1 影子度量 / M2 真实缓存）默认未装配，语义与现状一致。
+        # 两者互斥：M1 只度量、复用同一指纹绑定；M2 直接复用 DetectionOutcome。
+        self._cache_probe: DetectionCacheProbe | None = None
+        self._detection_cache: DetectionResultCache | None = None
+        self._detection_fingerprint: bytes | None = None
+
+    def configure_cache(self, cache: DetectionResultCache | None, detection_fingerprint: bytes | None = None) -> None:
+        """装配真实检测结果缓存（M2）；命中直接复用 ``DetectionOutcome``。
+
+        ``detection_fingerprint`` 必须绑定完整检测装配（规则+词典+NER）。
+        传 ``(None, None)`` 关闭缓存；只传缓存或只传指纹一律拒绝，避免
+        出现「有缓存却拿不到装配指纹」的跨装配误命中。
+        """
+        if cache is None:
+            if detection_fingerprint is not None:
+                raise ValueError("detection fingerprint requires a cache")
+            self._detection_cache = None
+            self._detection_fingerprint = None
+            return
+        if not isinstance(cache, DetectionResultCache):
+            raise TypeError("cache must be a DetectionResultCache or None")
+        if not isinstance(detection_fingerprint, (bytes, bytearray)) or not detection_fingerprint:
+            raise TypeError("detection_fingerprint must be non-empty bytes")
+        self._detection_cache = cache
+        self._detection_fingerprint = bytes(detection_fingerprint)
+        self._cache_probe = None
+
+    def configure_cache_probe(self, probe: DetectionCacheProbe | None, detection_fingerprint: bytes | None = None) -> None:
+        """装配检测结果缓存度量钩子（M1 影子探测，不返回缓存结果）。
+
+        ``detection_fingerprint`` 必须绑定完整检测装配（规则+词典+NER）。
+        传 ``(None, None)`` 关闭度量；只传 probe 或只传指纹一律拒绝，避免
+        出现「有探测器却拿不到装配指纹」的静默失配。
+        """
+        if probe is None:
+            if detection_fingerprint is not None:
+                raise ValueError("detection fingerprint requires a cache probe")
+            self._cache_probe = None
+            self._detection_fingerprint = None
+            return
+        if not isinstance(probe, DetectionCacheProbe):
+            raise TypeError("probe must be a DetectionCacheProbe or None")
+        if not isinstance(detection_fingerprint, (bytes, bytearray)) or not detection_fingerprint:
+            raise TypeError("detection_fingerprint must be non-empty bytes")
+        self._cache_probe = probe
+        self._detection_cache = None
+        self._detection_fingerprint = bytes(detection_fingerprint)
 
     def detect(self, text: str) -> DetectionOutcome:
         return self.detect_many((text,))[0]
@@ -262,6 +315,66 @@ class DetectionOrchestrator:
         if not self._recognizers: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'rule')
         if self._dictionary is None: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'dictionary')
         if self._ner_package_dir is None: raise SafetyError(SafetyCode.DETECTION_INCOMPLETE,'ner')
+        timeout = self._ner_timeout if deadline_at is None else min(self._ner_timeout, deadline_at - time.monotonic())
+        if timeout <= 0 or (cancel is not None and cancel.is_set()):
+            raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
+        if self._detection_cache is not None:
+            return self._detect_many_cached(texts, deadline_at=deadline_at, cancel=cancel, metrics=metrics)
+        probe = self._cache_probe
+        fingerprint = self._detection_fingerprint
+        hit_flags = probe.classify(fingerprint, texts) if probe is not None else None
+        outcomes = self._detect_uncached(texts, deadline_at=deadline_at, cancel=cancel, metrics=metrics)
+        if probe is not None and hit_flags is not None and fingerprint is not None:
+            probe.record(fingerprint, texts, hit_flags,
+                         tuple(len(outcome.spans) for outcome in outcomes))
+            if metrics is not None:
+                metrics['cache_hits'] = sum(hit_flags)
+                metrics['cache_misses'] = len(hit_flags) - sum(hit_flags)
+                metrics['cache_avoided_fragments'] = metrics['cache_hits']
+                metrics['cache_avoided_chars'] = sum(
+                    len(text) for text, hit in zip(texts, hit_flags, strict=True) if hit)
+                metrics['cache_avoided_spans'] = sum(
+                    len(outcome.spans) for outcome, hit in zip(outcomes, hit_flags, strict=True) if hit)
+                snapshot = probe.snapshot()
+                metrics['cache_entries'] = snapshot.entries
+                metrics['cache_evictions'] = snapshot.evictions
+        return outcomes
+
+    def _detect_many_cached(self, texts, *, deadline_at, cancel, metrics) -> tuple[DetectionOutcome, ...]:
+        """真实缓存分区：命中直接复用，只对未命中集合执行三路检测与 NER 合批。
+
+        输出顺序严格保持与原输入一致；任一未命中文本检测失败则整请求抛出，
+        且本批不写缓存（先全部成功、再整体回填），保持 fail-closed 语义。
+        """
+        cache = self._detection_cache
+        fingerprint = self._detection_fingerprint
+        cached = cache.get_many(fingerprint, texts)
+        miss_texts = tuple(text for text, outcome in zip(texts, cached, strict=True)
+                           if outcome is None)
+        miss_outcomes = (self._detect_uncached(miss_texts, deadline_at=deadline_at, cancel=cancel, metrics=metrics)
+                         if miss_texts else ())
+        if miss_texts:
+            cache.put_many(fingerprint, miss_texts, miss_outcomes)
+        if metrics is not None:
+            hits = len(texts) - len(miss_texts)
+            snapshot = cache.snapshot()
+            metrics['cache_hits'] = hits
+            metrics['cache_misses'] = len(miss_texts)
+            metrics['cache_avoided_fragments'] = hits
+            metrics['cache_avoided_chars'] = sum(
+                len(text) for text, outcome in zip(texts, cached, strict=True) if outcome is not None)
+            metrics['cache_avoided_spans'] = sum(
+                len(outcome.spans) for outcome in cached if outcome is not None)
+            metrics['cache_entries'] = snapshot.entries
+            metrics['cache_spans'] = snapshot.spans
+            metrics['cache_evictions'] = snapshot.evictions
+        miss_iter = iter(miss_outcomes)
+        return tuple(outcome if outcome is not None else next(miss_iter) for outcome in cached)
+
+    def _detect_uncached(self, texts, *, deadline_at, cancel, metrics) -> tuple[DetectionOutcome, ...]:
+        """对给定文本集合执行规则→词典→NER→合并（原 ``detect_many`` 正文）。"""
+        if not texts:
+            return ()
         timeout = self._ner_timeout if deadline_at is None else min(self._ner_timeout, deadline_at - time.monotonic())
         if timeout <= 0 or (cancel is not None and cancel.is_set()):
             raise SafetyError(SafetyCode.INFERENCE_TIMEOUT)
@@ -293,7 +406,8 @@ class DetectionOrchestrator:
             ner_results = None
         if ner_results is None:
             raise SafetyError(SafetyCode.DETECTION_FAILED,'ner') from None
-        return tuple(self._detect_with_ner(text, result, metrics=metrics) for text, result in zip(texts, ner_results, strict=True))
+        return tuple(self._detect_with_ner(text, result, metrics=metrics)
+                     for text, result in zip(texts, ner_results, strict=True))
 
     def _detect_with_ner(self, text: str, ner_result, *, metrics: dict[str, float] | None = None) -> DetectionOutcome:
         """执行三路必需检测并合并；任何一路失败 → 整请求 ``SafetyError``。
